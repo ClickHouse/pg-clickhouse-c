@@ -1,0 +1,4 @@
+comment = 'pg-clickhouse-c round-trip test harness'
+default_version = '1.0'
+module_pathname = '$libdir/pgch_test'
+relocatable = true
