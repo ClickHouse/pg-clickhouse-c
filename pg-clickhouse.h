@@ -37,16 +37,19 @@ extern "C" {
 /* ---- errors --------------------------------------------------------- */
 
 /*
- * Prepended to every message this library ereports. Point at a literal that
- * outlives the backend, eg "pg_chdb: ". Empty by default.
+ * Prepended to every message this library ereports. Set from the build, eg
+ * PG_CPPFLAGS += -DPGCH_MSG_PREFIX='"pg_chdb: "', so every TU expanding
+ * pgch_error agrees. Must be a string literal. Empty by default.
  */
-extern const char* pgch_msg_prefix;
+#ifndef PGCH_MSG_PREFIX
+#define PGCH_MSG_PREFIX ""
+#endif
 
 #define pgch_error(sqlstate, msg)                                                      \
-    ereport(ERROR, errcode(sqlstate), errmsg("%s%s", pgch_msg_prefix, msg))
+    ereport(ERROR, errcode(sqlstate), errmsg(PGCH_MSG_PREFIX "%s", msg))
 
 #define pgch_errorf(sqlstate, fmt, ...)                                                \
-    ereport(ERROR, errcode(sqlstate), errmsg("%s" fmt, pgch_msg_prefix, __VA_ARGS__))
+    ereport(ERROR, errcode(sqlstate), errmsg(PGCH_MSG_PREFIX fmt, __VA_ARGS__))
 
 /* ereport ERROR carrying err->msg, with `what` between prefix and message. */
 pg_noreturn extern void
@@ -228,8 +231,6 @@ pgch_buf_io(pgch_buf* b, chc_io* out_io);
 /* CH Date / Date32 / DateTime epoch is unix; offset to PG epoch (2000-01-01) */
 #define PGCH__DATE_OFFSET (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE)
 
-const char* pgch_msg_prefix = "";
-
 /* ---- errors --------------------------------------------------------- */
 
 void
@@ -237,7 +238,7 @@ pgch_raise(const chc_err* err, int sqlstate, const char* what) {
     const char* m = (err && err->msg[0]) ? err->msg : "unknown error";
 
     ereport(
-        ERROR, errcode(sqlstate), errmsg("%s%s%s", pgch_msg_prefix, what ? what : "", m)
+        ERROR, errcode(sqlstate), errmsg(PGCH_MSG_PREFIX "%s%s", what ? what : "", m)
     );
 }
 

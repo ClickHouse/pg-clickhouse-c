@@ -187,11 +187,11 @@ git submodule add https://github.com/ClickHouse/clickhouse-c vendor/clickhouse-c
 git submodule add https://github.com/ClickHouse/pg-clickhouse-c vendor/pg-clickhouse-c
 ```
 
-`pgch_msg_prefix` prefixes every message the library raises; point it at your
-extension's name from `_PG_init`:
+`PGCH_MSG_PREFIX` prefixes every message the library raises. Define it in the
+build, not in a single TU, so every TU expanding `pgch_error` agrees:
 
-```c
-pgch_msg_prefix = "pg_chdb: ";
+```make
+PG_CPPFLAGS += -DPGCH_MSG_PREFIX='"pg_chdb: "'
 ```
 
 ## Headers

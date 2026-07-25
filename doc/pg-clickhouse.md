@@ -11,7 +11,7 @@ including.
 ## Errors
 
 ```c
-extern const char *pgch_msg_prefix;     /* "" by default */
+#define PGCH_MSG_PREFIX ""                  /* unless the build defines it */
 
 #define pgch_error(sqlstate, msg)
 #define pgch_errorf(sqlstate, fmt, ...)
@@ -19,9 +19,14 @@ extern const char *pgch_msg_prefix;     /* "" by default */
 pg_noreturn void pgch_raise(const chc_err *err, int sqlstate, const char *what);
 ```
 
-Every message the library raises starts with `pgch_msg_prefix`. Set it once
-from `_PG_init` to a string literal that outlives the backend; it is read, not
-copied.
+Every message the library raises starts with `PGCH_MSG_PREFIX`, concatenated
+into the `errmsg` format at compile time. It must be a string literal, and
+belongs in the build rather than one TU so every TU expanding `pgch_error`
+agrees:
+
+```make
+PG_CPPFLAGS += -DPGCH_MSG_PREFIX='"pg_chdb: "'
+```
 
 `pgch_raise` turns a clickhouse-c `chc_err` into `ereport(ERROR)`, splicing
 `what` between the prefix and `err->msg`:

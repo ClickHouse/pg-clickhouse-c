@@ -33,14 +33,6 @@
 
 PG_MODULE_MAGIC;
 
-void
-_PG_init(void);
-
-void
-_PG_init(void) {
-    pgch_msg_prefix = "pgch: ";
-}
-
 static chc_type*
 parse_ch_type(text* name) {
     char* s = text_to_cstring(name);

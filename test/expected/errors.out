@@ -1,4 +1,4 @@
--- Rejections. Every message carries the pgch_msg_prefix _PG_init set.
+-- Rejections. Every message carries the PGCH_MSG_PREFIX the Makefile sets.
 SET lc_messages = 'C';
 -- NULL into a column ClickHouse declared NOT NULL.
 SELECT pgch_roundtrip('Int32', NULL::int4);

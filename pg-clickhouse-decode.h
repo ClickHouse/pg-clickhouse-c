@@ -1163,10 +1163,10 @@ pgch_reader_next(pgch_reader* r) {
         MemoryContext oldcxt = MemoryContextSwitchTo(r->cxt);
         ErrorData* edata     = CopyErrorData();
         const char* msg      = edata->message ? edata->message : "unknown error";
-        size_t plen          = strlen(pgch_msg_prefix);
+        size_t plen          = sizeof(PGCH_MSG_PREFIX) - 1;
 
         /* Callers re-prefix when reporting; don't carry it twice. */
-        if (plen && strncmp(msg, pgch_msg_prefix, plen) == 0) {
+        if (plen && strncmp(msg, PGCH_MSG_PREFIX, plen) == 0) {
             msg += plen;
         }
         r->error = pstrdup(msg);
