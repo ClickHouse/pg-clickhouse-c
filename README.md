@@ -172,19 +172,24 @@ normally defines `CHC_IMPLEMENTATION` too, and must if it calls
 `pgch_in_alloc` (`sizeof(chc_in)` is visible only where clickhouse-c's
 implementation is compiled).
 
-```make
-CH_C_DIR ?= vendor/clickhouse-c
-PGCH_DIR ?= vendor/pg-clickhouse-c
+clickhouse-c is vendored here at `clickhouse-c/`, pinned to a commit these
+headers compile against. It has no stable API, so take that pin rather than a
+second checkout: clickhouse-c types are in this library's own signatures, and
+two copies on the include path means whichever lands first wins silently.
 
-# -isystem keeps their warnings out of your -Werror build.
+```make
+PGCH_DIR ?= vendor/pg-clickhouse-c
+CH_C_DIR ?= $(PGCH_DIR)/clickhouse-c
+
+# Treat dependency headers as system headers
 PG_CPPFLAGS = -isystem $(CH_C_DIR) -isystem $(PGCH_DIR)
 ```
 
-Both are usually vendored as submodules:
+One submodule, cloned recursively:
 
 ```sh
-git submodule add https://github.com/ClickHouse/clickhouse-c vendor/clickhouse-c
 git submodule add https://github.com/ClickHouse/pg-clickhouse-c vendor/pg-clickhouse-c
+git submodule update --init --recursive
 ```
 
 `PGCH_MSG_PREFIX` prefixes every message the library raises. Define it in the
