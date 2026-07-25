@@ -166,7 +166,7 @@ with its escaping.
 
 ## Integration
 
-PostgreSQL 14 and up. Both libraries are header-only. Exactly one TU defines `PGCH_IMPLEMENTATION`
+PostgreSQL 13 and up. Both libraries are header-only. Exactly one TU defines `PGCH_IMPLEMENTATION`
 before including; every other TU includes for declarations only. That TU
 normally defines `CHC_IMPLEMENTATION` too, and must if it calls
 `pgch_in_alloc` (`sizeof(chc_in)` is visible only where clickhouse-c's
@@ -218,6 +218,7 @@ Decode and encode each depend only on the core header; take one or both.
 | `JSON`, `Object` | `jsonb` (or `json`, see below) |
 | `Date`, `Date32` | `date` |
 | `DateTime`, `DateTime64(P)` | `timestamptz` |
+| `Time`, `Time64(P)` | `time` |
 | `UUID` | `uuid` |
 | `IPv4`, `IPv6` | `inet` |
 | `Nullable(T)` | `T`, nullable |
@@ -229,6 +230,14 @@ Decode and encode each depend only on the core header; take one or both.
 `String` and `FixedString` verbatim. Decoding a `json` column instead of
 `jsonb` keeps ClickHouse's verbatim document text: preset
 `reader.coltypes[i] = JSONOID` after `pgch_reader_init`.
+
+A PG type with no arm of its own reaches a column through a cast, so `money`
+lands in `Decimal` and a domain lands wherever its base type does. Into a
+`String` column that cast is the type's own output function, which is how
+`interval`, `bit`, `macaddr`, the geo types and user enums get out; a `String`
+column decodes back through the target's input function. `pgch_ch_type_for`
+names the CH type to declare for a PG column, and
+`pgch_structure_from_tupdesc` does it for a whole descriptor.
 
 Encoding accepts a real PG array or an already-built `pgch_array` for
 `Array(T)` columns. `Tuple` decodes but does not encode: there is no PG
@@ -251,7 +260,9 @@ output_format_native_write_json_as_string = 1
 ```
 
 which exists from 24.10 and makes the server serialize `JSON` as `String`,
-the only `JSON` serialization either library handles.
+the only `JSON` serialization either library handles. Both are
+`PGCH_NATIVE_SETTINGS`, so a query builder can splice the pair in rather than
+retype it and drift from the library it is compiled against.
 
 ## Testing
 
@@ -273,10 +284,12 @@ make -C test installcheck    # needs superuser
   for the wire loop.
 * Block framing policy. When to cut a block is the caller's call;
   `pgch_writer_bytes` and `pgch_writer_rows` are there to decide it.
-* SQL generation. Deparsing, `structure=` strings, PG-type-to-CH-type
-  choices: the consumer's, and generally opinionated per consumer.
-* Catalog integration. No FDW options, no `TupleDesc` matching by column
-  name, no relation lookups.
+* SQL generation. Deparsing, and where a `structure=` string goes in a query,
+  are the consumer's. The type names in it are not: they are whatever these
+  appenders accept, which is why `pgch_ch_type_for` and
+  `pgch_structure_from_tupdesc` live here.
+* Catalog integration. No FDW options, no matching a `TupleDesc` to a block by
+  column name, no relation lookups.
 
 [clickhouse-c]: https://github.com/ClickHouse/clickhouse-c
 [pg_clickhouse]: https://github.com/ClickHouse/pg_clickhouse

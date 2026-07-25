@@ -1,6 +1,7 @@
 -- Datum -> Native -> Datum round trips, entirely in memory.
 SET TimeZone = 'UTC';
 SET DateStyle = 'ISO, MDY';
+SET IntervalStyle = 'postgres';
 
 -- CH type -> PG type mapping.
 SELECT t, pgch_pgtype(t) FROM unnest(ARRAY[
@@ -63,6 +64,11 @@ SELECT pgch_roundtrip('DateTime', '2024-01-15 12:34:56+00'::timestamptz),
        pgch_roundtrip('DateTime64(6)', '2024-01-15 12:34:56.123456+00'::timestamptz),
        pgch_roundtrip('DateTime64(9)', '2024-01-15 12:34:56.123456+00'::timestamptz);
 
+SELECT pgch_roundtrip('Time', '12:34:56'::time),
+       pgch_roundtrip('Time64(3)', '01:00:00'::time),
+       pgch_roundtrip('Time64(6)', '12:34:56.123456'::time),
+       pgch_roundtrip('Time64(9)', '23:59:59.999999'::time);
+
 SELECT pgch_roundtrip('UUID', '11111111-2222-3333-4444-555555555555'::uuid),
        pgch_roundtrip('IPv4', '192.168.1.1'::inet),
        pgch_roundtrip('IPv6', '2001:db8::1'::inet);
@@ -93,10 +99,39 @@ SELECT pgch_roundtrip('Array(LowCardinality(String))', ARRAY['a', 'b', 'a']::tex
        pgch_roundtrip('Array(Date)', ARRAY['2024-01-15', '1999-12-31']::date[]),
        pgch_roundtrip('Array(Decimal(9,2))', ARRAY[1.25, -3.5]::numeric[]);
 
+-- Types with no direct arm reach the column through a cast, resolved against
+-- the PG type the column maps to.
+SET lc_monetary = 'C';
+CREATE DOMAIN dint AS int4;
+SELECT pgch_roundtrip('UInt32', 12345::oid),
+       pgch_roundtrip('Int32', 7::dint),
+       pgch_roundtrip('UInt64', '42'::xid8),
+       pgch_roundtrip('Decimal(9,2)', '3.00'::money),
+       pgch_roundtrip('Int64', '42'::jsonb);
+
+SELECT pgch_roundtrip('String', 'vc'::varchar),
+       pgch_roundtrip('String', 'bp'::bpchar),
+       pgch_roundtrip('String', 'nm'::name),
+       pgch_roundtrip('String', 'c'::"char"),
+       pgch_roundtrip('FixedString(4)', 'fs'::varchar),
+       pgch_roundtrip('Enum8(''1 day'' = 1)', '1 day'::interval);
+
+-- Elements take the same fallback, resolved against the element type.
+SELECT pgch_roundtrip('Array(String)', ARRAY['3.00', '-4.50']::money[]),
+       pgch_roundtrip('Array(Nullable(String))', ARRAY['1 day', NULL]::interval[]),
+       pgch_roundtrip('Array(Array(String))', ARRAY[['1 day'], ['2 hours']]::interval[]);
+
 -- Multiple rows in one block, and multiple blocks in one stream.
 SELECT pgch_roundtrip_rows('Int32', ARRAY[1, 2, 3]::int4[]);
 SELECT pgch_decode(pgch_encode_rows('Int32', ARRAY[1, 2]::int4[]) ||
                    pgch_encode_rows('Int32', ARRAY[3]::int4[]));
+
+-- Same stream through a chunk source, whose refill path a single submit of
+-- every byte never reaches. One byte at a time crosses every field boundary.
+SELECT pgch_decode_chunks(pgch_encode_rows('Int32', ARRAY[1, 2]::int4[]) ||
+                          pgch_encode_rows('Int32', ARRAY[3]::int4[]), 1),
+       pgch_decode_chunks(pgch_encode_rows('String', ARRAY['a', 'bb']::text[]), 3),
+       pgch_decode_chunks(pgch_encode_rows('Int32', ARRAY[]::int4[]), 4);
 
 -- Zero rows still carries a schema.
 SELECT pgch_decode(pgch_encode_rows('Int32', ARRAY[]::int4[]));
@@ -112,4 +147,31 @@ SELECT pgch_decode(
     '\x2a000000ffffffff'::bytea ||
     '\x02' || convert_to('hi', 'UTF8') ||
     '\x03' || convert_to('bye', 'UTF8')
+);
+
+-- Tuple into a user-defined composite, the shape a foreign table declares for
+-- a Tuple column. Fields are matched by position, so names may differ.
+CREATE TYPE tupformat AS (a int, b text, c float4);
+SELECT pgch_decode_as(
+    pgch_block('Tuple(Int32, String, Float32)', 2,
+               '\x2a000000ffffffff'::bytea ||
+               '\x02' || convert_to('hi', 'UTF8') || '\x00'::bytea ||
+               '\x0000c03f00002040'::bytea),
+    NULL::tupformat
+);
+
+-- Nested Tuple takes the composite the outer type declares for that field,
+-- both when the first row carries it and when the first row is NULL.
+CREATE TYPE nested_inner AS (a int);
+CREATE TYPE nested_outer AS (t nested_inner, b text);
+SELECT pgch_decode_as(
+    pgch_block('Tuple(Tuple(Int32), String)', 1,
+               '\x07000000'::bytea || '\x03' || convert_to('end', 'UTF8')),
+    NULL::nested_outer
+);
+SELECT pgch_decode_as(
+    pgch_block('Tuple(Nullable(Tuple(Int32)), String)', 2,
+               '\x0100'::bytea || '\x0000000009000000'::bytea ||
+               '\x00'::bytea || '\x02' || convert_to('ok', 'UTF8')),
+    NULL::nested_outer
 );

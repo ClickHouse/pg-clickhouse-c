@@ -1,0 +1,315 @@
+-- The third face of the bridge: PG column -> CH type name, and the two
+-- directions over the types that only reach ClickHouse as String.
+SET lc_monetary = 'C';
+SET TimeZone = 'UTC';
+SET DateStyle = 'ISO, MDY';
+SET IntervalStyle = 'postgres';
+-- The mapping table itself.
+SELECT d AS pg_type, pgch_chtype(d, true) AS notnull, pgch_chtype(d) AS nullable
+FROM unnest(ARRAY[
+    'bool', 'int2', 'int4', 'int8', 'oid', 'xid8', 'float4', 'float8',
+    'numeric', 'numeric(12,6)', 'numeric(9)', 'numeric(80,2)',
+    'text', 'varchar(8)', 'bpchar(6)', 'name', '"char"', 'bytea',
+    'date', 'time', 'timestamp', 'timestamptz', 'timetz', 'interval',
+    'uuid', 'json', 'jsonb',
+    'inet', 'cidr', 'macaddr', 'macaddr8', 'bit(4)', 'varbit(6)',
+    'point', 'polygon', 'money', 'tsvector', 'tsquery', 'jsonpath',
+    'int4[]', 'text[]', 'numeric(12,6)[]', 'interval[]'
+]) AS d;
+     pg_type     |       notnull        |            nullable            
+-----------------+----------------------+--------------------------------
+ bool            | Bool                 | Nullable(Bool)
+ int2            | Int16                | Nullable(Int16)
+ int4            | Int32                | Nullable(Int32)
+ int8            | Int64                | Nullable(Int64)
+ oid             | UInt32               | Nullable(UInt32)
+ xid8            | UInt64               | Nullable(UInt64)
+ float4          | Float32              | Nullable(Float32)
+ float8          | Float64              | Nullable(Float64)
+ numeric         | Decimal256(38)       | Nullable(Decimal256(38))
+ numeric(12,6)   | Decimal(12,6)        | Nullable(Decimal(12,6))
+ numeric(9)      | Decimal(9,0)         | Nullable(Decimal(9,0))
+ numeric(80,2)   | Decimal256(38)       | Nullable(Decimal256(38))
+ text            | String               | Nullable(String)
+ varchar(8)      | String               | Nullable(String)
+ bpchar(6)       | String               | Nullable(String)
+ name            | String               | Nullable(String)
+ "char"          | String               | Nullable(String)
+ bytea           | String               | Nullable(String)
+ date            | Date32               | Nullable(Date32)
+ time            | Time64(6)            | Nullable(Time64(6))
+ timestamp       | DateTime64(6)        | Nullable(DateTime64(6))
+ timestamptz     | DateTime64(6, 'UTC') | Nullable(DateTime64(6, 'UTC'))
+ timetz          | String               | Nullable(String)
+ interval        | String               | Nullable(String)
+ uuid            | UUID                 | Nullable(UUID)
+ json            | String               | Nullable(String)
+ jsonb           | String               | Nullable(String)
+ inet            | String               | Nullable(String)
+ cidr            | String               | Nullable(String)
+ macaddr         | String               | Nullable(String)
+ macaddr8        | String               | Nullable(String)
+ bit(4)          | String               | Nullable(String)
+ varbit(6)       | String               | Nullable(String)
+ point           | String               | Nullable(String)
+ polygon         | String               | Nullable(String)
+ money           | String               | Nullable(String)
+ tsvector        | String               | Nullable(String)
+ tsquery         | String               | Nullable(String)
+ jsonpath        | String               | Nullable(String)
+ int4[]          | Array(Int32)         | Array(Nullable(Int32))
+ text[]          | Array(String)        | Array(Nullable(String))
+ numeric(12,6)[] | Array(Decimal(12,6)) | Array(Nullable(Decimal(12,6)))
+ interval[]      | Array(String)        | Array(Nullable(String))
+(43 rows)
+
+-- Per-consumer choices. Nullable(JSON) is prohibited server side, so JSON
+-- stays bare; Nullable rides inside LowCardinality, not above it.
+SELECT pgch_chtype('jsonb', json_as_json => true) AS json_null,
+       pgch_chtype('jsonb', true, json_as_json => true) AS json_notnull,
+       pgch_chtype('text', low_cardinality => true) AS lc_null,
+       pgch_chtype('text', true, low_cardinality => true) AS lc_notnull,
+       pgch_chtype('numeric', numeric_as_string => true) AS num_string;
+ json_null | json_notnull |             lc_null              |       lc_notnull       |    num_string    
+-----------+--------------+----------------------------------+------------------------+------------------
+ JSON      | JSON         | LowCardinality(Nullable(String)) | LowCardinality(String) | Nullable(String)
+(1 row)
+
+-- A domain takes its base type's mapping, typmod included.
+CREATE DOMAIN dcount AS int4;
+CREATE DOMAIN dvc AS varchar(8);
+SELECT pgch_chtype('dcount', true), pgch_chtype('dvc', true), pgch_chtype('dcount[]', true);
+ pgch_chtype | pgch_chtype | pgch_chtype  
+-------------+-------------+--------------
+ Int32       | String      | Array(Int32)
+(1 row)
+
+-- The two faces agree: what the mapping declares decodes back into the PG
+-- type it was declared for, or into text where it went through String.
+SELECT d AS pg_type, c AS ch_type, pgch_pgtype(c) AS decodes_as
+FROM (SELECT d, pgch_chtype(d, true) AS c FROM unnest(ARRAY[
+    'bool', 'int2', 'int4', 'int8', 'oid', 'xid8', 'float4', 'float8',
+    'numeric(12,6)', 'text', 'date', 'time', 'timestamptz', 'uuid',
+    'int4[]', 'text[]'
+]) AS d) q;
+    pg_type    |       ch_type        |        decodes_as        
+---------------+----------------------+--------------------------
+ bool          | Bool                 | boolean
+ int2          | Int16                | smallint
+ int4          | Int32                | integer
+ int8          | Int64                | bigint
+ oid           | UInt32               | bigint
+ xid8          | UInt64               | bigint
+ float4        | Float32              | real
+ float8        | Float64              | double precision
+ numeric(12,6) | Decimal(12,6)        | numeric
+ text          | String               | text
+ date          | Date32               | date
+ time          | Time64(6)            | time without time zone
+ timestamptz   | DateTime64(6, 'UTC') | timestamp with time zone
+ uuid          | UUID                 | uuid
+ int4[]        | Array(Int32)         | integer[]
+ text[]        | Array(String)        | text[]
+(16 rows)
+
+-- Both directions over one table of (literal, PG type, CH type) triples: the
+-- encoder reaches String through the type's output function, the decoder
+-- comes back through its input function.
+CREATE FUNCTION rt(lit text, typ text, ch text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE res text;
+BEGIN
+    EXECUTE format('SELECT pgch_roundtrip_as(%L, %s::%s)', ch, lit, typ) INTO res;
+    RETURN res;
+END $$;
+CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
+SELECT typ, rt(lit, typ, ch) AS scalar, rt(arr, typ || '[]', 'Array(' || ch || ')') AS array
+FROM (VALUES
+    ('''1 day 02:03:04''',      'ARRAY[''1 day'', ''2 hours'']',      'interval', 'String'),
+    ('''12:34:56+02''',         'ARRAY[''12:34:56+02'']',             'timetz',   'String'),
+    ('''a b''',                 'ARRAY[''a b'']',                     'tsvector', 'String'),
+    ('''a & b''',               'ARRAY[''a & b'']',                   'tsquery',  'String'),
+    ('''$.a[0]''',              'ARRAY[''$.a[0]'']',                  'jsonpath', 'String'),
+    ('''3.00''',                'ARRAY[''3.00'', ''-4.50'']',         'money',    'String'),
+    ('''08:00:2b:01:02:03''',   'ARRAY[''08:00:2b:01:02:03'']',       'macaddr',  'String'),
+    ('''08:00:2b:01:02:03:04:05''', 'ARRAY[''08:00:2b:01:02:03:04:05'']', 'macaddr8', 'String'),
+    ('''10.0.0.0/8''',          'ARRAY[''10.0.0.0/8'', ''::1/128'']',  'cidr',     'String'),
+    ('B''1010''',               'ARRAY[B''1010'']',                   'bit(4)',   'String'),
+    ('B''101''',                'ARRAY[B''101'']',                    'varbit',   'String'),
+    ('''(1,2)''',               'ARRAY[''(1,2)'']',                   'point',    'String'),
+    ('''((0,0),(1,1),(2,0))''', 'ARRAY[''((0,0),(1,1))'']',           'polygon',  'String'),
+    ('''<(1,2),3>''',           'ARRAY[''<(1,2),3>'']',               'circle',   'String'),
+    ('''ok''',                  'ARRAY[''ok'', ''sad'']',             'mood',     'String'),
+    ('''ok''',                  'ARRAY[''ok'', ''sad'']',             'mood',     'LowCardinality(String)')
+) v(lit, arr, typ, ch);
+   typ    |         scalar          |           array           
+----------+-------------------------+---------------------------
+ interval | 1 day 02:03:04          | {"1 day",02:00:00}
+ timetz   | 12:34:56+02             | {12:34:56+02}
+ tsvector | 'a' 'b'                 | {"'a' 'b'"}
+ tsquery  | 'a' & 'b'               | {"'a' & 'b'"}
+ jsonpath | $."a"[0]                | {"$.\"a\"[0]"}
+ money    | $3.00                   | {$3.00,-$4.50}
+ macaddr  | 08:00:2b:01:02:03       | {08:00:2b:01:02:03}
+ macaddr8 | 08:00:2b:01:02:03:04:05 | {08:00:2b:01:02:03:04:05}
+ cidr     | 10.0.0.0/8              | {10.0.0.0/8,::1/128}
+ bit(4)   | 1010                    | {1010}
+ varbit   | 101                     | {101}
+ point    | (1,2)                   | {"(1,2)"}
+ polygon  | ((0,0),(1,1),(2,0))     | {"((0,0),(1,1))"}
+ circle   | <(1,2),3>               | {"<(1,2),3>"}
+ mood     | ok                      | {ok,sad}
+ mood     | ok                      | {ok,sad}
+(16 rows)
+
+-- Conversion state from the column's CH type rather than from a row, which is
+-- the only way a column whose first row is NULL, or which is NULL throughout,
+-- gets one. Same shapes as the value-driven path, including the nested Tuple
+-- whose field type comes off the target composite.
+CREATE TYPE tupshape AS (a int, b text, c float4);
+CREATE TYPE inner_shape AS (a int);
+CREATE TYPE outer_shape AS (t inner_shape, b text);
+SELECT pgch_decode_typed(pgch_encode_rows('Nullable(String)',
+                                          ARRAY[NULL, '1 day']::text[]),
+                         NULL::interval),
+       pgch_decode_typed(pgch_encode_rows('Nullable(String)',
+                                          ARRAY[NULL, NULL]::text[]),
+                         NULL::interval),
+       pgch_decode_typed(pgch_encode('Array(Int64)', ARRAY[1, 2]::int8[]),
+                         NULL::int4[]);
+ pgch_decode_typed | pgch_decode_typed | pgch_decode_typed 
+-------------------+-------------------+-------------------
+ {NULL,"1 day"}    | {NULL,NULL}       | {"{1,2}"}
+(1 row)
+
+SELECT pgch_decode_typed(
+    pgch_block('Tuple(Int32, String, Float32)', 1,
+               '\x2a000000'::bytea || '\x02' || convert_to('hi', 'UTF8') ||
+               '\x0000c03f'::bytea),
+    NULL::tupshape
+);
+ pgch_decode_typed 
+-------------------
+ {"(42,hi,1.5)"}
+(1 row)
+
+SELECT pgch_decode_typed(
+    pgch_block('Tuple(Nullable(Tuple(Int32)), String)', 2,
+               '\x0100'::bytea || '\x0000000009000000'::bytea ||
+               '\x00'::bytea || '\x02' || convert_to('ok', 'UTF8')),
+    NULL::outer_shape
+);
+     pgch_decode_typed      
+----------------------------
+ {"(,\"\")","(\"(9)\",ok)"}
+(1 row)
+
+-- Element-wise conversion on decode, where the array types differ outright.
+SELECT pgch_decode_as(pgch_encode('Array(Int64)', ARRAY[1, 2, 3]::int8[]), NULL::int4[]),
+       pgch_decode_as(pgch_encode('Array(Array(Int64))', ARRAY[[1, 2], [3, 4]]::int8[]),
+                      NULL::int4[]),
+       pgch_decode_as(pgch_encode('Array(Nullable(String))',
+                                  ARRAY['1 day', NULL]::text[]), NULL::interval[]);
+ pgch_decode_as |  pgch_decode_as   |    pgch_decode_as    
+----------------+-------------------+----------------------
+ {"{1,2,3}"}    | {"{{1,2},{3,4}}"} | {"{\"1 day\",NULL}"}
+(1 row)
+
+-- A domain over an array reports no element type of its own, so the element
+-- type comes off its base.
+CREATE DOMAIN dints AS int4[];
+SELECT pgch_decode_as(pgch_encode('Array(Int32)', ARRAY[1, 2]::int4[]), NULL::dints),
+       pgch_decode_as(pgch_encode('Array(Int64)', ARRAY[1, 2]::int8[]), NULL::dints);
+ pgch_decode_as | pgch_decode_as 
+----------------+----------------
+ {"{1,2}"}      | {"{1,2}"}
+(1 row)
+
+-- A whole relation through its own declared structure and back, which is the
+-- shape a COPY takes: every column's CH type from pgch_ch_type_for, rows from
+-- pgch_append_slot, conversion state from the column type rather than a row.
+CREATE TABLE copyshape (
+    id      int          NOT NULL,
+    name    varchar(16),
+    amount  numeric(9,2),
+    ival    interval,
+    mac     macaddr,
+    ip      inet,
+    when_   timestamptz,
+    day     date,
+    tags    text[],
+    counts  int8[]       NOT NULL,
+    doc     jsonb
+);
+INSERT INTO copyshape VALUES
+    (1, 'first', 12.34, '1 day 02:03:04', '08:00:2b:01:02:03', '10.0.0.1',
+     '2024-01-15 12:34:56.123456+00', '2024-01-15', ARRAY['a', 'b c'],
+     ARRAY[1, 2, 3], '{"a": [1, 2]}'),
+    (2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ARRAY[]::int8[], NULL);
+SELECT pgch_structure('copyshape');
+                                                                                                                            pgch_structure                                                                                                                             
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ id Int32, name Nullable(String), amount Nullable(Decimal(9,2)), ival Nullable(String), mac Nullable(String), ip Nullable(String), when_ Nullable(DateTime64(6, 'UTC')), day Nullable(Date32), tags Array(Nullable(String)), counts Array(Int64), doc Nullable(String)
+(1 row)
+
+SELECT unnest(pgch_table_roundtrip('copyshape', null_array_empty => true));
+                                                              unnest                                                              
+----------------------------------------------------------------------------------------------------------------------------------
+ 1|first|12.34|1 day 02:03:04|08:00:2b:01:02:03|10.0.0.1|2024-01-15 12:34:56.123456+00|2024-01-15|{a,"b c"}|{1,2,3}|{"a": [1, 2]}
+ 2|NULL|NULL|NULL|NULL|NULL|NULL|NULL|{}|{}|NULL
+(2 rows)
+
+-- Same relation, with the options a consumer might pick instead.
+SELECT pgch_structure('copyshape', json_as_json => true, low_cardinality => true);
+                                                                                                                                                              pgch_structure                                                                                                                                                               
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ id Int32, name LowCardinality(Nullable(String)), amount Nullable(Decimal(9,2)), ival LowCardinality(Nullable(String)), mac LowCardinality(Nullable(String)), ip LowCardinality(Nullable(String)), when_ Nullable(DateTime64(6, 'UTC')), day Nullable(Date32), tags Array(LowCardinality(Nullable(String))), counts Array(Int64), doc JSON
+(1 row)
+
+-- Dropped columns leave no hole: the structure and the appends skip together.
+ALTER TABLE copyshape DROP COLUMN mac;
+SELECT pgch_structure('copyshape');
+                                                                                                                 pgch_structure                                                                                                                  
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ id Int32, name Nullable(String), amount Nullable(Decimal(9,2)), ival Nullable(String), ip Nullable(String), when_ Nullable(DateTime64(6, 'UTC')), day Nullable(Date32), tags Array(Nullable(String)), counts Array(Int64), doc Nullable(String)
+(1 row)
+
+SELECT unnest(pgch_table_roundtrip('copyshape', null_array_empty => true));
+                                                     unnest                                                     
+----------------------------------------------------------------------------------------------------------------
+ 1|first|12.34|1 day 02:03:04|10.0.0.1|2024-01-15 12:34:56.123456+00|2024-01-15|{a,"b c"}|{1,2,3}|{"a": [1, 2]}
+ 2|NULL|NULL|NULL|NULL|NULL|NULL|{}|{}|NULL
+(2 rows)
+
+-- NaN and Infinity: raising, NULL and zero.
+CREATE TABLE nonfinite (f float8, n numeric(9,2));
+INSERT INTO nonfinite VALUES ('NaN', 1.5), ('Infinity', 'NaN'), (2.5, 3.25);
+SELECT unnest(pgch_table_roundtrip('nonfinite', nonfinite => 1)) AS as_null;
+  as_null  
+-----------
+ NULL|1.50
+ NULL|NULL
+ 2.5|3.25
+(3 rows)
+
+SELECT unnest(pgch_table_roundtrip('nonfinite', nonfinite => 2)) AS as_zero;
+ as_zero  
+----------
+ 0|1.50
+ 0|0.00
+ 2.5|3.25
+(3 rows)
+
+SELECT pgch_roundtrip('Float64', 'NaN'::float8) AS float_keeps_nan;
+ float_keeps_nan 
+-----------------
+ NaN
+(1 row)
+
+-- The settings a query has to carry, versioned with the library rather than
+-- retyped into each consumer's query builder.
+SELECT pgch_native_settings();
+                                       pgch_native_settings                                       
+--------------------------------------------------------------------------------------------------
+ output_format_native_encode_types_in_binary_format=0,output_format_native_write_json_as_string=1
+(1 row)
+

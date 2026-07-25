@@ -22,6 +22,8 @@
 
 #include "pg-clickhouse.h"
 
+#include "executor/tuptable.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -46,6 +48,34 @@ pgch_writer_new(MemoryContext parent, const pgch_col* cols, size_t ncols);
 extern void
 pgch_writer_free(pgch_writer* w);
 
+/* ---- policies ------------------------------------------------------- */
+
+/*
+ * NULL into an Array column. ClickHouse prohibits Nullable(Array(...)), so
+ * there is nowhere to record it; _EMPTY substitutes an empty array, which is
+ * what a bulk load off an ordinary nullable PG array column wants.
+ */
+typedef enum pgch_null_array {
+    PGCH_NULL_ARRAY_ERROR = 0,
+    PGCH_NULL_ARRAY_EMPTY,
+} pgch_null_array;
+
+/*
+ * NaN and Infinity. _KEEP writes them where the column can hold them (Float)
+ * and raises where it cannot (Decimal); the substitutions apply to both, and
+ * _NULL still raises on a column ClickHouse declared NOT NULL.
+ */
+typedef enum pgch_nonfinite {
+    PGCH_NONFINITE_KEEP = 0,
+    PGCH_NONFINITE_NULL,
+    PGCH_NONFINITE_ZERO,
+} pgch_nonfinite;
+
+extern void
+pgch_writer_set_null_array(pgch_writer* w, pgch_null_array policy);
+extern void
+pgch_writer_set_nonfinite(pgch_writer* w, pgch_nonfinite policy);
+
 /*
  * Append one value to column `col`, dispatching on (PG type, CH kind). valtype
  * is the OID of val: a real PG array type is flattened into the column's Array
@@ -56,6 +86,14 @@ pgch_writer_free(pgch_writer* w);
  */
 extern void
 pgch_append_datum(pgch_writer* w, size_t col, Datum val, Oid valtype, bool isnull);
+
+/*
+ * One row out of a slot, attribute i into column i, dropped and generated
+ * attributes skipped so the columns line up with what
+ * pgch_structure_from_tupdesc declared for the same descriptor.
+ */
+extern void
+pgch_append_slot(pgch_writer* w, TupleTableSlot* slot);
 
 /*
  * Turn a PG array Datum into the pgch_array carrier pgch_append_datum accepts
@@ -107,9 +145,9 @@ pgch_append_inet(
 );
 
 /*
- * Date and DateTime take seconds since the unix epoch. DateTime64 takes the
- * wire-level integer already scaled to the column's precision, which
- * pgch_column_datetime64_scale reports.
+ * Date and DateTime take seconds since the unix epoch, Time seconds since
+ * midnight. DateTime64 and Time64 take the wire-level integer already scaled
+ * to the column's precision, which pgch_column_datetime64_scale reports.
  */
 extern void
 pgch_append_date_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull);
@@ -117,6 +155,10 @@ extern void
 pgch_append_datetime_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull);
 extern void
 pgch_append_datetime64_raw(pgch_writer* w, size_t col, int64_t raw, bool isnull);
+extern void
+pgch_append_time_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull);
+extern void
+pgch_append_time64_raw(pgch_writer* w, size_t col, int64_t raw, bool isnull);
 
 /*
  * Open an Array element context on `col`. Until pgch_array_end every append
@@ -138,6 +180,7 @@ pgch_array_active(const pgch_writer* w);
 extern chc_kind
 pgch_column_kind(const pgch_writer* w, size_t col);
 
+/* Scale of a DateTime64 or Time64 column; 0 for anything else. */
 extern uint32_t
 pgch_column_datetime64_scale(const pgch_writer* w, size_t col);
 
@@ -163,14 +206,25 @@ pgch_writer_build(pgch_writer* w);
 extern void
 pgch_writer_reset(pgch_writer* w);
 
+/*
+ * Build, serialize onto the end of `out` and reset, the whole cut in one
+ * call. NULL opts means pgch_block_opts_local. `out` grows against
+ * CurrentMemoryContext; the caller owns it and resets it once the bytes are
+ * handed on.
+ */
+extern void
+pgch_writer_flush(pgch_writer* w, pgch_buf* out, const chc_block_opts* opts);
+
 #ifdef PGCH_IMPLEMENTATION
 
+#include <math.h>
 #include <string.h>
 #include <sys/socket.h> /* AF_INET, expanded by PG inet macros */
 
 #include "catalog/pg_type_d.h"
 #include "common/hashfn.h"
 #include "fmgr.h"
+#include "parser/parse_coerce.h"
 #include "port/pg_bswap.h"
 #include "utils/array.h"
 #include "utils/arrayaccess.h"
@@ -227,10 +281,28 @@ typedef enum {
 
 typedef struct pgch__node pgch__node;
 
+/*
+ * Coercion from an incoming PG type to the one this level accepts, built on
+ * first use and reused while the incoming type holds. Only consulted after
+ * direct (PG type, CH kind) dispatch fails, so json / bytea / inet keep their
+ * own paths.
+ */
+typedef struct pgch__cast {
+    Oid from;        /* valtype this was built for; InvalidOid when unset */
+    Oid to;          /* target PG type */
+    bool relabel;    /* binary coercible: no call at all */
+    bool viaio;      /* output then input, the only path into a text target */
+    FmgrInfo flinfo; /* cast function, or the source's output function */
+    FmgrInfo infn;   /* target's input function, viaio only */
+    Oid ioparam;
+} pgch__cast;
+
 struct pgch__node {
     pgch__node_kind kind;
     const chc_type* type; /* this level's type; source of elem size, enum
                            * table, decimal scale, dt64 scale */
+    Oid target;           /* pgch_native_oid(type), resolved on first cast */
+    pgch__cast* cast;
     union {
         struct {
             pgch_buf data; /* row-aligned values */
@@ -276,6 +348,9 @@ struct pgch_writer {
 
     size_t ncols;
     pgch__col* cols;
+
+    pgch_null_array null_array;
+    pgch_nonfinite nonfinite;
 
     chc_block_builder bb;
 
@@ -328,12 +403,16 @@ pgch__node_new(const chc_type* t) {
         n->kind        = PGCH__STRING;
         n->str.is_json = true;
         return n;
-    case CHC_DATETIME64: {
+    case CHC_DATETIME64:
+    case CHC_TIME64: {
         int scale = chc_type_datetime64_scale(t);
 
         if (scale < 0 || (size_t)scale >= lengthof(pgch_pow10)) {
             pgch_errorf(
-                ERRCODE_FDW_INVALID_DATA_TYPE, "DateTime64 scale %d out of range", scale
+                ERRCODE_FDW_INVALID_DATA_TYPE,
+                "%s scale %d out of range",
+                chc_type_name(t, NULL),
+                scale
             );
         }
         n->kind             = PGCH__FIXED;
@@ -400,11 +479,38 @@ pgch_writer_free(pgch_writer* w) {
     }
 }
 
+void
+pgch_writer_set_null_array(pgch_writer* w, pgch_null_array policy) {
+    w->null_array = policy;
+}
+
+void
+pgch_writer_set_nonfinite(pgch_writer* w, pgch_nonfinite policy) {
+    w->nonfinite = policy;
+}
+
 /* Node receiving values: innermost open array's values child, else column root */
 static inline pgch__node*
 pgch__cursor_node(const pgch_writer* w, size_t col) {
     return w->cursor_len ? w->cursor[w->cursor_len - 1]->array.values
                          : w->cols[col].root;
+}
+
+/* Column an append lands in: the one that opened the array, if any. */
+static inline size_t
+pgch__target_col(const pgch_writer* w, size_t col) {
+    return w->cursor_len ? w->cursor_col : col;
+}
+
+/* `column "name"` for messages, position when the column came in unnamed. */
+static const char*
+pgch__col_desc(const pgch_writer* w, size_t col) {
+    size_t i = pgch__target_col(w, col);
+
+    if (i < w->ncols && w->cols[i].name[0]) {
+        return psprintf("column \"%s\"", w->cols[i].name);
+    }
+    return psprintf("column %zu", i);
 }
 
 /*
@@ -433,19 +539,24 @@ pgch__resolve_leaf(pgch_writer* w, size_t col, bool isnull) {
         nullable = true;
     }
     if (isnull && !nullable) {
-        const chc_type* t = w->cols[w->cursor_len ? w->cursor_col : col].t;
+        const chc_type* t = w->cols[pgch__target_col(w, col)].t;
         size_t tnlen;
         const char* tname = chc_type_name(t, &tnlen);
 
         pgch_errorf(
             ERRCODE_NOT_NULL_VIOLATION,
-            "cannot append NULL to NOT NULL %.*s column",
+            "cannot append NULL to NOT NULL %.*s %s",
             (int)tnlen,
-            tname ? tname : "?"
+            tname ? tname : "?",
+            pgch__col_desc(w, col)
         );
     }
     if (node->kind == PGCH__ARRAY) {
-        pgch_error(ERRCODE_DATATYPE_MISMATCH, "scalar value into Array column");
+        pgch_errorf(
+            ERRCODE_DATATYPE_MISMATCH,
+            "scalar value into Array %s",
+            pgch__col_desc(w, col)
+        );
     }
     return node;
 }
@@ -599,8 +710,13 @@ pgch_append_bool(pgch_writer* w, size_t col, bool val, bool isnull) {
 void
 pgch_append_double(pgch_writer* w, size_t col, double val, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
+    pgch__node* node;
 
+    if (!isnull && !isfinite(val) && w->nonfinite != PGCH_NONFINITE_KEEP) {
+        isnull = w->nonfinite == PGCH_NONFINITE_NULL;
+        val    = 0;
+    }
+    node = pgch__resolve_leaf(w, col, isnull);
     if (isnull) {
         pgch_buf_append_zero(pgch__fixed_data(node), 8);
     } else {
@@ -612,8 +728,13 @@ pgch_append_double(pgch_writer* w, size_t col, double val, bool isnull) {
 void
 pgch_append_float(pgch_writer* w, size_t col, float val, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
+    pgch__node* node;
 
+    if (!isnull && !isfinite(val) && w->nonfinite != PGCH_NONFINITE_KEEP) {
+        isnull = w->nonfinite == PGCH_NONFINITE_NULL;
+        val    = 0;
+    }
+    node = pgch__resolve_leaf(w, col, isnull);
     if (isnull) {
         pgch_buf_append_zero(pgch__fixed_data(node), 4);
     } else {
@@ -719,11 +840,27 @@ pgch_append_bytes(pgch_writer* w, size_t col, const void* p, size_t n, bool isnu
     MemoryContextSwitchTo(old);
 }
 
+/* numeric_out renders the non-finite values as words; digits never lead. */
+static bool
+pgch__finite_decimal(const char* s) {
+    if (*s == '-' || *s == '+') {
+        s++;
+    }
+    return *s >= '0' && *s <= '9';
+}
+
 void
 pgch_append_decimal(pgch_writer* w, size_t col, const char* digits, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
+    pgch__node* node;
     size_t width;
+
+    if (!isnull && digits && w->nonfinite != PGCH_NONFINITE_KEEP &&
+        !pgch__finite_decimal(digits)) {
+        isnull = w->nonfinite == PGCH_NONFINITE_NULL;
+        digits = NULL;
+    }
+    node = pgch__resolve_leaf(w, col, isnull);
 
     switch (chc_type_kind(node->type)) {
     case CHC_DECIMAL32:
@@ -855,6 +992,33 @@ pgch_append_datetime64_raw(pgch_writer* w, size_t col, int64_t raw, bool isnull)
     MemoryContextSwitchTo(old);
 }
 
+/* Time is a signed second count, wide enough for ClickHouse's +-999 hours. */
+void
+pgch_append_time_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull) {
+    MemoryContext old = MemoryContextSwitchTo(w->cxt);
+    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
+    int32_t v         = isnull ? 0 : (int32_t)seconds;
+
+    if (chc_type_kind(node->type) != CHC_TIME) {
+        pgch_error(ERRCODE_DATATYPE_MISMATCH, "time into non-Time column");
+    }
+    pgch_buf_append(pgch__fixed_data(node), &v, 4);
+    MemoryContextSwitchTo(old);
+}
+
+void
+pgch_append_time64_raw(pgch_writer* w, size_t col, int64_t raw, bool isnull) {
+    MemoryContext old = MemoryContextSwitchTo(w->cxt);
+    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
+    int64_t v         = isnull ? 0 : raw;
+
+    if (chc_type_kind(node->type) != CHC_TIME64) {
+        pgch_error(ERRCODE_DATATYPE_MISMATCH, "time into non-Time64 column");
+    }
+    pgch_buf_append(pgch__fixed_data(node), &v, 8);
+    MemoryContextSwitchTo(old);
+}
+
 /* Rows committed to a node so far; an array level counts closed subarrays */
 static uint64_t
 pgch__node_rows(const pgch__node* n) {
@@ -977,15 +1141,16 @@ pgch_column_datetime64_scale(const pgch_writer* w, size_t col) {
 
 /*
  * NULL into an Array column. ClickHouse rejects Nullable(Array(...)), so this
- * normally raises; it only succeeds where a Nullable level does sit above the
- * Array, in which case the row gets a null bit and an empty subarray.
+ * normally raises; it succeeds where a Nullable level does sit above the
+ * Array, in which case the row gets a null bit and an empty subarray, or
+ * under PGCH_NULL_ARRAY_EMPTY, which stores the empty subarray alone.
  */
 static void
 pgch__append_null_array(pgch_writer* w, size_t col) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__node* node  = pgch__cursor_node(w, col);
     uint8_t b         = 1;
-    bool nullable     = false;
+    bool nullable     = w->null_array == PGCH_NULL_ARRAY_EMPTY;
 
     while (node->kind == PGCH__NULLABLE) {
         pgch_buf_append(&node->nullable.null_map, &b, 1);
@@ -999,9 +1164,10 @@ pgch__append_null_array(pgch_writer* w, size_t col) {
 
         pgch_errorf(
             ERRCODE_NOT_NULL_VIOLATION,
-            "cannot append NULL to NOT NULL %.*s column",
+            "cannot append NULL to NOT NULL %.*s %s",
             (int)tnlen,
-            tname ? tname : "?"
+            tname ? tname : "?",
+            pgch__col_desc(w, col)
         );
     }
     pgch__u64buf_push(&node->array.offs, pgch__node_rows(node->array.values));
@@ -1120,6 +1286,86 @@ pgch_array_from_pg(
     return PointerGetDatum(out);
 }
 
+/*
+ * Coerce val into the PG type this level accepts. False when no cast exists,
+ * leaving the caller to raise. Caches per node: an incoming type is fixed for
+ * the life of a statement.
+ */
+static bool
+pgch__cast_value(
+    pgch_writer* w,
+    pgch__node* node,
+    Datum val,
+    Oid from,
+    Oid to,
+    Datum* out
+) {
+    pgch__cast* cast = node->cast;
+
+    if (!cast || cast->from != from || cast->to != to) {
+        Oid funcid;
+        CoercionPathType path =
+            find_coercion_pathway(to, from, COERCION_EXPLICIT, &funcid);
+        MemoryContext old = MemoryContextSwitchTo(w->cxt);
+
+        if (!cast) {
+            cast = node->cast = palloc0(sizeof(*cast));
+        }
+        cast->relabel = false;
+        cast->viaio   = false;
+
+        switch (path) {
+        case COERCION_PATH_FUNC:
+            fmgr_info(funcid, &cast->flinfo);
+            break;
+        case COERCION_PATH_RELABELTYPE:
+            cast->relabel = true;
+            break;
+        case COERCION_PATH_COERCEVIAIO: {
+            Oid outfunc, infunc;
+            bool varlena;
+
+            /*
+             * find_coercion_pathway answers COERCEVIAIO for a string source
+             * too, which would parse 'x'::text into an Int32 column and turn
+             * a type error into an input-syntax one. Only a text target,
+             * which is what String / FixedString / Enum resolve to, takes it.
+             */
+            if (to != TEXTOID) {
+                MemoryContextSwitchTo(old);
+                cast->from = InvalidOid;
+                return false;
+            }
+            getTypeOutputInfo(from, &outfunc, &varlena);
+            getTypeInputInfo(to, &infunc, &cast->ioparam);
+            fmgr_info(outfunc, &cast->flinfo);
+            fmgr_info(infunc, &cast->infn);
+            cast->viaio = true;
+            break;
+        }
+        default:
+            MemoryContextSwitchTo(old);
+            cast->from = InvalidOid;
+            return false;
+        }
+        MemoryContextSwitchTo(old);
+        cast->from = from;
+        cast->to   = to;
+    }
+
+    if (cast->relabel) {
+        *out = val;
+    } else if (cast->viaio) {
+        char* s = OutputFunctionCall(&cast->flinfo, val);
+
+        *out = InputFunctionCall(&cast->infn, s, cast->ioparam, -1);
+        pfree(s);
+    } else {
+        *out = FunctionCall1(&cast->flinfo, val);
+    }
+    return true;
+}
+
 static void
 pgch__append_one(
     pgch_writer* w,
@@ -1153,7 +1399,8 @@ pgch__append_one(
     switch (valtype) {
     case INT2OID:
     case INT4OID:
-    case INT8OID: {
+    case INT8OID:
+    case XID8OID: {
         int64_t v = 0;
 
         /* Support mixing integer widths. */
@@ -1167,6 +1414,7 @@ pgch__append_one(
             } else if (valtype == INT4OID) {
                 v = (int64_t)DatumGetInt32(val);
             } else {
+                /* xid8 is an unsigned 64: same bits, UInt64 on the far side. */
                 v = DatumGetInt64(val);
             }
         }
@@ -1242,8 +1490,54 @@ pgch__append_one(
         pgch_append_date_seconds(w, col, seconds, isnull);
         return;
     }
+    case TIMEOID: {
+        int64_t usec = isnull ? 0 : (int64_t)DatumGetTimeADT(val);
+
+        switch (kind) {
+        case CHC_TIME:
+            pgch_append_time_seconds(w, col, usec / USECS_PER_SEC, isnull);
+            return;
+        case CHC_TIME64: {
+            uint32_t scale = pgch_column_datetime64_scale(w, col);
+            int64 power    = pgch_pow10[scale];
+
+            /* Split before scaling: scale 9 of a full day overflows int64. */
+            pgch_append_time64_raw(
+                w,
+                col,
+                (usec / USECS_PER_SEC) * power +
+                    (usec % USECS_PER_SEC) * power / USECS_PER_SEC,
+                isnull
+            );
+            return;
+        }
+        default:
+            goto type_mismatch;
+        }
+    }
     case TIMESTAMPOID:
     case TIMESTAMPTZOID: {
+        /*
+         * DateTime holds an instant, PG timestamp does not: read it in the
+         * session zone, as PG's own cast does, so the value a `timestamp`
+         * column reads back through pgch_convert is the one that went in.
+         */
+        if (valtype == TIMESTAMPOID && !isnull &&
+            (kind == CHC_DATETIME || kind == CHC_DATETIME64)) {
+            Datum tz;
+
+            if (pgch__cast_value(
+                    w,
+                    pgch__cursor_node(w, col),
+                    val,
+                    TIMESTAMPOID,
+                    TIMESTAMPTZOID,
+                    &tz
+                )) {
+                val = tz;
+            }
+        }
+
         switch (kind) {
         case CHC_DATETIME: {
             int64_t seconds =
@@ -1337,8 +1631,8 @@ pgch__append_one(
             if (fam != expected) {
                 pgch_errorf(
                     ERRCODE_DATATYPE_MISMATCH,
-                    "inet family mismatch for column %zu",
-                    col
+                    "inet family mismatch for %s",
+                    pgch__col_desc(w, col)
                 );
             }
             addr    = ip_addr(ipa);
@@ -1373,14 +1667,39 @@ pgch__append_one(
         goto type_mismatch;
     }
 
-type_mismatch:
+type_mismatch: {
+    const chc_type* ct = w->cols[pgch__target_col(w, col)].t;
+    pgch__node* node   = pgch__cursor_node(w, col);
+    Datum conv;
+
+    /*
+     * Last resort: cast into the PG type this level maps to and dispatch
+     * again. The level is the append target rather than the column, so an
+     * Array element resolves against its own element type. Terminates because
+     * the retry arrives with valtype == target, which fails the guard.
+     */
+    if (!OidIsValid(node->target)) {
+        node->target = pgch_native_oid_for(node->type, pgch__col_desc(w, col));
+    }
+    if (node->target != valtype) {
+        if (isnull) {
+            pgch__append_one(w, col, kind, val, node->target, isnull);
+            return;
+        }
+        if (pgch__cast_value(w, node, val, valtype, node->target, &conv)) {
+            pgch__append_one(w, col, kind, conv, node->target, isnull);
+            return;
+        }
+    }
+
     pgch_errorf(
         ERRCODE_DATATYPE_MISMATCH,
-        "cannot encode %s into ClickHouse %s (column %zu)",
+        "cannot encode %s into ClickHouse %s (%s)",
         format_type_be(valtype),
-        chc_type_name(w->cols[w->cursor_len ? w->cursor_col : col].t, NULL),
-        col
+        chc_type_name(ct, NULL),
+        pgch__col_desc(w, col)
     );
+}
 }
 
 void
@@ -1389,6 +1708,24 @@ pgch_append_datum(pgch_writer* w, size_t col, Datum val, Oid valtype, bool isnul
         pgch_errorf(ERRCODE_FDW_ERROR, "column %zu out of range", col);
     }
     pgch__append_one(w, col, pgch_column_kind(w, col), val, valtype, isnull);
+}
+
+void
+pgch_append_slot(pgch_writer* w, TupleTableSlot* slot) {
+    TupleDesc desc = slot->tts_tupleDescriptor;
+    size_t col     = 0;
+
+    slot_getallattrs(slot);
+    for (int i = 0; i < desc->natts; i++) {
+        Form_pg_attribute a = TupleDescAttr(desc, i);
+
+        if (a->attisdropped || a->attgenerated) {
+            continue;
+        }
+        pgch_append_datum(
+            w, col++, slot->tts_values[i], a->atttypid, slot->tts_isnull[i]
+        );
+    }
 }
 
 /* ---- block assembly ------------------------------------------------- */
@@ -1657,6 +1994,22 @@ pgch_writer_reset(pgch_writer* w) {
     for (size_t i = 0; i < w->ncols; i++) {
         pgch__reset_node(w->cols[i].root);
     }
+}
+
+void
+pgch_writer_flush(pgch_writer* w, pgch_buf* out, const chc_block_opts* opts) {
+    const chc_block_builder* bb = pgch_writer_build(w);
+    chc_io io;
+    chc_err err = {};
+
+    pgch_buf_io(out, &io);
+    if (!opts) {
+        opts = &pgch_block_opts_local;
+    }
+    if (chc_block_write(&io, bb, opts, &err) != CHC_OK) {
+        pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
+    }
+    pgch_writer_reset(w);
 }
 
 #endif /* PGCH_IMPLEMENTATION */

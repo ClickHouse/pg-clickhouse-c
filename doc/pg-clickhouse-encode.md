@@ -59,16 +59,62 @@ already a `pgch_array`. Integer widths mix freely (`int2` into `Int64` and so
 on) since ClickHouse's widths outnumber PG's. `bytea` goes into `String` and
 `FixedString` verbatim, `json` / `jsonb` into `JSON`, `Object` or `String`.
 
+A pair with no direct path falls back to a cast: `find_coercion_pathway` from
+`valtype` to the PG type `pgch_native_oid` gives that level, cached there since
+an incoming type is fixed for a statement's life. So `oid` or a domain over
+`int4` reaches an `Int64` column without the caller pre-coercing, and `money`
+reaches a `Decimal` one, PG having no `money` to `int8` cast. A missing cast
+surfaces as `ERRCODE_DATATYPE_MISMATCH` on the first row needing it rather than
+up front. Direct dispatch wins, so `json` into `JSON` and `bytea` into `String`
+never route through a cast.
+
+The level is the append target, not the column, so an `Array` element resolves
+against its own element type: `money[]` and `interval[]` reach
+`Array(String)` the same way their scalars reach `String`.
+
+Into a `String`, `FixedString` or `Enum` column the fallback also takes
+`COERCION_PATH_COERCEVIAIO`, running the source's output function and the
+target's input function. That is the mirror of the rule decode already
+documents, and it means a consumer never has to know which PG types this
+header has a fast path for, only that a `String` column always works:
+`interval`, `timetz`, `money`, `macaddr`, `cidr`, `bit`, `varbit`, `xml`,
+`tsvector`, `jsonpath`, the geo types and every user enum all arrive that way.
+`find_coercion_pathway` offers the same path for a string *source*, which is
+deliberately not taken: `'x'::text` into `Int32` stays a type error rather than
+becoming an input-syntax error somewhere in row 40000.
+
 Each column takes exactly one append per row, in any order. There is no
 end-of-row call: row counts come from the buffers, and
 `pgch_writer_rows` reports the first column's, so a skipped column shows up as
 a row-count mismatch at write time rather than as silently shifted data.
 
+```c
+void pgch_append_slot(pgch_writer *w, TupleTableSlot *slot);
+```
+
+A whole row out of a slot, attribute `i` into column `i`. Dropped and
+generated attributes are skipped, the same ones
+`pgch_structure_from_tupdesc` skips, so a writer built from that structure
+lines up with a slot over the same descriptor.
+
+## Policies
+
+```c
+void pgch_writer_set_null_array(pgch_writer *w, pgch_null_array policy);
+void pgch_writer_set_nonfinite(pgch_writer *w, pgch_nonfinite policy);
+```
+
 NULL into a column ClickHouse declared NOT NULL raises
 `ERRCODE_NOT_NULL_VIOLATION`. That includes a NULL PG array into `Array(T)`,
 which ClickHouse has no representation for, `Nullable(Array(...))` being
-prohibited server-side. Callers that would rather store an empty array must
-substitute one.
+prohibited server-side. A nullable PG array column is ordinary and a bulk load
+cannot fail on one, so `PGCH_NULL_ARRAY_EMPTY` stores an empty array instead.
+
+`PGCH_NONFINITE_KEEP`, the default, writes `NaN` and `Infinity` where the
+column can hold them, which `Float32` / `Float64` can and `Decimal` cannot.
+`PGCH_NONFINITE_NULL` and `_ZERO` substitute instead, for a load that should
+not abort on row 40000 over one value; `_NULL` still raises on a NOT NULL
+column, since the substitute has nowhere to go either.
 
 ```c
 Datum pgch_array_from_pg(Datum arr, Oid elemtype,
@@ -102,6 +148,10 @@ void pgch_append_datetime_seconds(pgch_writer *w, size_t col,
                                   int64_t seconds, bool isnull);
 void pgch_append_datetime64_raw(pgch_writer *w, size_t col,
                                 int64_t raw, bool isnull);
+void pgch_append_time_seconds(pgch_writer *w, size_t col,
+                              int64_t seconds, bool isnull);
+void pgch_append_time64_raw(pgch_writer *w, size_t col,
+                            int64_t raw, bool isnull);
 ```
 
 The layer `pgch_append_datum` sits on, for values that are not PG Datums. Pass
@@ -117,14 +167,15 @@ column's values even where the null map says to ignore them.
 
 `pgch_append_decimal` takes decimal text, `[-]digits[.frac]`, and folds the
 column's scale in; `numeric_out` output is the intended input. `NaN` and
-`Infinity` raise.
+`Infinity` raise unless `pgch_writer_set_nonfinite` says otherwise.
 
 `pgch_append_inet` takes big-endian address bytes, PG's `inet` `ip_addr`
 layout, 4 for `IPv4` and 16 for `IPv6`. Pass the expected width even when
 NULL.
 
-Date and DateTime take unix seconds. `DateTime64` takes the wire integer
-already scaled, which is `pgch_column_datetime64_scale`'s job to tell you:
+Date and DateTime take unix seconds, `Time` seconds since midnight.
+`DateTime64` and `Time64` take the wire integer already scaled, which is
+`pgch_column_datetime64_scale`'s job to tell you:
 
 ```c
 uint32_t scale = pgch_column_datetime64_scale(w, col);
@@ -175,10 +226,18 @@ if (chc_block_write(&io, bb, &opts, &err) != CHC_OK)
 pgch_writer_reset(w);
 ```
 
-`chc_block_opts` is the caller's: an empty struct for chDB and
+`chc_block_opts` is the caller's: `pgch_block_opts_local` for chDB and
 `clickhouse local`, `has_block_info` and `has_custom_serialization` per server
 revision for the TCP path. A `chc_client` insert skips the io entirely and
 passes the builder to `chc_client_send_data`.
+
+```c
+void pgch_writer_flush(pgch_writer *w, pgch_buf *out, const chc_block_opts *opts);
+```
+
+The same three calls when the destination is memory: build, write onto the end
+of `out`, reset. NULL `opts` means `pgch_block_opts_local`. The buffer is the
+caller's to hand on and reset.
 
 `pgch_writer_bytes` is there to decide when to cut a block, since streaming a
 long `COPY` should not accumulate every row in memory. The server coalesces

@@ -52,6 +52,42 @@ that failed before any data arrived reports cleanly. Both callbacks run inside
 the reader's calls, so they may `ereport` if that suits your teardown, but a
 returned error string is easier to attach context to.
 
+Validating a block is the source's job, not the reader's. `chc_column_validate`
+over every `chc_block_column` catches a column whose payload does not match its
+declared type before any value is read, and the source is the only place that
+also knows what a failure means for the connection: whether the socket is now
+mid-stream and the handle has to be dropped. The reader assumes blocks it
+receives already passed.
+
+## Chunk source
+
+```c
+typedef struct pgch_chunk_source {
+    void *ud;
+    bool (*next_chunk)(void *ud, const void **p, size_t *n, char **error);
+    bool (*cancelled)(void *ud);
+} pgch_chunk_source;
+
+void pgch_reader_init_chunks(pgch_reader *r, const pgch_chunk_source *src,
+                             const chc_block_opts *opts);
+```
+
+One layer down, for a caller holding bytes rather than blocks: the `chc_io`
+that copies out of the current chunk and refills on drain, the `chc_in` over
+it and the `chc_block_read` in the block source all live here. A chDB consumer
+writes a `next_chunk` calling `chdb_stream_fetch_result` and a `cancelled`
+calling `CHECK_FOR_INTERRUPTS`, and nothing else.
+
+Set `*n = 0` for end of stream; the chunk's bytes must stay valid until the
+following call. Where that end falls decides what the reader reports: on a
+block boundary the stream ends cleanly, mid-block it ends with a truncation
+error. Return false having set `*error` for a failure of your own.
+`cancelled` is optional and polled between refills.
+
+Defined only where the `PGCH_IMPLEMENTATION` TU also defines
+`CHC_IMPLEMENTATION`, the same rule `pgch_in_alloc` carries and for the same
+reason.
+
 ## Row cursor
 
 ```c
@@ -134,6 +170,13 @@ interface:
 * **Casts.** Anything else takes the explicit coercion pathway, or raises
   `ERRCODE_FDW_INVALID_DATA_TYPE` if there is none.
 
+An array whose element type differs from the target's converts element-wise,
+each leaf through its own child state, and the `ArrayType` is then built at the
+target's element type. `find_coercion_pathway` answers `ARRAYCOERCE` for a pair
+of array types and there is no runtime for that here, so `Array(Int64)` into
+`int4[]` and `Array(String)` into `interval[]` would otherwise fail where their
+scalars succeed.
+
 `val` must be a representative value, not just a type: array element info and
 tuple field descriptors come from its shape. NULL back means no conversion is
 needed, so pass the Datum through:
@@ -147,6 +190,30 @@ out[i] = pgch_convert(cs, r.values[i]);   /* cs == NULL is a no-op */
 State is allocated in `CurrentMemoryContext` and reusable across rows and
 blocks, so build it somewhere that outlives the per-row loop. It costs syscache
 lookups and a `TupleDesc`, so building it per row is measurable.
+
+```c
+void *pgch_convert_init_type(const chc_type *in, Oid outtype);
+void *pgch_reader_convert_init(const pgch_reader *r, size_t col, Oid outtype);
+
+void pgch_reader_fill(const pgch_reader *r, void **states,
+                      Datum *values, bool *nulls);
+```
+
+The same state off the column's type rather than off a value, which is the
+only way to build it before the first row, or at all for a column that is NULL
+throughout. `pgch_reader_convert_init` takes the type off the reader's current
+block and honors a `coltypes` override, so it is the one to reach for:
+
+```c
+for (size_t i = 0; i < r.ncols; i++)
+    states[i] = pgch_reader_convert_init(&r, i, atttypid[i]);
+
+while (pgch_reader_next(&r))
+    pgch_reader_fill(&r, states, values, nulls);   /* -> heap_form_tuple */
+```
+
+`pgch_reader_fill` is the loop body that otherwise gets written twice: every
+column of the current row through its state, NULLs left as Datum 0.
 
 A CH array that is ragged, which PG cannot represent, falls back to formatting
 the value as an array literal and running `array_in`, so the caller sees PG's

@@ -20,6 +20,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "access/tupdesc.h"
 #include "utils/palloc.h"
 
 #include "clickhouse.h"
@@ -92,11 +93,72 @@ extern Oid
 pgch_native_oid(const chc_type* type);
 
 /*
+ * As pgch_native_oid, with `what` (eg `column "c2"`) spliced into the message
+ * of an unmapped type. NULL what behaves as pgch_native_oid.
+ */
+extern Oid
+pgch_native_oid_for(const chc_type* type, const char* what);
+
+/*
  * Strip Nullable, then LowCardinality and any Nullable inside it. Sets
  * *out_nullable when either layer was present.
  */
 extern const chc_type*
 pgch_unwrap(const chc_type* type, bool* out_nullable);
+
+/* ---- PG type -> CH type name ---------------------------------------- */
+
+/*
+ * Per-consumer choices the mapping leaves open. Zeroed is the conservative
+ * set: no JSON, no LowCardinality, Decimal256(38) for unconstrained numeric.
+ */
+typedef struct pgch_type_opts {
+    bool json_as_json;      /* jsonb -> JSON rather than String */
+    bool low_cardinality;   /* wrap String columns in LowCardinality */
+    bool numeric_as_string; /* unconstrained numeric -> String, avoiding the
+                             * silent truncation Decimal256(38) does to PG's
+                             * 16383 digits of scale */
+} pgch_type_opts;
+
+/*
+ * CH type to declare for a PG column, complete with its Nullable wrapper, so
+ * the same string serves a `structure=` clause and chc_type_parse. Domains
+ * take their base type's mapping, `T[]` becomes `Array(<T nullable per
+ * notnull>)` since ClickHouse prohibits Nullable(Array(...)), and anything
+ * unmapped becomes String, which the encoder reaches through the target's
+ * output function. opts may be NULL for the defaults.
+ */
+extern char*
+pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* opts);
+
+/* Double-quoted unless the name is already a bare CH identifier. */
+extern char*
+pgch_quote_ch_ident(const char* name);
+
+/*
+ * `name type, ...` for every attribute of desc, dropped and generated columns
+ * skipped: neither carries a value in a stream. Placing this in a query is the
+ * caller's, this only owns the type names.
+ */
+extern char*
+pgch_structure_from_tupdesc(TupleDesc desc, const pgch_type_opts* opts);
+
+/* ---- server settings ------------------------------------------------ */
+
+/*
+ * What a query must set for its Native output to be readable here, this
+ * library's compatibility contract with the server rather than a consumer
+ * preference. Binary type tags fail chc_block_read with CHC_ERR_TYPE; the
+ * JSON setting exists from 24.10 and serializes JSON as String, the only
+ * JSON serialization either library handles.
+ */
+#define PGCH_NATIVE_SETTINGS                                                           \
+    "output_format_native_encode_types_in_binary_format=0,"                            \
+    "output_format_native_write_json_as_string=1"
+
+/* Block framing for chDB and clickhouse local: no BlockInfo, no custom
+ * serialization flag. The TCP path sets both per server revision. */
+extern const chc_block_opts pgch_block_opts_local;
 
 /* ---- Array / Tuple carriers ----------------------------------------- */
 
@@ -156,8 +218,11 @@ pgch_buf_io(pgch_buf* b, chc_io* out_io);
 
 #ifdef PGCH_IMPLEMENTATION
 
+#include <string.h>
+
 #include "catalog/pg_type_d.h"
 #include "datatype/timestamp.h"
+#include "lib/stringinfo.h"
 #include "utils/lsyscache.h"
 
 /* CH Date / Date32 / DateTime epoch is unix; offset to PG epoch (2000-01-01) */
@@ -251,6 +316,8 @@ const Oid pgch_kind_oids[CHC_KIND_COUNT] = {
     [CHC_DATE32]       = DATEOID,
     [CHC_DATETIME]     = TIMESTAMPTZOID,
     [CHC_DATETIME64]   = TIMESTAMPTZOID,
+    [CHC_TIME]         = TIMEOID,
+    [CHC_TIME64]       = TIMEOID,
     [CHC_UUID]         = UUIDOID,
     [CHC_IPV4]         = INETOID,
     [CHC_IPV6]         = INETOID,
@@ -260,8 +327,14 @@ const int64_t pgch_pow10[10] = {
     1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000,
 };
 
-Oid
-pgch_datum_oid(const chc_type* type) {
+/* ` (column "c")` for a message tail, empty when the caller has no context */
+static const char*
+pgch__where(const char* what) {
+    return what ? psprintf(" (%s)", what) : "";
+}
+
+static Oid
+pgch__datum_oid(const chc_type* type, const char* what) {
     chc_kind kind = chc_type_kind(type);
     Oid oid       = pgch_kind_oids[kind];
 
@@ -275,7 +348,7 @@ pgch_datum_oid(const chc_type* type) {
         return InvalidOid;
     case CHC_NULLABLE:
     case CHC_LOW_CARDINALITY:
-        return pgch_datum_oid(chc_type_child(type, 0));
+        return pgch__datum_oid(chc_type_child(type, 0), what);
     case CHC_ARRAY:
         return ANYARRAYOID;
     case CHC_TUPLE:
@@ -283,15 +356,21 @@ pgch_datum_oid(const chc_type* type) {
     default:
         pgch_errorf(
             ERRCODE_FDW_INVALID_DATA_TYPE,
-            "unsupported column type \"%s\"",
-            chc_type_name(type, NULL)
+            "unsupported column type \"%s\"%s",
+            chc_type_name(type, NULL),
+            pgch__where(what)
         );
     }
     pg_unreachable();
 }
 
 Oid
-pgch_native_oid(const chc_type* type) {
+pgch_datum_oid(const chc_type* type) {
+    return pgch__datum_oid(type, NULL);
+}
+
+Oid
+pgch_native_oid_for(const chc_type* type, const char* what) {
     chc_kind kind = chc_type_kind(type);
     Oid oid       = pgch_kind_oids[kind];
 
@@ -302,7 +381,7 @@ pgch_native_oid(const chc_type* type) {
     switch (kind) {
     case CHC_NULLABLE:
     case CHC_LOW_CARDINALITY:
-        return pgch_native_oid(chc_type_child(type, 0));
+        return pgch_native_oid_for(chc_type_child(type, 0), what);
     case CHC_ARRAY: {
         /*
          * PG has one array type per element type regardless of nesting, so
@@ -314,19 +393,25 @@ pgch_native_oid(const chc_type* type) {
         while (chc_type_kind(leaf) == CHC_ARRAY) {
             leaf = chc_type_child(leaf, 0);
         }
-        array_type = get_array_type(pgch_native_oid(leaf));
+        array_type = get_array_type(pgch_native_oid_for(leaf, what));
         if (!OidIsValid(array_type)) {
             pgch_errorf(
                 ERRCODE_FDW_INVALID_DATA_TYPE,
-                "no PG array type for \"%s\"",
-                chc_type_name(leaf, NULL)
+                "no PG array type for \"%s\"%s",
+                chc_type_name(leaf, NULL),
+                pgch__where(what)
             );
         }
         return array_type;
     }
     default:
-        return pgch_datum_oid(type);
+        return pgch__datum_oid(type, what);
     }
+}
+
+Oid
+pgch_native_oid(const chc_type* type) {
+    return pgch_native_oid_for(type, NULL);
 }
 
 const chc_type*
@@ -349,6 +434,177 @@ pgch_unwrap(const chc_type* type, bool* out_nullable) {
         *out_nullable = nullable;
     }
     return type;
+}
+
+/* ---- PG type -> CH type name ---------------------------------------- */
+
+const chc_block_opts pgch_block_opts_local = {};
+
+/* Precision and scale out of a numeric typmod; false when unconstrained. */
+static bool
+pgch__numeric_typmod(int32 typmod, int* precision, int* scale) {
+    if (typmod < (int32)VARHDRSZ) {
+        return false;
+    }
+    *precision = (int)(((typmod - VARHDRSZ) >> 16) & 0xffff);
+#if PG_VERSION_NUM >= 150000
+    /* PG 15 gave numeric negative scales, biased by 1024 in the low 11 bits. */
+    *scale = (int)((((typmod - VARHDRSZ) & 0x7ff) ^ 1024) - 1024);
+#else
+    *scale = (int)((typmod - VARHDRSZ) & 0xffff);
+#endif
+    return true;
+}
+
+/*
+ * Scalar CH type name, before any Nullable or LowCardinality wrapper. NULL
+ * means String, which every remaining PG type reaches through its output
+ * function.
+ */
+static const char*
+pgch__ch_scalar(Oid typid, int32 typmod, const pgch_type_opts* opts) {
+    switch (typid) {
+    case BOOLOID:
+        return "Bool";
+    case INT2OID:
+        return "Int16";
+    case INT4OID:
+        return "Int32";
+    case INT8OID:
+        return "Int64";
+    case OIDOID:
+        return "UInt32";
+    case XID8OID:
+        return "UInt64";
+    case FLOAT4OID:
+        return "Float32";
+    case FLOAT8OID:
+        return "Float64";
+    case NUMERICOID: {
+        int precision, scale;
+
+        /*
+         * ClickHouse caps Decimal at 76 digits and has no negative scale, so
+         * anything else falls back to the unconstrained choice.
+         */
+        if (pgch__numeric_typmod(typmod, &precision, &scale) && precision >= 1 &&
+            precision <= 76 && scale >= 0 && scale <= precision) {
+            return psprintf("Decimal(%d,%d)", precision, scale);
+        }
+        return opts->numeric_as_string ? NULL : "Decimal256(38)";
+    }
+    case UUIDOID:
+        return "UUID";
+    case DATEOID:
+        /* Date is unsigned days from 1970; Date32 covers PG's negative side. */
+        return "Date32";
+    case TIMEOID:
+        return "Time64(6)";
+    case TIMESTAMPOID:
+        /* Native carries an int64, so no session zone leaks into the wire. */
+        return "DateTime64(6)";
+    case TIMESTAMPTZOID:
+        return "DateTime64(6, 'UTC')";
+    case JSONOID:
+    case JSONBOID:
+        return opts->json_as_json ? "JSON" : NULL;
+    default:
+        /*
+         * String covers the rest, deliberately: bpchar(n) and varchar(n)
+         * because FixedString(n) counts bytes where PG counts characters,
+         * inet because one PG column holds both families, interval because
+         * ClickHouse's Interval has no columnar serialization, and every
+         * enum, geo, bit and network type because their output function is
+         * the only agreed rendering.
+         */
+        return NULL;
+    }
+}
+
+char*
+pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* opts) {
+    static const pgch_type_opts defaults = {};
+    Oid elemtype;
+    const char* base;
+
+    if (!opts) {
+        opts = &defaults;
+    }
+    typid = getBaseTypeAndTypmod(typid, &typmod);
+
+    /*
+     * Nullable(Array(...)) is prohibited server side, so a nullable array
+     * column pushes the nullability onto its elements instead.
+     */
+    elemtype = get_element_type(typid);
+    if (OidIsValid(elemtype)) {
+        return psprintf("Array(%s)", pgch_ch_type_for(elemtype, typmod, notnull, opts));
+    }
+
+    base = pgch__ch_scalar(typid, typmod, opts);
+    if (!base) {
+        if (opts->low_cardinality) {
+            return psprintf(
+                "LowCardinality(%s)", notnull ? "String" : "Nullable(String)"
+            );
+        }
+        base = "String";
+    }
+    /* Nullable(JSON) is rejected server side; JSON already carries null. */
+    if (notnull || strcmp(base, "JSON") == 0) {
+        return pstrdup(base);
+    }
+    return psprintf("Nullable(%s)", base);
+}
+
+char*
+pgch_quote_ch_ident(const char* name) {
+    bool bare = name[0] != '\0';
+    StringInfoData buf;
+
+    for (const char* p = name; bare && *p; p++) {
+        bare = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_' ||
+               (p != name && *p >= '0' && *p <= '9');
+    }
+    if (bare) {
+        return pstrdup(name);
+    }
+
+    initStringInfo(&buf);
+    appendStringInfoChar(&buf, '"');
+    for (const char* p = name; *p; p++) {
+        /* SQL-style quoting doubles the quote; backslash still escapes. */
+        if (*p == '"' || *p == '\\') {
+            appendStringInfoChar(&buf, *p == '"' ? '"' : '\\');
+        }
+        appendStringInfoChar(&buf, *p);
+    }
+    appendStringInfoChar(&buf, '"');
+    return buf.data;
+}
+
+char*
+pgch_structure_from_tupdesc(TupleDesc desc, const pgch_type_opts* opts) {
+    StringInfoData buf;
+
+    initStringInfo(&buf);
+    for (int i = 0; i < desc->natts; i++) {
+        Form_pg_attribute a = TupleDescAttr(desc, i);
+
+        if (a->attisdropped || a->attgenerated) {
+            continue;
+        }
+        if (buf.len) {
+            appendStringInfoString(&buf, ", ");
+        }
+        appendStringInfo(
+            &buf,
+            "%s %s",
+            pgch_quote_ch_ident(NameStr(a->attname)),
+            pgch_ch_type_for(a->atttypid, a->atttypmod, a->attnotnull, opts)
+        );
+    }
+    return buf.data;
 }
 
 /* ---- byte buffer ---------------------------------------------------- */
