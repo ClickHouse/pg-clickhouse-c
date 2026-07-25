@@ -466,8 +466,10 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
     bytea* bytes;
     Oid* targets  = palloc0(ncols * sizeof(Oid));
     FmgrInfo* out = palloc0(ncols * sizeof(FmgrInfo));
-    Datum* values = palloc0(ncols * sizeof(Datum));
-    bool* nulls   = palloc0(ncols * sizeof(bool));
+    /* Fill by attribute, so dropped and generated attributes leave holes */
+    int* dest     = palloc0(ncols * sizeof(int));
+    Datum* values = palloc0(desc->natts * sizeof(Datum));
+    bool* nulls   = palloc0(desc->natts * sizeof(bool));
     void** states;
     bytes_source src;
     pgch_reader r;
@@ -483,6 +485,7 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
             continue;
         }
         targets[j] = a->atttypid;
+        dest[j]    = i;
         getTypeOutputInfo(a->atttypid, &outfunc, &varlena);
         fmgr_info(outfunc, &out[j]);
         j++;
@@ -519,14 +522,16 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
     while (pgch_reader_next(&r)) {
         StringInfoData row;
 
-        pgch_reader_fill(&r, states, values, nulls);
+        memset(nulls, true, desc->natts * sizeof(bool));
+        pgch_reader_fill_map(&r, states, dest, values, nulls);
         initStringInfo(&row);
         for (size_t i = 0; i < ncols; i++) {
             if (i) {
                 appendStringInfoChar(&row, '|');
             }
             appendStringInfoString(
-                &row, nulls[i] ? "NULL" : OutputFunctionCall(&out[i], values[i])
+                &row,
+                nulls[dest[i]] ? "NULL" : OutputFunctionCall(&out[i], values[dest[i]])
             );
         }
 

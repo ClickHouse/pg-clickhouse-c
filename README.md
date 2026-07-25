@@ -226,7 +226,9 @@ lands in `Decimal` and a domain lands wherever its base type does. Into a
 `interval`, `bit`, `macaddr`, the geo types and user enums get out; a `String`
 column decodes back through the target's input function. `pgch_ch_type_for`
 names the CH type to declare for a PG column, and
-`pgch_structure_from_tupdesc` does it for a whole descriptor.
+`pgch_structure_from_tupdesc` does it for a whole descriptor. An array column
+declares `Array(Nullable(T))` even under `NOT NULL`, which constrains the array
+and not its elements, so loading one wants `pgch_writer_set_null_array`.
 
 Encoding accepts a real PG array or an already-built `pgch_array` for
 `Array(T)` columns. `Tuple` decodes but does not encode: there is no PG

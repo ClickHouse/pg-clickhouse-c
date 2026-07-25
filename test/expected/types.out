@@ -3,7 +3,7 @@ SET lc_monetary = 'C';
 SET TimeZone = 'UTC';
 SET DateStyle = 'ISO, MDY';
 SET IntervalStyle = 'postgres';
--- Verify default type mapping
+-- Verify default type mapping, array elements nullable under either flag
 SELECT d AS pg_type, pgch_chtype(d, true) AS notnull, pgch_chtype(d) AS nullable
 FROM unnest(ARRAY[
     'bool', 'int2', 'int4', 'int8', 'oid', 'xid8', 'float4', 'float8',
@@ -15,51 +15,51 @@ FROM unnest(ARRAY[
     'point', 'polygon', 'money', 'tsvector', 'tsquery', 'jsonpath',
     'int4[]', 'text[]', 'numeric(12,6)[]', 'interval[]'
 ]) AS d;
-     pg_type     |       notnull        |            nullable            
------------------+----------------------+--------------------------------
- bool            | Bool                 | Nullable(Bool)
- int2            | Int16                | Nullable(Int16)
- int4            | Int32                | Nullable(Int32)
- int8            | Int64                | Nullable(Int64)
- oid             | UInt32               | Nullable(UInt32)
- xid8            | UInt64               | Nullable(UInt64)
- float4          | Float32              | Nullable(Float32)
- float8          | Float64              | Nullable(Float64)
- numeric         | Decimal256(38)       | Nullable(Decimal256(38))
- numeric(12,6)   | Decimal(12,6)        | Nullable(Decimal(12,6))
- numeric(9)      | Decimal(9,0)         | Nullable(Decimal(9,0))
- numeric(80,2)   | Decimal256(38)       | Nullable(Decimal256(38))
- text            | String               | Nullable(String)
- varchar(8)      | String               | Nullable(String)
- bpchar(6)       | String               | Nullable(String)
- name            | String               | Nullable(String)
- "char"          | String               | Nullable(String)
- bytea           | String               | Nullable(String)
- date            | Date32               | Nullable(Date32)
- time            | Time64(6)            | Nullable(Time64(6))
- timestamp       | DateTime64(6)        | Nullable(DateTime64(6))
- timestamptz     | DateTime64(6, 'UTC') | Nullable(DateTime64(6, 'UTC'))
- timetz          | String               | Nullable(String)
- interval        | String               | Nullable(String)
- uuid            | UUID                 | Nullable(UUID)
- json            | String               | Nullable(String)
- jsonb           | String               | Nullable(String)
- inet            | String               | Nullable(String)
- cidr            | String               | Nullable(String)
- macaddr         | String               | Nullable(String)
- macaddr8        | String               | Nullable(String)
- bit(4)          | String               | Nullable(String)
- varbit(6)       | String               | Nullable(String)
- point           | String               | Nullable(String)
- polygon         | String               | Nullable(String)
- money           | String               | Nullable(String)
- tsvector        | String               | Nullable(String)
- tsquery         | String               | Nullable(String)
- jsonpath        | String               | Nullable(String)
- int4[]          | Array(Int32)         | Array(Nullable(Int32))
- text[]          | Array(String)        | Array(Nullable(String))
- numeric(12,6)[] | Array(Decimal(12,6)) | Array(Nullable(Decimal(12,6)))
- interval[]      | Array(String)        | Array(Nullable(String))
+     pg_type     |            notnull             |            nullable            
+-----------------+--------------------------------+--------------------------------
+ bool            | Bool                           | Nullable(Bool)
+ int2            | Int16                          | Nullable(Int16)
+ int4            | Int32                          | Nullable(Int32)
+ int8            | Int64                          | Nullable(Int64)
+ oid             | UInt32                         | Nullable(UInt32)
+ xid8            | UInt64                         | Nullable(UInt64)
+ float4          | Float32                        | Nullable(Float32)
+ float8          | Float64                        | Nullable(Float64)
+ numeric         | Decimal256(38)                 | Nullable(Decimal256(38))
+ numeric(12,6)   | Decimal(12,6)                  | Nullable(Decimal(12,6))
+ numeric(9)      | Decimal(9,0)                   | Nullable(Decimal(9,0))
+ numeric(80,2)   | Decimal256(38)                 | Nullable(Decimal256(38))
+ text            | String                         | Nullable(String)
+ varchar(8)      | String                         | Nullable(String)
+ bpchar(6)       | String                         | Nullable(String)
+ name            | String                         | Nullable(String)
+ "char"          | String                         | Nullable(String)
+ bytea           | String                         | Nullable(String)
+ date            | Date32                         | Nullable(Date32)
+ time            | Time64(6)                      | Nullable(Time64(6))
+ timestamp       | DateTime64(6)                  | Nullable(DateTime64(6))
+ timestamptz     | DateTime64(6, 'UTC')           | Nullable(DateTime64(6, 'UTC'))
+ timetz          | String                         | Nullable(String)
+ interval        | String                         | Nullable(String)
+ uuid            | UUID                           | Nullable(UUID)
+ json            | String                         | Nullable(String)
+ jsonb           | String                         | Nullable(String)
+ inet            | String                         | Nullable(String)
+ cidr            | String                         | Nullable(String)
+ macaddr         | String                         | Nullable(String)
+ macaddr8        | String                         | Nullable(String)
+ bit(4)          | String                         | Nullable(String)
+ varbit(6)       | String                         | Nullable(String)
+ point           | String                         | Nullable(String)
+ polygon         | String                         | Nullable(String)
+ money           | String                         | Nullable(String)
+ tsvector        | String                         | Nullable(String)
+ tsquery         | String                         | Nullable(String)
+ jsonpath        | String                         | Nullable(String)
+ int4[]          | Array(Nullable(Int32))         | Array(Nullable(Int32))
+ text[]          | Array(Nullable(String))        | Array(Nullable(String))
+ numeric(12,6)[] | Array(Nullable(Decimal(12,6))) | Array(Nullable(Decimal(12,6)))
+ interval[]      | Array(Nullable(String))        | Array(Nullable(String))
 (43 rows)
 
 -- Verify optional JSON, LowCardinality, and numeric mappings
@@ -77,9 +77,9 @@ SELECT pgch_chtype('jsonb', json_as_json => true) AS json_null,
 CREATE DOMAIN dcount AS int4;
 CREATE DOMAIN dvc AS varchar(8);
 SELECT pgch_chtype('dcount', true), pgch_chtype('dvc', true), pgch_chtype('dcount[]', true);
- pgch_chtype | pgch_chtype | pgch_chtype  
--------------+-------------+--------------
- Int32       | String      | Array(Int32)
+ pgch_chtype | pgch_chtype |      pgch_chtype       
+-------------+-------------+------------------------
+ Int32       | String      | Array(Nullable(Int32))
 (1 row)
 
 -- Decode generated ClickHouse declarations into compatible PostgreSQL types
@@ -89,24 +89,24 @@ FROM (SELECT d, pgch_chtype(d, true) AS c FROM unnest(ARRAY[
     'numeric(12,6)', 'text', 'date', 'time', 'timestamptz', 'uuid',
     'int4[]', 'text[]'
 ]) AS d) q;
-    pg_type    |       ch_type        |        decodes_as        
----------------+----------------------+--------------------------
- bool          | Bool                 | boolean
- int2          | Int16                | smallint
- int4          | Int32                | integer
- int8          | Int64                | bigint
- oid           | UInt32               | bigint
- xid8          | UInt64               | bigint
- float4        | Float32              | real
- float8        | Float64              | double precision
- numeric(12,6) | Decimal(12,6)        | numeric
- text          | String               | text
- date          | Date32               | date
- time          | Time64(6)            | time without time zone
- timestamptz   | DateTime64(6, 'UTC') | timestamp with time zone
- uuid          | UUID                 | uuid
- int4[]        | Array(Int32)         | integer[]
- text[]        | Array(String)        | text[]
+    pg_type    |         ch_type         |        decodes_as        
+---------------+-------------------------+--------------------------
+ bool          | Bool                    | boolean
+ int2          | Int16                   | smallint
+ int4          | Int32                   | integer
+ int8          | Int64                   | bigint
+ oid           | UInt32                  | bigint
+ xid8          | UInt64                  | bigint
+ float4        | Float32                 | real
+ float8        | Float64                 | double precision
+ numeric(12,6) | Decimal(12,6)           | numeric
+ text          | String                  | text
+ date          | Date32                  | date
+ time          | Time64(6)               | time without time zone
+ timestamptz   | DateTime64(6, 'UTC')    | timestamp with time zone
+ uuid          | UUID                    | uuid
+ int4[]        | Array(Nullable(Int32))  | integer[]
+ text[]        | Array(Nullable(String)) | text[]
 (16 rows)
 
 -- Round-trip PostgreSQL types represented by ClickHouse String
@@ -210,9 +210,9 @@ INSERT INTO copyshape VALUES
      ARRAY[1, 2, 3], '{"a": [1, 2]}'),
     (2, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ARRAY[]::int8[], NULL);
 SELECT pgch_structure('copyshape');
-                                                                                                                            pgch_structure                                                                                                                             
------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- id Int32, name Nullable(String), amount Nullable(Decimal(9,2)), ival Nullable(String), mac Nullable(String), ip Nullable(String), when_ Nullable(DateTime64(6, 'UTC')), day Nullable(Date32), tags Array(Nullable(String)), counts Array(Int64), doc Nullable(String)
+                                                                                                                                 pgch_structure                                                                                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ id Int32, name Nullable(String), amount Nullable(Decimal(9,2)), ival Nullable(String), mac Nullable(String), ip Nullable(String), when_ Nullable(DateTime64(6, 'UTC')), day Nullable(Date32), tags Array(Nullable(String)), counts Array(Nullable(Int64)), doc Nullable(String)
 (1 row)
 
 SELECT unnest(pgch_table_roundtrip('copyshape', null_array_empty => true));
@@ -224,17 +224,17 @@ SELECT unnest(pgch_table_roundtrip('copyshape', null_array_empty => true));
 
 -- Generate structure with optional mappings
 SELECT pgch_structure('copyshape', json_as_json => true, low_cardinality => true);
-                                                                                                                                                              pgch_structure                                                                                                                                                               
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- id Int32, name LowCardinality(Nullable(String)), amount Nullable(Decimal(9,2)), ival LowCardinality(Nullable(String)), mac LowCardinality(Nullable(String)), ip LowCardinality(Nullable(String)), when_ Nullable(DateTime64(6, 'UTC')), day Nullable(Date32), tags Array(LowCardinality(Nullable(String))), counts Array(Int64), doc JSON
+                                                                                                                                                                   pgch_structure                                                                                                                                                                    
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ id Int32, name LowCardinality(Nullable(String)), amount Nullable(Decimal(9,2)), ival LowCardinality(Nullable(String)), mac LowCardinality(Nullable(String)), ip LowCardinality(Nullable(String)), when_ Nullable(DateTime64(6, 'UTC')), day Nullable(Date32), tags Array(LowCardinality(Nullable(String))), counts Array(Nullable(Int64)), doc JSON
 (1 row)
 
 -- Skip dropped columns consistently
 ALTER TABLE copyshape DROP COLUMN mac;
 SELECT pgch_structure('copyshape');
-                                                                                                                 pgch_structure                                                                                                                  
--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- id Int32, name Nullable(String), amount Nullable(Decimal(9,2)), ival Nullable(String), ip Nullable(String), when_ Nullable(DateTime64(6, 'UTC')), day Nullable(Date32), tags Array(Nullable(String)), counts Array(Int64), doc Nullable(String)
+                                                                                                                      pgch_structure                                                                                                                       
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ id Int32, name Nullable(String), amount Nullable(Decimal(9,2)), ival Nullable(String), ip Nullable(String), when_ Nullable(DateTime64(6, 'UTC')), day Nullable(Date32), tags Array(Nullable(String)), counts Array(Nullable(Int64)), doc Nullable(String)
 (1 row)
 
 SELECT unnest(pgch_table_roundtrip('copyshape', null_array_empty => true));

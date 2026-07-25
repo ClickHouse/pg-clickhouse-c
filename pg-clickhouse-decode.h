@@ -140,6 +140,19 @@ pgch_convert_free(void* state);
 extern void
 pgch_reader_fill(const pgch_reader* r, void** states, Datum* values, bool* nulls);
 
+/*
+ * Copy current row into dest[i] of values and nulls
+ * Leave unmapped positions untouched, pass NULL dest for column order
+ */
+extern void
+pgch_reader_fill_map(
+    const pgch_reader* r,
+    void** states,
+    const int* dest,
+    Datum* values,
+    bool* nulls
+);
+
 /* Return decoded value as palloc'd C string */
 extern char*
 pgch_value_to_cstring(Oid coltype, Datum value);
@@ -1623,12 +1636,25 @@ pgch_reader_convert_init(const pgch_reader* r, size_t col, Oid outtype) {
 }
 
 void
-pgch_reader_fill(const pgch_reader* r, void** states, Datum* values, bool* nulls) {
+pgch_reader_fill_map(
+    const pgch_reader* r,
+    void** states,
+    const int* dest,
+    Datum* values,
+    bool* nulls
+) {
     for (size_t i = 0; i < r->ncols; i++) {
-        nulls[i] = r->nulls[i];
-        values[i] =
-            nulls[i] ? (Datum)0 : pgch_convert(states ? states[i] : NULL, r->values[i]);
+        int d = dest ? dest[i] : (int)i;
+
+        nulls[d] = r->nulls[i];
+        values[d] =
+            nulls[d] ? (Datum)0 : pgch_convert(states ? states[i] : NULL, r->values[i]);
     }
+}
+
+void
+pgch_reader_fill(const pgch_reader* r, void** states, Datum* values, bool* nulls) {
+    pgch_reader_fill_map(r, states, NULL, values, nulls);
 }
 
 void

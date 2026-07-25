@@ -109,6 +109,7 @@ typedef struct pgch_type_opts {
 /*
  * Return palloc'd ClickHouse type declaration for a PostgreSQL column
  * Include required Nullable wrapper, pass NULL opts for defaults
+ * Array elements stay Nullable regardless of notnull
  */
 extern char*
 pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* opts);
@@ -484,10 +485,13 @@ pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* op
     }
     typid = getBaseTypeAndTypmod(typid, &typmod);
 
-    /* ClickHouse rejects Nullable(Array), apply nullability to elements */
+    /*
+     * Elements stay Nullable: PostgreSQL constrains the array, never its
+     * elements, and ClickHouse rejects Nullable(Array)
+     */
     elemtype = get_element_type(typid);
     if (OidIsValid(elemtype)) {
-        return psprintf("Array(%s)", pgch_ch_type_for(elemtype, typmod, notnull, opts));
+        return psprintf("Array(%s)", pgch_ch_type_for(elemtype, typmod, false, opts));
     }
 
     base = pgch__ch_scalar(typid, typmod, opts);

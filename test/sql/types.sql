@@ -4,7 +4,7 @@ SET TimeZone = 'UTC';
 SET DateStyle = 'ISO, MDY';
 SET IntervalStyle = 'postgres';
 
--- Verify default type mapping
+-- Verify default type mapping, array elements nullable under either flag
 SELECT d AS pg_type, pgch_chtype(d, true) AS notnull, pgch_chtype(d) AS nullable
 FROM unnest(ARRAY[
     'bool', 'int2', 'int4', 'int8', 'oid', 'xid8', 'float4', 'float8',

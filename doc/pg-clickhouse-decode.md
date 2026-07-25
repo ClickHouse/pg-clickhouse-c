@@ -220,6 +220,8 @@ associated allocations.
 ```c
 void pgch_reader_fill(const pgch_reader *r, void **states,
                       Datum *values, bool *nulls);
+void pgch_reader_fill_map(const pgch_reader *r, void **states,
+                          const int *dest, Datum *values, bool *nulls);
 ```
 
 Convert current reader row into caller arrays. `values`, `nulls`, and optional
@@ -231,6 +233,16 @@ while (pgch_reader_next(&reader)) {
     pgch_reader_fill(&reader, states, values, nulls);
     slot = heap_form_tuple(desc, values, nulls);
 }
+```
+
+`pgch_reader_fill_map` writes column `i` to `dest[i]` instead, for a target
+holding attributes no stream column feeds. Positions outside `dest` keep
+whatever the caller left there, so fill them, or preset their `nulls` entry:
+
+```c
+memset(slot->tts_isnull, true, desc->natts * sizeof(bool));
+pgch_reader_fill_map(&reader, states, attnums,
+                     slot->tts_values, slot->tts_isnull);
 ```
 
 ## Render values as text

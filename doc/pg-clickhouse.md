@@ -131,10 +131,12 @@ Set options to change those defaults:
 - `numeric_as_string` maps unconstrained `numeric` to `String`
 
 Domains use base type mapping and typmod. PostgreSQL arrays map to ClickHouse
-`Array`; nullable array columns apply nullability to elements because
-ClickHouse does not support `Nullable(Array(...))`. Types without dedicated
-mapping use `String`. `JSON` remains unwrapped because ClickHouse rejects
-`Nullable(JSON)`.
+`Array`, elements always `Nullable`: a PostgreSQL `NOT NULL` constrains the
+array and never its elements, and ClickHouse does not support
+`Nullable(Array(...))`. Loading such a column needs
+`pgch_writer_set_null_array` since a NULL array has no `Array` representation.
+Types without dedicated mapping use `String`. `JSON` remains unwrapped because
+ClickHouse rejects `Nullable(JSON)`.
 
 `pgch_quote_ch_ident` returns unquoted name when valid bare ClickHouse
 identifier, otherwise returns quoted and escaped identifier.
