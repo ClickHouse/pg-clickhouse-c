@@ -20,13 +20,19 @@ IPv4/IPv6-to-`inet`, UUID byteswap and enum name lookup all happen inline at
 read time, which is why a scan pays only for the columns it touches.
 
 `*valtype` is in-out. It arrives holding your preferred OID and leaves holding
-the OID of the returned `Datum`. Only `JSON` / `Object` honor the incoming
-value: pass `JSONOID` and the document text goes through `json_in`, keeping
-ClickHouse's verbatim formatting, instead of `jsonb_in` normalizing it. Every
-other kind overwrites `*valtype` with the canonical mapping.
+the OID of the returned `Datum`. Two kinds honor the incoming value; every
+other overwrites `*valtype` with the canonical mapping.
+
+* `JSON` / `Object`: pass `JSONOID` and the document text goes through
+  `json_in`, keeping ClickHouse's verbatim formatting, instead of `jsonb_in`
+  normalizing it.
+* `UInt64` on PG 19 and later: pass `OID8OID` and the value arrives as `oid8`,
+  the only PG type that holds the whole unsigned range, instead of raising
+  above `2^63 - 1`.
 
 Raises `ERRCODE_FDW_INVALID_DATA_TYPE` on an unmapped kind and
-`ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE` on a `UInt64` above `2^63 - 1`.
+`ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE` on a `UInt64` above `2^63 - 1` that was
+not pinned to `oid8`.
 
 Decoded values are freshly `palloc`'d, never pointers into the block, so a
 block can be destroyed as soon as its rows are consumed.

@@ -226,7 +226,9 @@ Decode and encode each depend only on the core header; take one or both.
 | `Array(T)` | `T[]`, one PG dimension per `Array` layer |
 | `Tuple(...)` | `record` |
 
-`UInt64` above `2^63 - 1` raises rather than wrapping. `bytea` encodes into
+`UInt64` above `2^63 - 1` raises rather than wrapping; on PG 19 and later
+preset `reader.coltypes[i] = OID8OID` to take the whole unsigned range as
+`oid8`, and `oid8` encodes back into `UInt64` bit for bit. `bytea` encodes into
 `String` and `FixedString` verbatim. Decoding a `json` column instead of
 `jsonb` keeps ClickHouse's verbatim document text: preset
 `reader.coltypes[i] = JSONOID` after `pgch_reader_init`.

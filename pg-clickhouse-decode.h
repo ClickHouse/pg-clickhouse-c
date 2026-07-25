@@ -23,9 +23,10 @@ extern "C" {
 
 /*
  * Read one value. *valtype arrives holding the caller's preferred OID and
- * leaves holding the OID of the returned Datum; only CHC_JSON honors the
- * incoming value (JSONOID keeps CH's verbatim text out of a jsonb round
- * trip), every other kind overwrites it. Raises on unsupported types.
+ * leaves holding the OID of the returned Datum; only CHC_JSON (JSONOID keeps
+ * CH's verbatim text out of a jsonb round trip) and, from PG 19, CHC_UINT64
+ * (OID8OID takes the range above 2^63 - 1) honor the incoming value, every
+ * other kind overwrites it. Raises on unsupported types.
  */
 extern Datum
 pgch_read_value(
@@ -80,7 +81,8 @@ typedef struct pgch_chunk_source {
 typedef struct pgch_reader {
     pgch_block_source src;
 
-    Oid* coltypes;    /* pgch_datum_oid per column, caller may override JSONB->JSON */
+    Oid* coltypes;    /* pgch_datum_oid per column, caller may override
+                         JSONB->JSON and, from PG 19, bigint->oid8 */
     char** colshapes; /* first-block shapes, for the stability check */
     Datum* values;
     bool* nulls;
@@ -730,6 +732,15 @@ pgch_read_value(
         uint64_t v =
             pgch__rd_u64((const uint8_t*)chc_column_fixed_data(col, NULL), row);
 
+#if PG_VERSION_NUM >= 190000
+        /*
+         * oid8 spans the whole unsigned range, so a caller that pins it takes
+         * values bigint cannot hold. Same in-out valtype as CHC_JSON.
+         */
+        if (*valtype == OID8OID) {
+            return ObjectId8GetDatum(v);
+        }
+#endif
         if (v > (uint64_t)PG_INT64_MAX) {
             pgch_errorf(
                 ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
@@ -1149,7 +1160,8 @@ pgch_reader_next(pgch_reader* r) {
         for (size_t i = 0; i < ncols; i++) {
             /*
              * coltypes[i] is passed in so callers can pin CHC_JSON to JSONOID
-             * and keep CH's verbatim text; every other kind overwrites it.
+             * and keep CH's verbatim text, or CHC_UINT64 to OID8OID for its
+             * top half; every other kind overwrites it.
              */
             Oid t                 = r->coltypes[i];
             const chc_column* col = chc_block_column(r->cur, i);

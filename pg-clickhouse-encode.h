@@ -1400,6 +1400,9 @@ pgch__append_one(
     case INT2OID:
     case INT4OID:
     case INT8OID:
+#if PG_VERSION_NUM >= 190000
+    case OID8OID:
+#endif
     case XID8OID: {
         int64_t v = 0;
 
@@ -1414,7 +1417,7 @@ pgch__append_one(
             } else if (valtype == INT4OID) {
                 v = (int64_t)DatumGetInt32(val);
             } else {
-                /* xid8 is an unsigned 64: same bits, UInt64 on the far side. */
+                /* xid8 / oid8 are unsigned 64: same bits, UInt64 on the far side. */
                 v = DatumGetInt64(val);
             }
         }

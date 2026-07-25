@@ -476,6 +476,9 @@ pgch__ch_scalar(Oid typid, int32 typmod, const pgch_type_opts* opts) {
     case OIDOID:
         return "UInt32";
     case XID8OID:
+#if PG_VERSION_NUM >= 190000
+    case OID8OID:
+#endif
         return "UInt64";
     case FLOAT4OID:
         return "Float32";
