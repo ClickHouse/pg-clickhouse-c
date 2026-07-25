@@ -151,7 +151,8 @@ void pgch_append_inet(pgch_writer *w, size_t col,
 NUL and truncates long values. Enum input must match declared name.
 
 `pgch_append_decimal` accepts `[-]digits[.frac]`; destination column supplies
-scale. PostgreSQL `numeric_out` output is suitable input.
+scale. PostgreSQL `numeric_out` output is suitable input. Values exceeding
+destination `Decimal` width raise instead of wrapping.
 
 `pgch_append_uuid` accepts PostgreSQL UUID byte order.
 

@@ -183,7 +183,8 @@ void  pgch_convert_free(void *state);
 
 Conversion supports:
 
-- `pgch_array` to PostgreSQL arrays
+- `pgch_array` to PostgreSQL arrays, nested arrays must share dimensions
+  because PostgreSQL arrays are rectangular
 - `pgch_tuple` to PostgreSQL records and named composite types
 - ClickHouse `String` values through PostgreSQL target input function
 - Explicit PostgreSQL casts between scalar types

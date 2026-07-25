@@ -19,6 +19,8 @@ SELECT pgch_roundtrip('Int32', '(1,2)'::point);
 -- Reject values outside destination domain
 SELECT pgch_roundtrip('Decimal(9,2)', 'NaN'::numeric);
 SELECT pgch_roundtrip('Enum8('' a'' = 1)', 'z'::text);
+SELECT pgch_roundtrip('Decimal(9,2)', 1000000000::numeric);
+SELECT pgch_roundtrip('Decimal(18,0)', 99999999999999999999::numeric);
 
 -- Reject unsupported encoder types
 SELECT pgch_encode('Tuple(Int32)', ROW(1)::record);
@@ -56,6 +58,15 @@ SELECT pgch_decode(pgch_block('LowCardinality(Nullable(String))', 0, ''::bytea))
 
 -- Reject UInt64 values outside bigint range
 SELECT pgch_decode(pgch_block('UInt64', 1, '\xffffffffffffffff'::bytea));
+
+-- Reject DateTime64 outside timestamp range
+SELECT pgch_decode(pgch_block('DateTime64(0)', 1, '\x0000000000000080'::bytea));
+
+-- Reject nested arrays PostgreSQL cannot represent, [[1,2],[3]]
+SELECT pgch_decode(pgch_block('Array(Array(Int32))', 1,
+                              '\x0200000000000000'::bytea ||
+                              '\x02000000000000000300000000000000'::bytea ||
+                              '\x010000000200000003000000'::bytea));
 
 -- Reject truncated streams and incompatible schema changes
 SELECT pgch_decode('\x0103'::bytea);

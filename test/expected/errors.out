@@ -26,6 +26,10 @@ SELECT pgch_roundtrip('Decimal(9,2)', 'NaN'::numeric);
 ERROR:  pgch: cannot encode "NaN" as ClickHouse Decimal
 SELECT pgch_roundtrip('Enum8('' a'' = 1)', 'z'::text);
 ERROR:  pgch: enum value 'z' not found
+SELECT pgch_roundtrip('Decimal(9,2)', 1000000000::numeric);
+ERROR:  pgch: value "1000000000" out of range for ClickHouse Decimal32
+SELECT pgch_roundtrip('Decimal(18,0)', 99999999999999999999::numeric);
+ERROR:  pgch: value "99999999999999999999" out of range for ClickHouse Decimal64
 -- Reject unsupported encoder types
 SELECT pgch_encode('Tuple(Int32)', ROW(1)::record);
 ERROR:  pgch: unsupported column type: Tuple(Int32)
@@ -83,6 +87,15 @@ SELECT pgch_decode(pgch_block('LowCardinality(Nullable(String))', 0, ''::bytea))
 -- Reject UInt64 values outside bigint range
 SELECT pgch_decode(pgch_block('UInt64', 1, '\xffffffffffffffff'::bytea));
 ERROR:  pgch: value 18446744073709551615 is out of range of bigint
+-- Reject DateTime64 outside timestamp range
+SELECT pgch_decode(pgch_block('DateTime64(0)', 1, '\x0000000000000080'::bytea));
+ERROR:  pgch: DateTime64 value out of range
+-- Reject nested arrays PostgreSQL cannot represent, [[1,2],[3]]
+SELECT pgch_decode(pgch_block('Array(Array(Int32))', 1,
+                              '\x0200000000000000'::bytea ||
+                              '\x02000000000000000300000000000000'::bytea ||
+                              '\x010000000200000003000000'::bytea));
+ERROR:  pgch: nested arrays must have sub-arrays with matching dimensions
 -- Reject truncated streams and incompatible schema changes
 SELECT pgch_decode('\x0103'::bytea);
 ERROR:  decode: ioless buffer drained

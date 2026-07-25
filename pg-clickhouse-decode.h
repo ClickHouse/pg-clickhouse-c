@@ -151,13 +151,12 @@ pgch_value_to_cstring(Oid coltype, Datum value);
 
 #include "access/htup_details.h"
 #include "access/tupconvert.h"
-#include "catalog/pg_type.h"
 #include "catalog/pg_type_d.h"
+#include "common/int.h"
 #include "fmgr.h"
 #include "funcapi.h"
 #include "lib/stringinfo.h"
 #include "parser/parse_coerce.h"
-#include "parser/parse_type.h"
 #include "port/pg_bswap.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -167,7 +166,6 @@ pgch_value_to_cstring(Oid coltype, Datum value);
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/numeric.h"
-#include "utils/syscache.h"
 #include "utils/timestamp.h"
 #include "utils/typcache.h"
 #include "utils/uuid.h"
@@ -435,10 +433,8 @@ pgch__read_json(const chc_column* col, uint64_t row, Oid valtype) {
     Datum ret;
 
     pgch__slice_str(col, row, &p, &len);
-    cstr = palloc(len + 1);
-    memcpy(cstr, p, len);
-    cstr[len] = '\0';
-    ret       = DirectFunctionCall1(
+    cstr = pnstrdup(p, len);
+    ret  = DirectFunctionCall1(
         valtype == JSONOID ? json_in : jsonb_in, CStringGetDatum(cstr)
     );
     pfree(cstr);
@@ -738,10 +734,19 @@ pgch_read_value(
             );
         }
         int64 power = pgch_pow10[scale];
+        TimestampTz ts;
 
-        return TimestampTzGetDatum(
-            time_t_to_timestamptz(raw / power) + (raw % power) * USECS_PER_SEC / power
-        );
+        if (pg_mul_s64_overflow(raw / power, USECS_PER_SEC, &ts) ||
+            pg_sub_s64_overflow(
+                ts, PGCH__DATE_OFFSET * SECS_PER_DAY * USECS_PER_SEC, &ts
+            ) ||
+            pg_add_s64_overflow(ts, (raw % power) * USECS_PER_SEC / power, &ts) ||
+            !IS_VALID_TIMESTAMP(ts)) {
+            pgch_error(
+                ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, "DateTime64 value out of range"
+            );
+        }
+        return TimestampTzGetDatum(ts);
     }
     case CHC_TIME: {
         const uint8_t* p = (const uint8_t*)chc_column_fixed_data(col, NULL);
@@ -758,10 +763,15 @@ pgch_read_value(
             );
         }
         int64 power = pgch_pow10[scale];
+        TimeADT t;
 
-        return TimeADTGetDatum(
-            (raw / power) * USECS_PER_SEC + (raw % power) * USECS_PER_SEC / power
-        );
+        if (pg_mul_s64_overflow(raw / power, USECS_PER_SEC, &t) ||
+            pg_add_s64_overflow(t, (raw % power) * USECS_PER_SEC / power, &t)) {
+            pgch_error(
+                ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, "Time64 value out of range"
+            );
+        }
+        return TimeADTGetDatum(t);
     }
     case CHC_UUID:
         return pgch__read_uuid(col, row);
@@ -1171,6 +1181,7 @@ struct pgch_convert_state {
     Oid intype;
     Oid outtype;
     pgch__convert_fn func;
+    FmgrInfo flinfo; /* Cast, type input or record_out, whichever func needs */
 
     TupleConversionMap* tupmap;
     TupleDesc indesc;
@@ -1184,18 +1195,16 @@ struct pgch_convert_state {
     char typalign;
 
     int32 typmod;
-    Oid typinput;
     Oid typioparam;
 
     CoercionPathType ctype;
-    Oid castfunc;
 };
 
 static inline Datum
 pgch__convert_generic(pgch_convert_state* state, Datum val) {
     if (state->ctype == COERCION_PATH_FUNC) {
-        Assert(state->castfunc != InvalidOid);
-        val = OidFunctionCall1(state->castfunc, val);
+        Assert(OidIsValid(state->flinfo.fn_oid));
+        val = FunctionCall1(&state->flinfo, val);
     }
 
     return val;
@@ -1235,7 +1244,7 @@ pgch__convert_record(pgch_convert_state* state, Datum val) {
 
         if (state->outtype == TEXTOID) {
             val = CStringGetTextDatum(
-                DatumGetCString(OidFunctionCall1(F_RECORD_OUT, val))
+                DatumGetCString(FunctionCall1(&state->flinfo, val))
             );
         }
     } else {
@@ -1280,37 +1289,6 @@ pgch__flatten_array(
         }
     }
     return true;
-}
-
-static void
-pgch__emit_array_text(pgch_array* slot, FmgrInfo* outfn, StringInfo buf) {
-    appendStringInfoChar(buf, '{');
-    for (size_t i = 0; i < slot->len; i++) {
-        if (i > 0) {
-            appendStringInfoChar(buf, ',');
-        }
-
-        if (slot->ndim > 1) {
-            pgch_array* child = (pgch_array*)DatumGetPointer(slot->datums[i]);
-
-            pgch__emit_array_text(child, outfn, buf);
-        } else if (slot->nulls[i]) {
-            appendStringInfoString(buf, "NULL");
-        } else {
-            char* s = OutputFunctionCall(outfn, slot->datums[i]);
-
-            appendStringInfoChar(buf, '"');
-            for (char* p = s; *p; p++) {
-                if (*p == '"' || *p == '\\') {
-                    appendStringInfoChar(buf, '\\');
-                }
-                appendStringInfoChar(buf, *p);
-            }
-            appendStringInfoChar(buf, '"');
-            pfree(s);
-        }
-    }
-    appendStringInfoChar(buf, '}');
 }
 
 static void
@@ -1382,40 +1360,24 @@ pgch__convert_array(pgch_convert_state* state, Datum val) {
             flat      = palloc(sizeof(Datum) * total);
             flatnulls = palloc0(sizeof(bool) * total);
 
-            if (pgch__flatten_array(slot, dims, 0, flat, flatnulls, &idx)) {
-                val = PointerGetDatum(construct_md_array(
-                    flat,
-                    flatnulls,
-                    slot->ndim,
-                    dims,
-                    lbs,
-                    state->item_type,
-                    state->typlen,
-                    state->typbyval,
-                    state->typalign
-                ));
-            } else {
-                StringInfoData buf;
-                FmgrInfo outfn;
-                Oid out_func;
-                Oid in_func;
-                Oid ioparam;
-                bool varlena;
-
-                pfree(flat);
-                pfree(flatnulls);
-
-                getTypeOutputInfo(state->item_type, &out_func, &varlena);
-                fmgr_info(out_func, &outfn);
-
-                initStringInfo(&buf);
-                pgch__emit_array_text(slot, &outfn, &buf);
-
-                getTypeInputInfo(state->intype, &in_func, &ioparam);
-                val = OidInputFunctionCall(in_func, buf.data, ioparam, -1);
-
-                pfree(buf.data);
+            /* PostgreSQL arrays are rectangular, ClickHouse nested arrays are not */
+            if (!pgch__flatten_array(slot, dims, 0, flat, flatnulls, &idx)) {
+                pgch_error(
+                    ERRCODE_ARRAY_SUBSCRIPT_ERROR,
+                    "nested arrays must have sub-arrays with matching dimensions"
+                );
             }
+            val = PointerGetDatum(construct_md_array(
+                flat,
+                flatnulls,
+                slot->ndim,
+                dims,
+                lbs,
+                state->item_type,
+                state->typlen,
+                state->typbyval,
+                state->typalign
+            ));
         }
     }
 
@@ -1424,8 +1386,8 @@ pgch__convert_array(pgch_convert_state* state, Datum val) {
 
 static Datum
 pgch__convert_from_text(pgch_convert_state* state, Datum val) {
-    return OidInputFunctionCall(
-        state->typinput, TextDatumGetCString(val), state->typioparam, state->typmod
+    return InputFunctionCall(
+        &state->flinfo, TextDatumGetCString(val), state->typioparam, state->typmod
     );
 }
 
@@ -1520,7 +1482,9 @@ pgch__convert_init(const chc_type* ct, Datum val, Oid intype, Oid outtype) {
         state->indesc       = CreateTemplateTupleDesc(nfields);
         state->field_states = palloc(sizeof(void*) * nfields);
 
-        if (!(outtype == RECORDOID || outtype == TEXTOID)) {
+        if (outtype == TEXTOID) {
+            fmgr_info(F_RECORD_OUT, &state->flinfo);
+        } else if (outtype != RECORDOID) {
             TypeCacheEntry* typentry;
             TupleDesc tupdesc;
 
@@ -1593,29 +1557,26 @@ pgch__convert_init(const chc_type* ct, Datum val, Oid intype, Oid outtype) {
         }
 
         if (intype == TEXTOID) {
-            Type baseType;
-            Oid baseTypeId;
-            Form_pg_type typform;
+            Oid baseTypeId = getBaseTypeAndTypmod(outtype, &state->typmod);
+            Oid typinput;
 
-            baseTypeId = getBaseTypeAndTypmod(outtype, &state->typmod);
             if (baseTypeId != INTERVALOID) {
                 state->typmod = -1;
             }
 
-            baseType          = typeidType(baseTypeId);
-            typform           = (Form_pg_type)GETSTRUCT(baseType);
-            state->typinput   = typform->typinput;
-            state->typioparam = getTypeIOParam(baseType);
-            state->func       = pgch__convert_from_text;
-            ReleaseSysCache(baseType);
+            getTypeInputInfo(baseTypeId, &typinput, &state->typioparam);
+            fmgr_info(typinput, &state->flinfo);
+            state->func = pgch__convert_from_text;
         } else if (outtype == BOOLOID && intype == INT2OID) {
             state->func = pgch__convert_bool;
         } else {
-            state->ctype = find_coercion_pathway(
-                outtype, intype, COERCION_EXPLICIT, &state->castfunc
-            );
+            Oid castfunc;
+
+            state->ctype =
+                find_coercion_pathway(outtype, intype, COERCION_EXPLICIT, &castfunc);
             switch (state->ctype) {
             case COERCION_PATH_FUNC:
+                fmgr_info(castfunc, &state->flinfo);
                 break;
             case COERCION_PATH_RELABELTYPE:
 

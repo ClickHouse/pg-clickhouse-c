@@ -184,6 +184,7 @@ pgch_writer_flush(pgch_writer* w, pgch_buf* out, const chc_block_opts* opts);
 
 #include "catalog/pg_type_d.h"
 #include "common/hashfn.h"
+#include "common/int.h"
 #include "fmgr.h"
 #include "parser/parse_coerce.h"
 #include "port/pg_bswap.h"
@@ -192,8 +193,10 @@ pgch_writer_flush(pgch_writer* w, pgch_buf* out, const chc_block_opts* opts);
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/inet.h"
+#include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/numeric.h"
 #include "utils/timestamp.h"
 #include "utils/uuid.h"
 #if PG_VERSION_NUM >= 190000
@@ -235,11 +238,18 @@ typedef struct pgch__cast {
     Oid ioparam;
 } pgch__cast;
 
+/* Cache element metadata of last PostgreSQL array type appended to a column */
+typedef struct pgch__arrmeta {
+    Oid valtype;
+    ArrayMetaState meta;
+} pgch__arrmeta;
+
 struct pgch__node {
     pgch__node_kind kind;
     const chc_type* type;
     Oid target;
     pgch__cast* cast;
+    pgch__arrmeta* arrmeta;
     union {
         struct {
             pgch_buf data;
@@ -527,6 +537,7 @@ pgch__decimal_to_bytes(const char* s, uint32_t scale, size_t width, uint8_t* out
 
     uint32_t mag[8] = {};
     size_t nwords   = width / 4;
+    bool spilled    = false;
 
     for (size_t i = 0; i < ndig; i++) {
         char c = i < ilen ? s[i] : i - ilen < flen ? frac[i - ilen] : '0';
@@ -546,6 +557,16 @@ pgch__decimal_to_bytes(const char* s, uint32_t scale, size_t width, uint8_t* out
             mag[b] = (uint32_t)v;
             carry  = v >> 32;
         }
+        spilled |= carry != 0;
+    }
+    /* Sign bit set means magnitude no longer fits the signed width */
+    if (spilled || (mag[nwords - 1] & 0x80000000u)) {
+        pgch_errorf(
+            ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+            "value \"%s\" out of range for ClickHouse Decimal%zu",
+            input,
+            width * 8
+        );
     }
     if (neg) {
         for (size_t b = 0; b < nwords; b++) {
@@ -752,7 +773,17 @@ pgch_append_bytes(pgch_writer* w, size_t col, const void* p, size_t n, bool isnu
     MemoryContextSwitchTo(old);
 }
 
-/* PostgreSQL numeric_out renders non-finite values as words */
+/* PostgreSQL added numeric Infinity in version 14 */
+static inline bool
+pgch__numeric_nonfinite(Numeric num) {
+#if PG_VERSION_NUM >= 140000
+    return numeric_is_nan(num) || numeric_is_inf(num);
+#else
+    return numeric_is_nan(num);
+#endif
+}
+
+/* PostgreSQL numeric text renders non-finite values as words */
 static bool
 pgch__finite_decimal(const char* s) {
     if (*s == '-' || *s == '+') {
@@ -1187,17 +1218,16 @@ pgch__cast_value(
         Oid funcid;
         CoercionPathType path =
             find_coercion_pathway(to, from, COERCION_EXPLICIT, &funcid);
-        MemoryContext old = MemoryContextSwitchTo(w->cxt);
 
         if (!cast) {
-            cast = node->cast = palloc0(sizeof(*cast));
+            cast = node->cast = MemoryContextAllocZero(w->cxt, sizeof(*cast));
         }
         cast->relabel = false;
         cast->viaio   = false;
 
         switch (path) {
         case COERCION_PATH_FUNC:
-            fmgr_info(funcid, &cast->flinfo);
+            fmgr_info_cxt(funcid, &cast->flinfo, w->cxt);
             break;
         case COERCION_PATH_RELABELTYPE:
             cast->relabel = true;
@@ -1208,23 +1238,20 @@ pgch__cast_value(
 
             /* PostgreSQL also offers I/O coercion from text to non-text types */
             if (to != TEXTOID) {
-                MemoryContextSwitchTo(old);
                 cast->from = InvalidOid;
                 return false;
             }
             getTypeOutputInfo(from, &outfunc, &varlena);
             getTypeInputInfo(to, &infunc, &cast->ioparam);
-            fmgr_info(outfunc, &cast->flinfo);
-            fmgr_info(infunc, &cast->infn);
+            fmgr_info_cxt(outfunc, &cast->flinfo, w->cxt);
+            fmgr_info_cxt(infunc, &cast->infn, w->cxt);
             cast->viaio = true;
             break;
         }
         default:
-            MemoryContextSwitchTo(old);
             cast->from = InvalidOid;
             return false;
         }
-        MemoryContextSwitchTo(old);
         cast->from = from;
         cast->to   = to;
     }
@@ -1257,15 +1284,27 @@ pgch__append_one(
             return;
         }
         if (valtype != ANYARRAYOID) {
-            Oid elemtype = get_element_type(valtype);
+            pgch__node* node  = pgch__cursor_node(w, col);
+            pgch__arrmeta* am = node->arrmeta;
+            ArrayMetaState* ms;
 
-            if (OidIsValid(elemtype)) {
-                int16 typlen;
-                bool typbyval;
-                char typalign;
-
-                get_typlenbyvalalign(elemtype, &typlen, &typbyval, &typalign);
-                val     = pgch_array_from_pg(val, elemtype, typlen, typbyval, typalign);
+            if (!am) {
+                am = node->arrmeta = MemoryContextAllocZero(w->cxt, sizeof(*am));
+            }
+            ms = &am->meta;
+            if (am->valtype != valtype) {
+                am->valtype      = valtype;
+                ms->element_type = get_element_type(valtype);
+                if (OidIsValid(ms->element_type)) {
+                    get_typlenbyvalalign(
+                        ms->element_type, &ms->typlen, &ms->typbyval, &ms->typalign
+                    );
+                }
+            }
+            if (OidIsValid(ms->element_type)) {
+                val = pgch_array_from_pg(
+                    val, ms->element_type, ms->typlen, ms->typbyval, ms->typalign
+                );
                 valtype = ANYARRAYOID;
             }
         }
@@ -1324,7 +1363,17 @@ pgch__append_one(
             goto type_mismatch;
         }
         if (!isnull) {
-            s = DatumGetCString(DirectFunctionCall1(numeric_out, val));
+            Numeric num = DatumGetNumeric(val);
+
+            if (w->nonfinite != PGCH_NONFINITE_KEEP && pgch__numeric_nonfinite(num)) {
+                /* Leave digits NULL so nonfinite policy decides NULL or zero */
+                isnull = w->nonfinite == PGCH_NONFINITE_NULL;
+            } else {
+                s = numeric_normalize(num);
+            }
+            if ((Pointer)num != DatumGetPointer(val)) {
+                pfree(num);
+            }
         }
         pgch_append_decimal(w, col, s, isnull);
         if (s) {
@@ -1334,25 +1383,30 @@ pgch__append_one(
     }
     case TEXTOID:
     case BYTEAOID: {
-        const char* p = NULL;
-        size_t len    = 0;
-        struct varlena* string;
+        const char* p          = NULL;
+        size_t len             = 0;
+        struct varlena* string = NULL;
 
-        if (!isnull) {
-            string = PG_DETOAST_DATUM(val);
-            p      = VARDATA(string);
-            len    = VARSIZE_ANY_EXHDR(string);
-        }
         switch (kind) {
         case CHC_FIXED_STRING:
         case CHC_STRING:
         case CHC_ENUM8:
         case CHC_ENUM16:
-            pgch_append_bytes(w, col, p, len, isnull);
-            return;
+            break;
         default:
             goto type_mismatch;
         }
+        if (!isnull) {
+            /* Packed detoast keeps short varlena headers instead of widening them */
+            string = PG_DETOAST_DATUM_PACKED(val);
+            p      = VARDATA_ANY(string);
+            len    = VARSIZE_ANY_EXHDR(string);
+        }
+        pgch_append_bytes(w, col, p, len, isnull);
+        if (string && (Pointer)string != DatumGetPointer(val)) {
+            pfree(string);
+        }
+        return;
     }
     case DATEOID: {
         int64_t seconds = 0;
@@ -1427,7 +1481,14 @@ pgch__append_one(
                     us_rem += USECS_PER_SEC;
                 }
                 secs += PGCH__DATE_OFFSET * SECS_PER_DAY;
-                raw = secs * power + us_rem * power / USECS_PER_SEC;
+                if (pg_mul_s64_overflow(secs, power, &raw) ||
+                    pg_add_s64_overflow(raw, us_rem * power / USECS_PER_SEC, &raw)) {
+                    pgch_errorf(
+                        ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+                        "timestamp out of range for %s",
+                        chc_type_name(pgch__cursor_node(w, col)->type, NULL)
+                    );
+                }
             }
             pgch_append_datetime64_raw(w, col, raw, isnull);
         } break;
@@ -1506,21 +1567,38 @@ pgch__append_one(
     }
     case JSONOID:
     case JSONBOID: {
-        char* s    = NULL;
-        size_t len = 0;
+        const char* p          = NULL;
+        size_t len             = 0;
+        struct varlena* string = NULL;
+        StringInfoData buf     = {};
 
         if (kind != CHC_JSON && kind != CHC_OBJECT && kind != CHC_STRING) {
             goto type_mismatch;
         }
         if (!isnull) {
-            s = DatumGetCString(
-                DirectFunctionCall1(valtype == JSONBOID ? jsonb_out : json_out, val)
-            );
-            len = strlen(s);
+            if (valtype == JSONOID) {
+                /* PostgreSQL stores json as text */
+                string = PG_DETOAST_DATUM_PACKED(val);
+                p      = VARDATA_ANY(string);
+                len    = VARSIZE_ANY_EXHDR(string);
+            } else {
+                Jsonb* jb = DatumGetJsonbP(val);
+
+                initStringInfo(&buf);
+                JsonbToCString(&buf, &jb->root, VARSIZE(jb));
+                p   = buf.data;
+                len = buf.len;
+                if ((Pointer)jb != DatumGetPointer(val)) {
+                    pfree(jb);
+                }
+            }
         }
-        pgch_append_bytes(w, col, s, len, isnull);
-        if (s) {
-            pfree(s);
+        pgch_append_bytes(w, col, p, len, isnull);
+        if (string && (Pointer)string != DatumGetPointer(val)) {
+            pfree(string);
+        }
+        if (buf.data) {
+            pfree(buf.data);
         }
         return;
     }
