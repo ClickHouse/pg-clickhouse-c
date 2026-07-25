@@ -1,70 +1,66 @@
 # pg-clickhouse.h
 
-Core header. Everything the decode and encode headers share: the allocator,
-error mapping, type mapping, the Array / Tuple carriers, and a byte buffer
-that doubles as a `chc_io` write sink.
+Core API shared by encoder and decoder. Include `postgres.h` and
+`clickhouse.h` through this header.
 
-Depends on [clickhouse.h](https://github.com/ClickHouse/clickhouse-c/blob/main/doc/clickhouse.md)
-and `postgres.h`. Exactly one TU defines `PGCH_IMPLEMENTATION` before
-including.
+Define `PGCH_IMPLEMENTATION` in exactly one translation unit:
+
+```c
+#define CHC_IMPLEMENTATION
+#define PGCH_IMPLEMENTATION
+#include "clickhouse.h"
+#include "pg-clickhouse.h"
+```
+
+Include `pg-clickhouse.h` normally in all other translation units. Define
+`CHC_IMPLEMENTATION` beside `PGCH_IMPLEMENTATION` when using
+`pgch_in_alloc` or `pgch_reader_init_chunks`.
 
 ## Errors
 
 ```c
-#define PGCH_MSG_PREFIX ""                  /* unless the build defines it */
+#define PGCH_MSG_PREFIX ""
 
 #define pgch_error(sqlstate, msg)
 #define pgch_errorf(sqlstate, fmt, ...)
 
-pg_noreturn void pgch_raise(const chc_err *err, int sqlstate, const char *what);
+pg_noreturn void pgch_raise(const chc_err *err, int sqlstate,
+                            const char *what);
 ```
 
-Every message the library raises starts with `PGCH_MSG_PREFIX`, concatenated
-into the `errmsg` format at compile time. It must be a string literal, and
-belongs in the build rather than one TU so every TU expanding `pgch_error`
-agrees:
+Define `PGCH_MSG_PREFIX` as a string literal in build flags to identify errors
+from your extension:
 
 ```make
 PG_CPPFLAGS += -DPGCH_MSG_PREFIX='"pg_chdb: "'
 ```
 
-`pgch_raise` turns a clickhouse-c `chc_err` into `ereport(ERROR)`, splicing
-`what` between the prefix and `err->msg`:
+Keep this definition consistent across every translation unit. `pgch_error`
+and `pgch_errorf` raise PostgreSQL `ERROR`. `pgch_raise` raises `ERROR` with
+requested SQLSTATE, optional `what` text, and clickhouse-c error message.
 
 ```c
-if (chc_block_write(&io, bb, &opts, &err) != CHC_OK)
+if (chc_block_write(&io, block, &opts, &err) != CHC_OK)
     pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
-/* ERROR:  pg_chdb: block write: <clickhouse-c message> */
 ```
 
-The `chc_err` `server_code` is not consulted; pass the sqlstate you want.
-
-## Allocator
+## Allocation
 
 ```c
 extern const chc_alloc pgch_alloc;
+chc_in *pgch_in_alloc(void);
 ```
 
-`palloc` / `repalloc_huge` / `pfree` against `CurrentMemoryContext` at the
-moment of the call, with `MCXT_ALLOC_HUGE` so a decoded block can exceed the
-1GB `palloc` cap. clickhouse-c never frees on its own schedule, so placement
-is entirely yours: switch to a per-query context before `chc_block_read` and
-the whole block, buffers included, lands there and dies with it.
+`pgch_alloc` places allocations in `CurrentMemoryContext`. Switch to context
+with required lifetime before calling clickhouse-c. Read blocks with
+`pgch_alloc` before passing them to `pgch_reader`, because reader destroys
+owned blocks with same allocator.
 
-Nothing in this library takes an allocator argument. It always uses
-`pgch_alloc`, so a block handed to `pgch_reader` must have been read with
-`pgch_alloc` too.
+`pgch_in_alloc` returns zeroed clickhouse-c input parser in
+`CurrentMemoryContext`. Symbol is available only when implementation
+translation unit also defines `CHC_IMPLEMENTATION`.
 
-```c
-extern chc_in *pgch_in_alloc(void);
-```
-
-Zeroed `chc_in` for your read loop, since `sizeof(chc_in)` is only visible
-where clickhouse-c's implementation is compiled. Defined only when the
-`PGCH_IMPLEMENTATION` TU also defines `CHC_IMPLEMENTATION`; if you keep them
-apart and hit a link error on this symbol, that is why.
-
-## Type mapping
+## ClickHouse to PostgreSQL types
 
 ```c
 extern const Oid pgch_kind_oids[CHC_KIND_COUNT];
@@ -77,81 +73,84 @@ Oid pgch_native_oid_for(const chc_type *type, const char *what);
 const chc_type *pgch_unwrap(const chc_type *type, bool *out_nullable);
 ```
 
-`pgch_kind_oids` is the flat scalar table, indexed by `chc_kind`, holding
-`InvalidOid` for wrapper kinds and everything unmapped.
+`pgch_kind_oids` maps scalar `chc_kind` values to PostgreSQL OIDs. Wrapper and
+unsupported kinds contain `InvalidOid`.
 
-`pgch_datum_oid` describes what `pgch_read_value` actually returns: scalars
-through the table, `Array` as `ANYARRAYOID` (a `pgch_array *`), `Tuple` as
-`RECORDOID` (a `pgch_tuple *`), `Nullable` and `LowCardinality` transparent.
-`Nothing` / `Void` map to `InvalidOid` and always decode NULL.
+`pgch_datum_oid` returns OID produced by `pgch_read_value`:
 
-`pgch_native_oid` is the same except `Array` resolves to the real PG array
-type of the leaf element, which is what you want when building a `TupleDesc`.
-PG has one array type per element type regardless of dimensionality, so
-`Array(Array(Int32))` and `Array(Int32)` both give `integer[]`.
+- Scalar types return mapped scalar OID
+- `Array` returns `ANYARRAYOID`, representing `pgch_array *`
+- `Tuple` returns `RECORDOID`, representing `pgch_tuple *`
+- `Nullable` and `LowCardinality` return inner mapping
+- `Nothing` and `Void` return `InvalidOid`
 
-Both raise `ERRCODE_FDW_INVALID_DATA_TYPE` on a kind with no mapping.
-`pgch_native_oid_for` is the same lookup with a caller-supplied `what`, eg
-`column "c2"`, appended in parentheses, for callers resolving a type deep
-inside a row where the bare type name is not enough to locate the problem.
+`pgch_native_oid` returns type suitable for a PostgreSQL column descriptor.
+Unlike `pgch_datum_oid`, it resolves `Array` to PostgreSQL array OID for leaf
+type. Unsupported mappings raise `ERRCODE_FDW_INVALID_DATA_TYPE`.
 
-`pgch_unwrap` strips `Nullable`, then `LowCardinality` and any `Nullable`
-inside it, reporting through `out_nullable` whether either was present.
-ClickHouse puts `Nullable` inside `LowCardinality`, not above it, so a single
-strip is not enough.
+`pgch_native_oid_for` behaves like `pgch_native_oid` and adds `what` to an
+unsupported-type error. Pass `NULL` to omit context.
 
-## PG type to CH type name
+`pgch_unwrap` removes outer `Nullable`, `LowCardinality`, and nullable wrapper
+inside `LowCardinality`. When `out_nullable` is not `NULL`, it reports whether
+either nullable wrapper was present.
+
+`pgch_pow10` contains powers from `10^0` through `10^9` for scaled typed
+append APIs.
+
+## PostgreSQL to ClickHouse types
 
 ```c
 typedef struct pgch_type_opts {
-    bool json_as_json;       /* jsonb -> JSON rather than String */
-    bool low_cardinality;    /* wrap String columns in LowCardinality */
-    bool numeric_as_string;  /* unconstrained numeric -> String */
+    bool json_as_json;
+    bool low_cardinality;
+    bool numeric_as_string;
 } pgch_type_opts;
 
 char *pgch_ch_type_for(Oid typid, int32 typmod, bool notnull,
                        const pgch_type_opts *opts);
 char *pgch_quote_ch_ident(const char *name);
-char *pgch_structure_from_tupdesc(TupleDesc desc, const pgch_type_opts *opts);
+bool  pgch_attr_is_streamed(Form_pg_attribute attr);
+char *pgch_structure_from_tupdesc(TupleDesc desc,
+                                  const pgch_type_opts *opts);
 ```
 
-The third face of the bridge. Encode dispatches on (PG type, CH kind), decode
-on (CH kind, PG type), and this names the CH type to declare for a PG column
-so the two have something to agree on. The result carries its own `Nullable`
-wrapper, so the same string serves a `structure=` clause and `chc_type_parse`
-for the writer's column type.
+All returned strings are allocated with `palloc`.
 
-The rules are the appenders', not a matter of consumer taste:
+`pgch_ch_type_for` returns full ClickHouse declaration, including
+nullability. Pass `NULL` for default options:
 
-* `bpchar(n)` and `varchar(n)` are `String`, because `FixedString(n)` counts
-  bytes where PG counts characters.
-* Unconstrained `numeric` is `Decimal256(38)`, or `String` under
-  `numeric_as_string`, which is the only one of the two that does not silently
-  truncate PG's 16383 digits of scale.
-* `timestamp` is `DateTime64(6)` and `timestamptz` is `DateTime64(6,'UTC')`:
-  Native carries an int64, and text rendering was the only reason either was
-  ever `String`.
-* `date` is `Date32`, since `Date` is unsigned days from 1970.
-* `T[]` is `Array(<T nullable per notnull>)`, because `Nullable(Array(...))`
-  is prohibited server side. The nullability lands on the element and a NULL
-  array itself becomes `pgch_writer_set_null_array`'s problem.
-* A domain takes its base type's mapping, typmod included.
-* Everything else is `String`, reached through the type's output function on
-  the way out and its input function on the way back: `interval`, `timetz`,
-  `money`, `inet`, `cidr`, `macaddr`, `bit`, `varbit`, `xml`, `tsvector`, the
-  geo types and every user enum.
+- Map `json` and `jsonb` to `String`
+- Map string-like types to `String`
+- Map unconstrained `numeric` to `Decimal256(38)`
 
-`pgch_quote_ch_ident` double-quotes unless the name is already a bare
-`[A-Za-z_][A-Za-z0-9_]*`, doubling embedded quotes and escaping backslashes,
-which is what ClickHouse's SQL-style quoted identifiers want.
+Set options to change those defaults:
 
-`pgch_structure_from_tupdesc` joins the two into `name type, ...` over a
-descriptor, skipping dropped and generated attributes since neither carries a
-value in a stream. `pgch_append_slot` skips the same ones, so writer column
-`i` is structure column `i`. Where that string goes, and everything else about
-the query, stays with the caller.
+- `json_as_json` maps `json` and `jsonb` to `JSON`
+- `low_cardinality` wraps `String` as `LowCardinality`
+- `numeric_as_string` maps unconstrained `numeric` to `String`
 
-## Server settings
+Domains use base type mapping and typmod. PostgreSQL arrays map to ClickHouse
+`Array`; nullable array columns apply nullability to elements because
+ClickHouse does not support `Nullable(Array(...))`. Types without dedicated
+mapping use `String`. `JSON` remains unwrapped because ClickHouse rejects
+`Nullable(JSON)`.
+
+`pgch_quote_ch_ident` returns unquoted name when valid bare ClickHouse
+identifier, otherwise returns quoted and escaped identifier.
+
+`pgch_attr_is_streamed` returns false for dropped and generated attributes.
+Use it in consumer loops that must stay positionally aligned with generated
+structure.
+
+`pgch_structure_from_tupdesc` returns comma-separated `name type` declarations
+for streamed attributes:
+
+```c
+char *structure = pgch_structure_from_tupdesc(desc, &opts);
+```
+
+## Native settings and framing
 
 ```c
 #define PGCH_NATIVE_SETTINGS \
@@ -161,78 +160,77 @@ the query, stays with the caller.
 extern const chc_block_opts pgch_block_opts_local;
 ```
 
-The compatibility contract with the server, versioned with the library rather
-than retyped into each consumer's query builder. Without the first setting the
-server writes binary type tags and `chc_block_read` fails with
-`CHC_ERR_TYPE`; the second exists from 24.10 and makes `JSON` serialize as
-`String`, the only `JSON` serialization either library handles.
+Apply `PGCH_NATIVE_SETTINGS` to queries returning Native data. First setting
+keeps textual type names expected by clickhouse-c. Second serializes
+ClickHouse `JSON` columns as document strings and requires ClickHouse 24.10 or
+later.
 
-`pgch_block_opts_local` is the framing chDB and `clickhouse local` use: no
-`BlockInfo`, no custom-serialization flag. The TCP path sets both per server
-revision, so it builds its own.
+Use `pgch_block_opts_local` with chDB and `clickhouse-local`. For TCP server
+traffic, set `has_block_info` and `has_custom_serialization` according to
+negotiated server revision.
 
-## Array and Tuple carriers
+## Intermediate array and tuple representations
 
 ```c
 typedef struct pgch_array {
     Datum  *datums;
     bool   *nulls;
     size_t  len;
-    int     ndim;        /* >= 1 */
-    Oid     item_type;   /* leaf scalar PG type */
-    Oid     array_type;  /* PG array type */
+    int     ndim;
+    Oid     item_type;
+    Oid     array_type;
 } pgch_array;
 
 typedef struct pgch_tuple {
-    Datum  *datums;
-    bool   *nulls;
-    Oid    *types;
-    size_t  len;
+    Datum      *datums;
+    bool       *nulls;
+    Oid        *types;
+    size_t      len;
     const char *ch_type_name;
 } pgch_tuple;
 ```
 
-Composite columns decode into these rather than into PG values, because
-building an `ArrayType` needs the element type's `typlen` / `typbyval` /
-`typalign` and a target type that only the consumer knows. `pgch_convert`
-does that step.
+Decoder returns intermediate representations before consumer supplies target
+PostgreSQL type. Convert them with APIs in
+[pg-clickhouse-decode.h](pg-clickhouse-decode.md).
 
-For nested arrays each level is its own `pgch_array` with `ndim` one lower,
-so `datums[i]` at `ndim > 1` is a `pgch_array *`, not an element. `len` is
-that level's length; a ragged CH array (legal in ClickHouse, not in PG) is
-detected during conversion, not here.
+For `pgch_array`, `ndim` is at least one. With nested arrays, each datum points
+to child `pgch_array` until leaf level. `item_type` is PostgreSQL leaf OID.
+Decoded array representations also set `array_type`; representations created
+for encoding may leave it `InvalidOid`.
 
-`array_type` is filled when decoding and `InvalidOid` when the encoder built
-the carrier, which never needs it.
+For `pgch_tuple`, `types[i]` describes `datums[i]`.
 
-## Byte buffer
+## Byte buffers
 
 ```c
-typedef struct pgch_buf { uint8_t *data; size_t len; size_t cap; } pgch_buf;
+typedef struct pgch_buf {
+    uint8_t *data;
+    size_t   len;
+    size_t   cap;
+} pgch_buf;
 
 void pgch_buf_reserve(pgch_buf *b, size_t need);
 void pgch_buf_append(pgch_buf *b, const void *src, size_t n);
 void pgch_buf_append_zero(pgch_buf *b, size_t n);
 void pgch_buf_reset(pgch_buf *b);
-
 void pgch_buf_io(pgch_buf *b, chc_io *out_io);
 ```
 
-Doubling `palloc` buffer. It grows against `CurrentMemoryContext` at the time
-of the append, so switch first and free by deleting that context;
-`pgch_buf_reset` only rewinds `len`, keeping the allocation for the next
-block.
+Zero-initialize buffers. Growth uses `CurrentMemoryContext`.
+`pgch_buf_reset` sets length to zero and keeps allocation for reuse.
 
-`pgch_buf_io` fills a write-only `chc_io` over the buffer, which is how you
-get `chc_block_write` output into memory rather than onto a socket. `read` and
-`check_cancel` are NULL, so the result is a sink only, and `b` must outlive
-`out_io`.
+`pgch_buf_io` initializes write-only `chc_io` that appends to buffer. Buffer
+must outlive `chc_io`.
 
 ```c
-pgch_buf buf = {};
+pgch_buf out = {};
 chc_io io;
 
-pgch_buf_io(&buf, &io);
-chc_block_write(&io, bb, &opts, &err);
-/* buf.data[0 .. buf.len) is one Native block */
+pgch_buf_io(&out, &io);
+if (chc_block_write(&io, block, &opts, &err) != CHC_OK)
+    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
+
+send_native(out.data, out.len);
+pgch_buf_reset(&out);
 ```

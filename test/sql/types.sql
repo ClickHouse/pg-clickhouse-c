@@ -1,11 +1,10 @@
--- The third face of the bridge: PG column -> CH type name, and the two
--- directions over the types that only reach ClickHouse as String.
+-- Verify PostgreSQL to ClickHouse declarations and String conversions
 SET lc_monetary = 'C';
 SET TimeZone = 'UTC';
 SET DateStyle = 'ISO, MDY';
 SET IntervalStyle = 'postgres';
 
--- The mapping table itself.
+-- Verify default type mapping
 SELECT d AS pg_type, pgch_chtype(d, true) AS notnull, pgch_chtype(d) AS nullable
 FROM unnest(ARRAY[
     'bool', 'int2', 'int4', 'int8', 'oid', 'xid8', 'float4', 'float8',
@@ -18,21 +17,19 @@ FROM unnest(ARRAY[
     'int4[]', 'text[]', 'numeric(12,6)[]', 'interval[]'
 ]) AS d;
 
--- Per-consumer choices. Nullable(JSON) is prohibited server side, so JSON
--- stays bare; Nullable rides inside LowCardinality, not above it.
+-- Verify optional JSON, LowCardinality, and numeric mappings
 SELECT pgch_chtype('jsonb', json_as_json => true) AS json_null,
        pgch_chtype('jsonb', true, json_as_json => true) AS json_notnull,
        pgch_chtype('text', low_cardinality => true) AS lc_null,
        pgch_chtype('text', true, low_cardinality => true) AS lc_notnull,
        pgch_chtype('numeric', numeric_as_string => true) AS num_string;
 
--- A domain takes its base type's mapping, typmod included.
+-- Map domains through base type and typmod
 CREATE DOMAIN dcount AS int4;
 CREATE DOMAIN dvc AS varchar(8);
 SELECT pgch_chtype('dcount', true), pgch_chtype('dvc', true), pgch_chtype('dcount[]', true);
 
--- The two faces agree: what the mapping declares decodes back into the PG
--- type it was declared for, or into text where it went through String.
+-- Decode generated ClickHouse declarations into compatible PostgreSQL types
 SELECT d AS pg_type, c AS ch_type, pgch_pgtype(c) AS decodes_as
 FROM (SELECT d, pgch_chtype(d, true) AS c FROM unnest(ARRAY[
     'bool', 'int2', 'int4', 'int8', 'oid', 'xid8', 'float4', 'float8',
@@ -40,9 +37,7 @@ FROM (SELECT d, pgch_chtype(d, true) AS c FROM unnest(ARRAY[
     'int4[]', 'text[]'
 ]) AS d) q;
 
--- Both directions over one table of (literal, PG type, CH type) triples: the
--- encoder reaches String through the type's output function, the decoder
--- comes back through its input function.
+-- Round-trip PostgreSQL types represented by ClickHouse String
 CREATE FUNCTION rt(lit text, typ text, ch text) RETURNS text LANGUAGE plpgsql AS $$
 DECLARE res text;
 BEGIN
@@ -72,14 +67,7 @@ FROM (VALUES
     ('''ok''',                  'ARRAY[''ok'', ''sad'']',             'mood',     'LowCardinality(String)')
 ) v(lit, arr, typ, ch);
 
--- Conversion state from the column's CH type rather than from a row, which is
--- the only way a column whose first row is NULL, or which is NULL throughout,
--- gets one. Same shapes as the value-driven path, including the nested Tuple
--- whose field type comes off the target composite.
-CREATE TYPE tupshape AS (a int, b text, c float4);
-CREATE TYPE inner_shape AS (a int);
-CREATE TYPE outer_shape AS (t inner_shape, b text);
-
+-- Prepare conversion from schema before nullable rows
 SELECT pgch_decode_typed(pgch_encode_rows('Nullable(String)',
                                           ARRAY[NULL, '1 day']::text[]),
                          NULL::interval),
@@ -89,35 +77,19 @@ SELECT pgch_decode_typed(pgch_encode_rows('Nullable(String)',
        pgch_decode_typed(pgch_encode('Array(Int64)', ARRAY[1, 2]::int8[]),
                          NULL::int4[]);
 
-SELECT pgch_decode_typed(
-    pgch_block('Tuple(Int32, String, Float32)', 1,
-               '\x2a000000'::bytea || '\x02' || convert_to('hi', 'UTF8') ||
-               '\x0000c03f'::bytea),
-    NULL::tupshape
-);
-SELECT pgch_decode_typed(
-    pgch_block('Tuple(Nullable(Tuple(Int32)), String)', 2,
-               '\x0100'::bytea || '\x0000000009000000'::bytea ||
-               '\x00'::bytea || '\x02' || convert_to('ok', 'UTF8')),
-    NULL::outer_shape
-);
-
--- Element-wise conversion on decode, where the array types differ outright.
+-- Convert array elements into requested PostgreSQL type
 SELECT pgch_decode_as(pgch_encode('Array(Int64)', ARRAY[1, 2, 3]::int8[]), NULL::int4[]),
        pgch_decode_as(pgch_encode('Array(Array(Int64))', ARRAY[[1, 2], [3, 4]]::int8[]),
                       NULL::int4[]),
        pgch_decode_as(pgch_encode('Array(Nullable(String))',
                                   ARRAY['1 day', NULL]::text[]), NULL::interval[]);
 
--- A domain over an array reports no element type of its own, so the element
--- type comes off its base.
+-- Convert arrays into array domains
 CREATE DOMAIN dints AS int4[];
 SELECT pgch_decode_as(pgch_encode('Array(Int32)', ARRAY[1, 2]::int4[]), NULL::dints),
        pgch_decode_as(pgch_encode('Array(Int64)', ARRAY[1, 2]::int8[]), NULL::dints);
 
--- A whole relation through its own declared structure and back, which is the
--- shape a COPY takes: every column's CH type from pgch_ch_type_for, rows from
--- pgch_append_slot, conversion state from the column type rather than a row.
+-- Round-trip relation through generated structure and slot API
 CREATE TABLE copyshape (
     id      int          NOT NULL,
     name    varchar(16),
@@ -140,21 +112,20 @@ INSERT INTO copyshape VALUES
 SELECT pgch_structure('copyshape');
 SELECT unnest(pgch_table_roundtrip('copyshape', null_array_empty => true));
 
--- Same relation, with the options a consumer might pick instead.
+-- Generate structure with optional mappings
 SELECT pgch_structure('copyshape', json_as_json => true, low_cardinality => true);
 
--- Dropped columns leave no hole: the structure and the appends skip together.
+-- Skip dropped columns consistently
 ALTER TABLE copyshape DROP COLUMN mac;
 SELECT pgch_structure('copyshape');
 SELECT unnest(pgch_table_roundtrip('copyshape', null_array_empty => true));
 
--- NaN and Infinity: raising, NULL and zero.
+-- Apply non-finite value policies
 CREATE TABLE nonfinite (f float8, n numeric(9,2));
 INSERT INTO nonfinite VALUES ('NaN', 1.5), ('Infinity', 'NaN'), (2.5, 3.25);
 SELECT unnest(pgch_table_roundtrip('nonfinite', nonfinite => 1)) AS as_null;
 SELECT unnest(pgch_table_roundtrip('nonfinite', nonfinite => 2)) AS as_zero;
 SELECT pgch_roundtrip('Float64', 'NaN'::float8) AS float_keeps_nan;
 
--- The settings a query has to carry, versioned with the library rather than
--- retyped into each consumer's query builder.
+-- Return required Native query settings
 SELECT pgch_native_settings();

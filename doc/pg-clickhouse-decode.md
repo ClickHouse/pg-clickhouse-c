@@ -1,43 +1,36 @@
 # pg-clickhouse-decode.h
 
-Native block to PostgreSQL `Datum`. A row cursor over a block stream you
-supply, plus the conversion step that turns Array and Tuple carriers into real
-PG values.
+Decode ClickHouse Native blocks into PostgreSQL Datums. Include
+[pg-clickhouse.h](pg-clickhouse.md), then this header.
 
-Depends on [pg-clickhouse.h](pg-clickhouse.md). Exactly one TU defines
-`PGCH_IMPLEMENTATION` before including.
+Define `PGCH_IMPLEMENTATION` in exactly one translation unit. Define
+`CHC_IMPLEMENTATION` in same translation unit when using chunk source API.
 
-## Reading a value
+## Decode one value
 
 ```c
 Datum pgch_read_value(const chc_column *col, const chc_type *type,
                       uint64_t row, Oid *valtype, bool *is_null);
 ```
 
-One value out of a wire-shaped `chc_column`. No pre-pass, no per-column state:
-`Nullable` strip, `LowCardinality` key deref, decimal-to-`numeric`,
-IPv4/IPv6-to-`inet`, UUID byteswap and enum name lookup all happen inline at
-read time, which is why a scan pays only for the columns it touches.
+Pass wire column, matching ClickHouse type, and row index. Function returns
+PostgreSQL Datum, writes returned type OID to `*valtype`, and sets
+`*is_null`.
 
-`*valtype` is in-out. It arrives holding your preferred OID and leaves holding
-the OID of the returned `Datum`. Two kinds honor the incoming value; every
-other overwrites `*valtype` with the canonical mapping.
+Set incoming `*valtype` to request optional mappings:
 
-* `JSON` / `Object`: pass `JSONOID` and the document text goes through
-  `json_in`, keeping ClickHouse's verbatim formatting, instead of `jsonb_in`
-  normalizing it.
-* `UInt64` on PG 19 and later: pass `OID8OID` and the value arrives as `oid8`,
-  the only PG type that holds the whole unsigned range, instead of raising
-  above `2^63 - 1`.
+- Set `JSONOID` for `JSON` or `Object` to preserve document text as
+  PostgreSQL `json`; default is `JSONBOID`
+- On PostgreSQL 19 or later, set `OID8OID` for `UInt64` to support full
+  unsigned range; default is `INT8OID` and values above `2^63 - 1` raise
 
-Raises `ERRCODE_FDW_INVALID_DATA_TYPE` on an unmapped kind and
-`ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE` on a `UInt64` above `2^63 - 1` that was
-not pinned to `oid8`.
+Returned variable-length values are allocated with `palloc`. Unsupported types
+raise `ERRCODE_FDW_INVALID_DATA_TYPE`.
 
-Decoded values are freshly `palloc`'d, never pointers into the block, so a
-block can be destroyed as soon as its rows are consumed.
+Most consumers should use `pgch_reader` instead of calling
+`pgch_read_value` directly.
 
-## Block source
+## Supply decoded blocks
 
 ```c
 typedef struct pgch_block_source {
@@ -47,25 +40,29 @@ typedef struct pgch_block_source {
 } pgch_block_source;
 ```
 
-The seam where transport stops. The reader never reads bytes; it asks for the
-next block. `next_block` hands ownership over and the reader destroys each
-block with `pgch_alloc` before asking for the next, so blocks are read with
-`pgch_alloc` too.
+`next_block` returns one block per call. Returning non-NULL transfers ownership
+to reader. Reader destroys block with `pgch_alloc`, so source must read it with
+same allocator.
 
-Return NULL for end of stream. Return NULL with `error` reporting a message
-for failure; `error` is also polled once before the first block, so a request
-that failed before any data arrived reports cleanly. Both callbacks run inside
-the reader's calls, so they may `ereport` if that suits your teardown, but a
-returned error string is easier to attach context to.
+Return `NULL` for end of stream. On failure, return `NULL` and make `error`
+return message. `error` must be callable before first block, after every
+`next_block`, and at end.
 
-Validating a block is the source's job, not the reader's. `chc_column_validate`
-over every `chc_block_column` catches a column whose payload does not match its
-declared type before any value is read, and the source is the only place that
-also knows what a failure means for the connection: whether the socket is now
-mid-stream and the handle has to be dropped. The reader assumes blocks it
-receives already passed.
+Validate each block before returning it:
 
-## Chunk source
+```c
+for (size_t i = 0; i < chc_block_n_columns(block); i++) {
+    chc_err err = {};
+
+    if (chc_column_validate(chc_block_column(block, i), &err) != CHC_OK)
+        report_invalid_block(&err);
+}
+```
+
+Source owns transport-specific recovery. For example, invalid block may make
+connection unsafe to reuse.
+
+## Supply Native byte chunks
 
 ```c
 typedef struct pgch_chunk_source {
@@ -74,27 +71,26 @@ typedef struct pgch_chunk_source {
     bool (*cancelled)(void *ud);
 } pgch_chunk_source;
 
-void pgch_reader_init_chunks(pgch_reader *r, const pgch_chunk_source *src,
+void pgch_reader_init_chunks(pgch_reader *r,
+                             const pgch_chunk_source *src,
                              const chc_block_opts *opts);
 ```
 
-One layer down, for a caller holding bytes rather than blocks: the `chc_io`
-that copies out of the current chunk and refills on drain, the `chc_in` over
-it and the `chc_block_read` in the block source all live here. A chDB consumer
-writes a `next_chunk` calling `chdb_stream_fetch_result` and a `cancelled`
-calling `CHECK_FOR_INTERRUPTS`, and nothing else.
+Use chunk source when transport provides Native bytes instead of decoded
+blocks. `next_chunk` returns pointer and length. Keep bytes valid until next
+`next_chunk` call.
 
-Set `*n = 0` for end of stream; the chunk's bytes must stay valid until the
-following call. Where that end falls decides what the reader reports: on a
-block boundary the stream ends cleanly, mid-block it ends with a truncation
-error. Return false having set `*error` for a failure of your own.
-`cancelled` is optional and polled between refills.
+- Set `*n = 0` and return true for end of stream
+- Set `*error` and return false for source failure
+- Set `cancelled` to `NULL` when cancellation polling is not needed
 
-Defined only where the `PGCH_IMPLEMENTATION` TU also defines
-`CHC_IMPLEMENTATION`, the same rule `pgch_in_alloc` carries and for the same
-reason.
+Ending between blocks is clean end. Ending inside block produces truncation
+error. Pass `NULL` options to use `pgch_block_opts_local`.
 
-## Row cursor
+Chunk source API is available when implementation translation unit defines
+both `PGCH_IMPLEMENTATION` and `CHC_IMPLEMENTATION`.
+
+## Read rows
 
 ```c
 typedef struct pgch_reader {
@@ -119,117 +115,157 @@ size_t pgch_reader_columns(const pgch_reader *r);
 void   pgch_reader_free(pgch_reader *r);
 ```
 
-`pgch_reader_init` loads the first block, which defines the schema and may
-carry zero rows, and records `CurrentMemoryContext` as `cxt` for its own state
-and any error string. Allocate the reader itself wherever you like; a stack
-`pgch_reader` is fine.
+Initialize in memory context that should own reader state and error text.
+Reader itself may be stack allocated.
 
-After init, `coltypes[i]` holds `pgch_datum_oid` of column `i`. Overwrite an
-entry before the first `pgch_reader_next` to steer the one decision
-`pgch_read_value` leaves open:
+Initialization reads first block and sets `ncols` and `coltypes`. Empty stream,
+zero columns, unsupported schema, or source failure leaves reader done. Check
+`reader.error` after initialization.
+
+Override optional column mappings before first row:
 
 ```c
-if (r.coltypes[i] == JSONBOID && want_json)
-    r.coltypes[i] = JSONOID;
+pgch_reader_init(&reader, &source);
+
+for (size_t i = 0; i < reader.ncols; i++) {
+    if (reader.coltypes[i] == JSONBOID && want_json)
+        reader.coltypes[i] = JSONOID;
+}
 ```
 
-`pgch_reader_next` fills `values` / `nulls` and returns false at end of
-stream or on error. It advances blocks as needed, so a caller sees one flat row
-sequence regardless of how the peer chunked it. `error` is NULL on clean end.
-Decode failures are caught rather than propagated: the message lands in
-`error`, `done` is set, and the reader stops, which lets the caller attach the
-query text before raising.
+Call `pgch_reader_next` until false. Each successful call fills `values` and
+`nulls`, both `ncols` long. Consume row before next call. Reader advances
+across blocks and presents one continuous row stream.
 
-Every block after the first is checked against the first block's column count
-and per-column shape signature, where the shape is the type tree reduced to
-mapped PG OIDs. A block whose columns changed shape ends the stream with an
-error, so conversion state cached across blocks stays valid. Type changes that
-map to the same Datum shape (`Int8` to `Int16`, adding `Nullable`) pass.
+```c
+while (pgch_reader_next(&reader)) {
+    consume_row(reader.values, reader.nulls, reader.coltypes, reader.ncols);
+}
 
-`pgch_reader_free` destroys the current block. It leaves `error` in `cxt` for
-the caller to read after the fact; deleting that context frees it.
+if (reader.error)
+    ereport(ERROR,
+            errcode(ERRCODE_FDW_ERROR),
+            errmsg("%s", reader.error));
+```
+
+Reader rejects unsupported column types and schema changes that would alter
+returned Datum shape. Those failures set `reader.error`. Clean end leaves it
+`NULL`.
+
+Value conversion can still raise PostgreSQL errors, including invalid JSON or
+numeric text, `UInt64` outside selected target range, and payload that
+contradicts declared type. Validate blocks in source before reading rows.
+
+`pgch_reader_free` releases current block and clears `reader.error`. Save error
+pointer first when it must survive that call; storage remains valid until
+initialization memory context is reset or deleted.
+
+## Compare Datum shapes
 
 ```c
 char *pgch_type_shape(const chc_type *type);
 ```
 
-The signature the stability check compares, exposed for callers caching their
-own per-column state across blocks.
+Returns palloc'd signature for decoded Datum shape. Use equality when caching
+conversion state across independently managed block streams.
 
-## Conversion
+## Convert into target PostgreSQL types
 
 ```c
 void *pgch_convert_init(Datum val, Oid intype, Oid outtype);
+void *pgch_convert_init_type(const chc_type *in, Oid outtype);
+void *pgch_reader_convert_init(const pgch_reader *r,
+                               size_t col, Oid outtype);
+
 Datum pgch_convert(void *state, Datum val);
 void  pgch_convert_free(void *state);
 ```
 
-`pgch_read_value` produces the canonical Datum for a CH type. Getting from
-there to the type a caller actually wants covers three cases, all behind one
-interface:
+Conversion supports:
 
-* **Carriers.** `ANYARRAYOID` builds an `ArrayType` via `construct_md_array`,
-  one PG dimension per `Array` layer. `RECORDOID` builds a `HeapTuple`,
-  optionally mapped onto a declared composite type or rendered as text.
-* **Text input.** A CH `String` into any PG type runs the target's input
-  function, which is how `interval`, `bit`, ranges and domains arrive.
-* **Casts.** Anything else takes the explicit coercion pathway, or raises
-  `ERRCODE_FDW_INVALID_DATA_TYPE` if there is none.
+- `pgch_array` to PostgreSQL arrays
+- `pgch_tuple` to PostgreSQL records and named composite types
+- ClickHouse `String` values through PostgreSQL target input function
+- Explicit PostgreSQL casts between scalar types
+- Per-element conversion when source and target array element types differ
 
-An array whose element type differs from the target's converts element-wise,
-each leaf through its own child state, and the `ArrayType` is then built at the
-target's element type. `find_coercion_pathway` answers `ARRAYCOERCE` for a pair
-of array types and there is no runtime for that here, so `Array(Int64)` into
-`int4[]` and `Array(String)` into `interval[]` would otherwise fail where their
-scalars succeed.
-
-`val` must be a representative value, not just a type: array element info and
-tuple field descriptors come from its shape. NULL back means no conversion is
-needed, so pass the Datum through:
+Prefer `pgch_reader_convert_init` when reader and target tuple descriptor are
+available. It prepares conversion from schema before reading rows, including
+columns whose first or every value is NULL:
 
 ```c
-void *cs = pgch_convert_init(r.values[i], r.coltypes[i], attr_oid);
-/* ... per row ... */
-out[i] = pgch_convert(cs, r.values[i]);   /* cs == NULL is a no-op */
+void **states = palloc0(reader.ncols * sizeof(*states));
+
+for (size_t i = 0; i < reader.ncols; i++)
+    states[i] = pgch_reader_convert_init(&reader, i,
+                                         TupleDescAttr(desc, i)->atttypid);
 ```
 
-State is allocated in `CurrentMemoryContext` and reusable across rows and
-blocks, so build it somewhere that outlives the per-row loop. It costs syscache
-lookups and a `TupleDesc`, so building it per row is measurable.
+`pgch_convert_init_type` provides same behavior for standalone ClickHouse
+type.
+
+Use `pgch_convert_init` when only representative value is available. Arrays
+and tuples require non-NULL representative value because shape comes from
+intermediate representation.
+
+All initialization functions allocate state in `CurrentMemoryContext`. Build
+state in context that outlives row loop. They return `NULL` when no conversion
+is required. `pgch_convert` accepts `NULL` state and returns input unchanged.
+`pgch_convert_free` releases top-level state; enclosing memory context owns
+associated allocations.
+
+## Fill target row
 
 ```c
-void *pgch_convert_init_type(const chc_type *in, Oid outtype);
-void *pgch_reader_convert_init(const pgch_reader *r, size_t col, Oid outtype);
-
 void pgch_reader_fill(const pgch_reader *r, void **states,
                       Datum *values, bool *nulls);
 ```
 
-The same state off the column's type rather than off a value, which is the
-only way to build it before the first row, or at all for a column that is NULL
-throughout. `pgch_reader_convert_init` takes the type off the reader's current
-block and honors a `coltypes` override, so it is the one to reach for:
+Convert current reader row into caller arrays. `values`, `nulls`, and optional
+`states` must each hold `r->ncols` entries. Pass `NULL` for `states`, or use
+`NULL` entries for columns requiring no conversion.
 
 ```c
-for (size_t i = 0; i < r.ncols; i++)
-    states[i] = pgch_reader_convert_init(&r, i, atttypid[i]);
-
-while (pgch_reader_next(&r))
-    pgch_reader_fill(&r, states, values, nulls);   /* -> heap_form_tuple */
+while (pgch_reader_next(&reader)) {
+    pgch_reader_fill(&reader, states, values, nulls);
+    slot = heap_form_tuple(desc, values, nulls);
+}
 ```
 
-`pgch_reader_fill` is the loop body that otherwise gets written twice: every
-column of the current row through its state, NULLs left as Datum 0.
-
-A CH array that is ragged, which PG cannot represent, falls back to formatting
-the value as an array literal and running `array_in`, so the caller sees PG's
-own malformed-literal error rather than a silently reshaped array.
+## Render values as text
 
 ```c
 char *pgch_value_to_cstring(Oid coltype, Datum value);
 ```
 
-Text rendering for callers with no target type at all, an ad-hoc query for
-instance. Carriers route through `pgch_convert` first, since they have no
-output function of their own. Embedded NUL bytes do not survive a cstring, so
-`FixedString` padding and binary `String` payloads need the Datum path.
+Return palloc'd text representation for decoded value. Function also handles
+`pgch_array` and `pgch_tuple` intermediate representations. Use Datum path
+instead when String or FixedString may contain NUL bytes.
+
+## Complete reader example
+
+```c
+pgch_reader reader;
+
+pgch_reader_init(&reader, &source);
+if (reader.error)
+    ereport(ERROR, errmsg("%s", reader.error));
+
+void **states = palloc0(reader.ncols * sizeof(*states));
+Datum *values = palloc(reader.ncols * sizeof(*values));
+bool *nulls = palloc(reader.ncols * sizeof(*nulls));
+
+for (size_t i = 0; i < reader.ncols; i++)
+    states[i] = pgch_reader_convert_init(&reader, i,
+                                         TupleDescAttr(desc, i)->atttypid);
+
+while (pgch_reader_next(&reader)) {
+    pgch_reader_fill(&reader, states, values, nulls);
+    consume_tuple(heap_form_tuple(desc, values, nulls));
+}
+
+if (reader.error)
+    ereport(ERROR, errmsg("%s", reader.error));
+
+pgch_reader_free(&reader);
+```

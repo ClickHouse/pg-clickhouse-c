@@ -1,15 +1,8 @@
 /*
- * pg-clickhouse-decode.h -- Native block -> PostgreSQL Datum.
+ * Decode ClickHouse Native blocks into PostgreSQL Datums
  *
- * Walks clickhouse-c's wire-shaped column accessors and builds Datums a row
- * at a time. Per-row transforms (decimal to numeric, IPv4/IPv6 to inet, UUID
- * byteswap, enum name lookup, LowCardinality key deref, Nullable strip) happen
- * inline at read time. Array and Tuple columns land as pgch_array / pgch_tuple
- * carriers; pgch_convert turns those into real PG arrays and records once the
- * target type is known.
- *
- * Exactly one TU must `#define PGCH_IMPLEMENTATION` before including; other
- * TUs include for declarations only. Depends on pg-clickhouse.h.
+ * Define PGCH_IMPLEMENTATION in one translation unit. Include this header
+ * without that definition everywhere else
  */
 
 #ifndef PG_CLICKHOUSE_DECODE_H
@@ -22,11 +15,9 @@ extern "C" {
 #endif
 
 /*
- * Read one value. *valtype arrives holding the caller's preferred OID and
- * leaves holding the OID of the returned Datum; only CHC_JSON (JSONOID keeps
- * CH's verbatim text out of a jsonb round trip) and, from PG 19, CHC_UINT64
- * (OID8OID takes the range above 2^63 - 1) honor the incoming value, every
- * other kind overwrites it. Raises on unsupported types.
+ * Decode one value and store returned Datum type in *valtype
+ * Set *valtype to JSONOID to preserve JSON text, or OID8OID on PostgreSQL 19+
+ * to accept full UInt64 range
  */
 extern Datum
 pgch_read_value(
@@ -37,18 +28,14 @@ pgch_read_value(
     bool* is_null
 );
 
-/*
- * Type-tree signature over mapped PG OIDs. Two types with equal shapes
- * produce interchangeable Datums, so cached array layouts and tuple
- * descriptors stay valid across blocks.
- */
+/* Return palloc'd signature for comparing decoded Datum shapes */
 extern char*
 pgch_type_shape(const chc_type* type);
 
 /*
- * Block supply. next_block hands ownership to the reader, which destroys it
- * with pgch_alloc. Return NULL at end of stream, or on failure with error()
- * reporting the cause. error() is also polled before the first block.
+ * Supply blocks to pgch_reader
+ * Transfer block ownership from next_block to reader
+ * Return NULL at end, set error callback result when stream fails
  */
 typedef struct pgch_block_source {
     void* ud;
@@ -57,56 +44,50 @@ typedef struct pgch_block_source {
 } pgch_block_source;
 
 /*
- * Byte supply, for a caller holding chunks rather than blocks: the chc_io
- * that copies out of the current chunk and refills on drain, plus the
- * chc_in over it, are this header's rather than each consumer's.
- *
- * Defined only where the PGCH_IMPLEMENTATION TU also carries
- * CHC_IMPLEMENTATION, since it allocates a chc_in.
+ * Supply Native byte chunks to pgch_reader_init_chunks
+ * Available when implementation translation unit defines CHC_IMPLEMENTATION
  */
 typedef struct pgch_chunk_source {
     void* ud;
-    /* Next chunk of Native bytes. *n == 0 is end of stream. Bytes must stay
-       valid until the following call. Return false having set *error to fail. */
+    /*
+     * Return next chunk, keep bytes valid until following call
+     * Set *n to zero at end, return false and set *error on failure
+     */
     bool (*next_chunk)(void* ud, const void** p, size_t* n, char** error);
-    bool (*cancelled)(void* ud); /* optional, polled between refills */
+    bool (*cancelled)(void* ud); /* Optional cancellation check between chunks */
 } pgch_chunk_source;
 
 /*
- * Row cursor over a block stream. values / nulls / coltypes are ncols long
- * and refreshed by each pgch_reader_next; values point into the current
- * block or into the context that was current at init, so consume a row
- * before asking for the next one.
+ * Read rows from block stream
+ * Consume values before next pgch_reader_next call
  */
 typedef struct pgch_reader {
     pgch_block_source src;
 
-    Oid* coltypes;    /* pgch_datum_oid per column, caller may override
-                         JSONB->JSON and, from PG 19, bigint->oid8 */
-    char** colshapes; /* first-block shapes, for the stability check */
+    Oid* coltypes; /* Returned Datum OIDs, caller may override JSON and UInt64 */
+    char** colshapes;
     Datum* values;
     bool* nulls;
 
     size_t ncols;
-    size_t row;           /* next row in cur */
-    const chc_block* cur; /* owned; destroyed on load of the next block */
-    MemoryContext cxt;    /* context current at init; holds error and shapes */
+    size_t row;
+    const chc_block* cur;
+    MemoryContext cxt;
     char* error;
     bool done;
 } pgch_reader;
 
 /*
- * Load the first block and map its schema. Zero columns, an immediate error
- * or an empty stream all leave the reader done; check reader->error. The
- * reader records CurrentMemoryContext and allocates its own state there.
+ * Initialize reader and load first block
+ * Allocate reader state in CurrentMemoryContext
+ * Check reader->error when initialization leaves reader done
  */
 extern void
 pgch_reader_init(pgch_reader* r, const pgch_block_source* src);
 
 /*
- * As pgch_reader_init over a chunk source, assembling blocks across chunk
- * boundaries. NULL opts means pgch_block_opts_local. A chunk source drained
- * mid-block ends the stream with a truncation error rather than cleanly.
+ * Initialize reader from Native byte chunks
+ * Pass NULL opts to use pgch_block_opts_local
  */
 extern void
 pgch_reader_init_chunks(
@@ -116,9 +97,9 @@ pgch_reader_init_chunks(
 );
 
 /*
- * Fill values / nulls with the next row. False at end of stream or on error,
- * which is reported in reader->error. Advances blocks as needed and rejects a
- * block whose schema drifted from the first one.
+ * Fill values and nulls with next row
+ * Return false at end or when reader->error is set
+ * Reject unsupported types and incompatible schema changes between blocks
  */
 extern bool
 pgch_reader_next(pgch_reader* r);
@@ -126,27 +107,22 @@ pgch_reader_next(pgch_reader* r);
 extern size_t
 pgch_reader_columns(const pgch_reader* r);
 
-/* Destroy the current block. error stays until its context goes away. */
+/* Release current block and clear error pointer without freeing context storage */
 extern void
 pgch_reader_free(pgch_reader* r);
 
 /*
- * Conversion from the Datum pgch_read_value produced (intype, per
- * pgch_reader.coltypes) to the type the caller wants (outtype). Handles the
- * pgch_array / pgch_tuple carriers, text input functions, and CAST pathways.
- * val must be a representative value: array and tuple state is built from its
- * shape. Returns NULL when no conversion is needed, in which case pass the
- * Datum through untouched. State is allocated in CurrentMemoryContext, so
- * build it somewhere that outlives the per-row loop.
+ * Prepare reusable conversion from intype to outtype
+ * Pass representative value for arrays and tuples
+ * Return NULL when conversion is unnecessary
+ * Allocate state in CurrentMemoryContext
  */
 extern void*
 pgch_convert_init(Datum val, Oid intype, Oid outtype);
 
 /*
- * The same state built from the column's CH type instead of a value, so a
- * column that starts with a NULL row, or holds nothing but NULLs, needs no
- * lazy per-column initialization. pgch_reader_convert_init reads the type off
- * the reader's current block and honors a coltypes override.
+ * Prepare conversion from ClickHouse column type
+ * Use pgch_reader_convert_init to read type and valtype override from reader
  */
 extern void*
 pgch_convert_init_type(const chc_type* in, Oid outtype);
@@ -160,25 +136,18 @@ pgch_convert(void* state, Datum val);
 extern void
 pgch_convert_free(void* state);
 
-/*
- * The current row through per-column conversion states into values / nulls,
- * both ncols long. states may be NULL, and so may any of its entries, which
- * passes that column's Datum through.
- */
+/* Copy current row through optional per-column conversion states */
 extern void
 pgch_reader_fill(const pgch_reader* r, void** states, Datum* values, bool* nulls);
 
-/*
- * Render a decoded value as a palloc'd cstring. Arrays and tuples route
- * through pgch_convert first, since their carriers have no output function.
- */
+/* Return decoded value as palloc'd C string */
 extern char*
 pgch_value_to_cstring(Oid coltype, Datum value);
 
 #ifdef PGCH_IMPLEMENTATION
 
 #include <string.h>
-#include <sys/socket.h> /* AF_INET, expanded by PG inet macros */
+#include <sys/socket.h> /* PostgreSQL inet macros require AF_INET */
 
 #include "access/htup_details.h"
 #include "access/tupconvert.h"
@@ -257,11 +226,7 @@ pgch__slice_str(
 
 /* ---- per-kind readers ----------------------------------------------- */
 
-/*
- * Format a ClickHouse Decimal (two's-complement signed integer in LE bytes of
- * width 4/8/16/32 for Decimal32/64/128/256, with `scale` fractional digits
- * carried on the column type) into `out`. Returns bytes written, -1 on overflow.
- */
+/* ClickHouse stores Decimal as a scaled, little-endian signed integer */
 static int
 pgch__format_decimal(
     const uint8_t* bytes,
@@ -279,7 +244,6 @@ pgch__format_decimal(
         return -1;
     }
     memcpy(mag, bytes, width);
-    /* top bit of MSW is sign; negate two's-complement to get magnitude */
     if (mag[nwords - 1] & 0x80000000u) {
         neg = true;
         for (size_t i = 0; i < nwords; i++) {
@@ -298,7 +262,6 @@ pgch__format_decimal(
     int n = 0;
     bool nonzero;
 
-    /* base-10 division of mag yields digits LSB-first */
     do {
         uint64_t rem = 0;
 
@@ -315,7 +278,6 @@ pgch__format_decimal(
         buf[n++] = (char)('0' + (uint32_t)rem);
     } while (nonzero && n < (int)sizeof(buf));
 
-    /* pad leading zeros so digit count covers fractional portion */
     while (n <= (int)scale) {
         buf[n++] = '0';
     }
@@ -331,7 +293,6 @@ pgch__format_decimal(
         *p++ = '-';
     }
 
-    /* emit MSD-first, inserting '.' before `scale` trailing digits */
     for (int i = n - 1; i >= 0; i--) {
         if (i + 1 == (int)scale) {
             *p++ = '.';
@@ -351,7 +312,6 @@ pgch__read_decimal(const chc_column* col, const chc_type* type, uint64_t row) {
     int rc;
 
 #if PG_VERSION_NUM >= 140000
-    /* Decimal32/64 fit in int64; skip the byte-array text path. */
     if (es == 4) {
         return NumericGetDatum(
             int64_div_fast_to_numeric(pgch__rd_i32(p, row), (int)scale)
@@ -407,10 +367,7 @@ pgch__read_uuid(const chc_column* col, uint64_t row) {
     return UUIDPGetDatum(u);
 }
 
-/*
- * IPv4 wire format: native uint32 (LE on supported hosts). PG inet wants
- * BE bytes of dotted-quad, so pg_hton32 the value into ip_addr directly.
- */
+/* ClickHouse stores IPv4 as native uint32, PostgreSQL inet uses network order */
 static Datum
 pgch__read_ipv4(const chc_column* col, uint64_t row) {
     inet* res = (inet*)palloc0(sizeof(inet));
@@ -425,7 +382,7 @@ pgch__read_ipv4(const chc_column* col, uint64_t row) {
     return InetPGetDatum(res);
 }
 
-/* IPv6 wire is already network order; same layout as PG inet ip_addr. */
+/* ClickHouse and PostgreSQL store IPv6 in network order */
 static Datum
 pgch__read_ipv6(const chc_column* col, uint64_t row) {
     inet* res = (inet*)palloc0(sizeof(inet));
@@ -469,11 +426,7 @@ pgch__read_enum(const chc_column* col, const chc_type* type, uint64_t row) {
     return PointerGetDatum(cstring_to_text_with_len("", 0));
 }
 
-/*
- * JSON body bytes are STRING-serialized document text (the server needs
- * output_format_native_write_json_as_string=1 to emit that). Run them through
- * json_in / jsonb_in depending on the caller's target valtype.
- */
+/* PGCH_NATIVE_SETTINGS makes ClickHouse serialize JSON as document text */
 static Datum
 pgch__read_json(const chc_column* col, uint64_t row, Oid valtype) {
     const char* p;
@@ -492,11 +445,7 @@ pgch__read_json(const chc_column* col, uint64_t row, Oid valtype) {
     return ret;
 }
 
-/*
- * LowCardinality(String) or LowCardinality(Nullable(String)). The row's key
- * indexes the dict column; the dict's first slot is the null sentinel for the
- * Nullable variant.
- */
+/* Nullable LowCardinality reserves dictionary entry zero for NULL */
 static Datum
 pgch__read_lc(
     const chc_column* col,
@@ -577,10 +526,7 @@ pgch__read_array(
     const chc_type* leaf    = type;
     int ndim                = 0;
 
-    /*
-     * PG has one array type per element type regardless of nesting, so walk
-     * past nested Array layers to the leaf scalar type.
-     */
+    /* PostgreSQL uses one array type for every nesting depth */
     while (chc_type_kind(leaf) == CHC_ARRAY) {
         ndim++;
         leaf = chc_type_child(leaf, 0);
@@ -604,11 +550,6 @@ pgch__read_array(
         slot->datums = (Datum*)palloc0(sizeof(Datum) * len);
         slot->nulls  = (bool*)palloc0(sizeof(bool) * len);
 
-        /*
-         * For ndim == 1 pgch_read_value returns leaf scalars; for ndim > 1
-         * inner_t is itself CHC_ARRAY so recursion produces nested
-         * pgch_array. Use a scratch valtype to avoid clobbering item_type.
-         */
         for (uint64_t i = 0; i < len; ++i) {
             slot->datums[i] =
                 pgch_read_value(inner, inner_t, start + i, &scratch, &slot->nulls[i]);
@@ -666,7 +607,6 @@ pgch_read_value(
     Oid* valtype,
     bool* is_null
 ) {
-    /* Unwrap outer Nullable, handling nulls here. */
     if (chc_type_kind(type) == CHC_NULLABLE) {
         const chc_type* inner_t = chc_type_child(type, 0);
 
@@ -682,49 +622,45 @@ pgch_read_value(
         }
         type = inner_t;
     }
+
+    chc_kind kind = chc_type_kind(type);
+    Oid want      = *valtype;
+
+    *valtype = pgch_kind_oids[kind];
     *is_null = false;
 
-    switch (chc_type_kind(type)) {
+    switch (kind) {
     case CHC_VOID:
     case CHC_NOTHING:
-        *valtype = InvalidOid;
         *is_null = true;
         return (Datum)0;
     case CHC_UINT8:
-        *valtype = INT2OID;
         return (Datum)pgch__rd_u8(
             (const uint8_t*)chc_column_fixed_data(col, NULL), row
         );
     case CHC_BOOL:
-        *valtype = BOOLOID;
         return (Datum)pgch__rd_bool((const bool*)chc_column_fixed_data(col, NULL), row);
     case CHC_INT8:
-        *valtype = INT2OID;
         return (Datum)pgch__rd_i8(
             (const uint8_t*)chc_column_fixed_data(col, NULL), row
         );
     case CHC_INT16:
-        *valtype = INT2OID;
         return (Datum)pgch__rd_i16(
             (const uint8_t*)chc_column_fixed_data(col, NULL), row
         );
     case CHC_UINT16:
-        *valtype = INT4OID;
         return (Datum)pgch__rd_u16(
             (const uint8_t*)chc_column_fixed_data(col, NULL), row
         );
     case CHC_INT32:
-        *valtype = INT4OID;
         return (Datum)pgch__rd_i32(
             (const uint8_t*)chc_column_fixed_data(col, NULL), row
         );
     case CHC_UINT32:
-        *valtype = INT8OID;
         return Int64GetDatum(
             (int64)pgch__rd_u32((const uint8_t*)chc_column_fixed_data(col, NULL), row)
         );
     case CHC_INT64:
-        *valtype = INT8OID;
         return Int64GetDatum(
             pgch__rd_i64((const uint8_t*)chc_column_fixed_data(col, NULL), row)
         );
@@ -733,11 +669,9 @@ pgch_read_value(
             pgch__rd_u64((const uint8_t*)chc_column_fixed_data(col, NULL), row);
 
 #if PG_VERSION_NUM >= 190000
-        /*
-         * oid8 spans the whole unsigned range, so a caller that pins it takes
-         * values bigint cannot hold. Same in-out valtype as CHC_JSON.
-         */
-        if (*valtype == OID8OID) {
+        /* PostgreSQL oid8 supports full UInt64 range */
+        if (want == OID8OID) {
+            *valtype = OID8OID;
             return ObjectId8GetDatum(v);
         }
 #endif
@@ -748,16 +682,13 @@ pgch_read_value(
                 v
             );
         }
-        *valtype = INT8OID;
         return Int64GetDatum((int64)v);
     }
     case CHC_FLOAT32:
-        *valtype = FLOAT4OID;
         return Float4GetDatum(
             pgch__rd_f32((const uint8_t*)chc_column_fixed_data(col, NULL), row)
         );
     case CHC_FLOAT64:
-        *valtype = FLOAT8OID;
         return Float8GetDatum(
             pgch__rd_f64((const uint8_t*)chc_column_fixed_data(col, NULL), row)
         );
@@ -765,38 +696,27 @@ pgch_read_value(
     case CHC_DECIMAL64:
     case CHC_DECIMAL128:
     case CHC_DECIMAL256:
-        *valtype = NUMERICOID;
         return pgch__read_decimal(col, type, row);
     case CHC_STRING:
-        *valtype = TEXTOID;
         return pgch__read_string(col, row);
     case CHC_ENUM8:
     case CHC_ENUM16:
-        *valtype = TEXTOID;
         return pgch__read_enum(col, type, row);
     case CHC_JSON:
-    case CHC_OBJECT: {
-        /*
-         * *valtype arrives set to JSONBOID by default; honor a caller that
-         * asked for JSONOID so CH's verbatim formatting survives.
-         */
-        Oid target = (*valtype == JSONOID) ? JSONOID : JSONBOID;
-
-        *valtype = target;
-        return pgch__read_json(col, row, target);
-    }
+    case CHC_OBJECT:
+        if (want == JSONOID) {
+            *valtype = JSONOID;
+        }
+        return pgch__read_json(col, row, *valtype);
     case CHC_FIXED_STRING:
-        *valtype = TEXTOID;
         return pgch__read_fixedstring(col, row);
     case CHC_DATE:
-        *valtype = DATEOID;
         return DateADTGetDatum(
             (DateADT)
                 pgch__rd_u16((const uint8_t*)chc_column_fixed_data(col, NULL), row) -
             PGCH__DATE_OFFSET
         );
     case CHC_DATE32:
-        *valtype = DATEOID;
         return DateADTGetDatum(
             (DateADT)
                 pgch__rd_i32((const uint8_t*)chc_column_fixed_data(col, NULL), row) -
@@ -806,7 +726,6 @@ pgch_read_value(
         uint32_t secs =
             pgch__rd_u32((const uint8_t*)chc_column_fixed_data(col, NULL), row);
 
-        *valtype = TIMESTAMPTZOID;
         return TimestampTzGetDatum(time_t_to_timestamptz((pg_time_t)secs));
     }
     case CHC_DATETIME64: {
@@ -820,8 +739,6 @@ pgch_read_value(
         }
         int64 power = pgch_pow10[scale];
 
-        *valtype = TIMESTAMPTZOID;
-        /* multiply before divide so scale > 6 keeps sub-second us */
         return TimestampTzGetDatum(
             time_t_to_timestamptz(raw / power) + (raw % power) * USECS_PER_SEC / power
         );
@@ -829,7 +746,6 @@ pgch_read_value(
     case CHC_TIME: {
         const uint8_t* p = (const uint8_t*)chc_column_fixed_data(col, NULL);
 
-        *valtype = TIMEOID;
         return TimeADTGetDatum((TimeADT)pgch__rd_i32(p, row) * USECS_PER_SEC);
     }
     case CHC_TIME64: {
@@ -843,20 +759,15 @@ pgch_read_value(
         }
         int64 power = pgch_pow10[scale];
 
-        *valtype = TIMEOID;
-        /* Split before scaling: scale 9 of a full day overflows int64. */
         return TimeADTGetDatum(
             (raw / power) * USECS_PER_SEC + (raw % power) * USECS_PER_SEC / power
         );
     }
     case CHC_UUID:
-        *valtype = UUIDOID;
         return pgch__read_uuid(col, row);
     case CHC_IPV4:
-        *valtype = INETOID;
         return pgch__read_ipv4(col, row);
     case CHC_IPV6:
-        *valtype = INETOID;
         return pgch__read_ipv6(col, row);
     case CHC_LOW_CARDINALITY:
         return pgch__read_lc(col, type, row, valtype, is_null);
@@ -913,35 +824,117 @@ pgch_type_shape(const chc_type* type) {
     return buf.data;
 }
 
-/*
- * Verify block schema matches the first block. Only guards against drift that
- * would corrupt Datum interpretation; the peer controls values regardless.
- */
+static const char*
+pgch__check_type(const chc_type* type) {
+    if (chc_type_kind(type) == CHC_NULLABLE) {
+        type = chc_type_child(type, 0);
+    }
+
+    switch (chc_type_kind(type)) {
+    case CHC_VOID:
+    case CHC_NOTHING:
+        return NULL;
+    case CHC_LOW_CARDINALITY: {
+        const chc_type* inner = chc_type_child(type, 0);
+
+        /* ClickHouse nests Nullable inside LowCardinality */
+        if (chc_type_kind(inner) == CHC_NULLABLE) {
+            inner = chc_type_child(inner, 0);
+        }
+        if (chc_type_kind(inner) != CHC_STRING) {
+            return "unsupported LowCardinality inner type";
+        }
+        return NULL;
+    }
+    case CHC_ARRAY: {
+        const chc_type* leaf = type;
+        const char* msg      = pgch__check_type(chc_type_child(type, 0));
+
+        if (msg) {
+            return msg;
+        }
+        while (chc_type_kind(leaf) == CHC_ARRAY) {
+            leaf = chc_type_child(leaf, 0);
+        }
+        if (!OidIsValid(get_array_type(pgch_datum_oid(leaf)))) {
+            return psprintf(
+                "no PG array type for column type \"%s\"", chc_type_name(leaf, NULL)
+            );
+        }
+        return NULL;
+    }
+    case CHC_TUPLE: {
+        size_t n = chc_type_n_children(type);
+
+        if (n == 0) {
+            return "returned tuple is empty";
+        }
+        for (size_t i = 0; i < n; i++) {
+            const char* msg = pgch__check_type(chc_type_child(type, i));
+
+            if (msg) {
+                return msg;
+            }
+        }
+        return NULL;
+    }
+    default:
+        if (!OidIsValid(pgch_kind_oids[chc_type_kind(type)])) {
+            return psprintf(
+                "unsupported column type \"%s\"", chc_type_name(type, NULL)
+            );
+        }
+        return NULL;
+    }
+}
+
+static const char*
+pgch__block_col_desc(const chc_block* b, size_t i) {
+    size_t len;
+    const char* name = chc_block_column_name(b, i, &len);
+
+    return len ? psprintf("column \"%.*s\"", (int)len, name)
+               : psprintf("column %zu", i + 1);
+}
+
+/* Preserve errors when caller resets row context */
+static bool
+pgch__schema_error(pgch_reader* r, const char* msg) {
+    r->error = MemoryContextStrdup(r->cxt, msg);
+    return false;
+}
+
 static bool
 pgch__check_schema(pgch_reader* r) {
     size_t ncols = chc_block_n_columns(r->cur);
 
-    /* Errors go in r->cxt: the row loop's context may be reset under us. */
-    if (ncols != r->ncols) {
-        MemoryContext old = MemoryContextSwitchTo(r->cxt);
+    if (r->colshapes) {
+        if (ncols != r->ncols) {
+            return pgch__schema_error(
+                r,
+                psprintf("block column count changed from %zu to %zu", r->ncols, ncols)
+            );
+        }
+        for (size_t i = 0; i < ncols; i++) {
+            char* shape = pgch_type_shape(chc_block_column_type(r->cur, i));
+            bool match  = strcmp(shape, r->colshapes[i]) == 0;
 
-        r->error =
-            psprintf("block column count changed from %zu to %zu", r->ncols, ncols);
-        MemoryContextSwitchTo(old);
-        return false;
+            pfree(shape);
+            if (!match) {
+                return pgch__schema_error(
+                    r, psprintf("block column %zu type changed", i + 1)
+                );
+            }
+        }
     }
 
     for (size_t i = 0; i < ncols; i++) {
-        char* shape = pgch_type_shape(chc_block_column_type(r->cur, i));
-        bool match  = strcmp(shape, r->colshapes[i]) == 0;
+        const char* msg = pgch__check_type(chc_block_column_type(r->cur, i));
 
-        pfree(shape);
-        if (!match) {
-            MemoryContext old = MemoryContextSwitchTo(r->cxt);
-
-            r->error = psprintf("block column %zu type changed", i + 1);
-            MemoryContextSwitchTo(old);
-            return false;
+        if (msg) {
+            return pgch__schema_error(
+                r, psprintf("%s (%s)", msg, pgch__block_col_desc(r->cur, i))
+            );
         }
     }
     return true;
@@ -963,7 +956,7 @@ pgch__load_block(pgch_reader* r) {
         r->done = true;
         return false;
     }
-    if (r->colshapes && !pgch__check_schema(r)) {
+    if (!pgch__check_schema(r)) {
         chc_block_destroy(unconstify(chc_block*, r->cur), &pgch_alloc);
         r->cur  = NULL;
         r->done = true;
@@ -988,18 +981,13 @@ typedef struct pgch__chunks {
     chc_io io;
     MemoryContext cxt;
 
-    const uint8_t* cur; /* borrowed until the next next_chunk call */
+    const uint8_t* cur; /* Borrowed until next next_chunk call */
     size_t len;
     size_t pos;
     char* error;
     bool eos;
 } pgch__chunks;
 
-/*
- * Copy out of the current chunk, refilling on drain. *out_n == 0 is what
- * clickhouse-c reads as end of stream: at a block boundary chc_block_read
- * reports a clean end, mid-block a short read.
- */
 static int
 pgch__chunk_read(void* ud, void* buf, size_t len, size_t* out_n, chc_err* err) {
     pgch__chunks* c = (pgch__chunks*)ud;
@@ -1054,12 +1042,11 @@ pgch__chunk_next_block(void* ud) {
         return NULL;
     }
     if (chc_block_read(c->in, &pgch_alloc, &c->opts, &b, &err) != CHC_OK) {
-        c->error = MemoryContextStrdup(
-            c->cxt, err.msg[0] ? err.msg : "block read failed"
-        );
+        c->error =
+            MemoryContextStrdup(c->cxt, err.msg[0] ? err.msg : "block read failed");
         return NULL;
     }
-    return b; /* NULL at clean end of stream */
+    return b;
 }
 
 static const char*
@@ -1112,7 +1099,7 @@ pgch_reader_init(pgch_reader* r, const pgch_block_source* src) {
         return;
     }
 
-    /* First block defines the schema; it may carry zero rows. */
+    /* First block defines stream schema, even when it contains no rows */
     if (!pgch__load_block(r)) {
         return;
     }
@@ -1147,7 +1134,6 @@ pgch_reader_next(pgch_reader* r) {
 
     ncols = r->ncols;
 
-    /* cur is non-NULL here: init loads the first block, load replaces cur */
     while (r->row >= chc_block_n_rows(r->cur)) {
         r->row = 0;
         if (!pgch__load_block(r)) {
@@ -1155,40 +1141,13 @@ pgch_reader_next(pgch_reader* r) {
         }
     }
 
-    PG_TRY();
-    {
-        for (size_t i = 0; i < ncols; i++) {
-            /*
-             * coltypes[i] is passed in so callers can pin CHC_JSON to JSONOID
-             * and keep CH's verbatim text, or CHC_UINT64 to OID8OID for its
-             * top half; every other kind overwrites it.
-             */
-            Oid t                 = r->coltypes[i];
-            const chc_column* col = chc_block_column(r->cur, i);
-            const chc_type* ct    = chc_block_column_type(r->cur, i);
+    for (size_t i = 0; i < ncols; i++) {
+        Oid t                 = r->coltypes[i];
+        const chc_column* col = chc_block_column(r->cur, i);
+        const chc_type* ct    = chc_block_column_type(r->cur, i);
 
-            r->values[i] = pgch_read_value(col, ct, r->row, &t, &r->nulls[i]);
-        }
+        r->values[i] = pgch_read_value(col, ct, r->row, &t, &r->nulls[i]);
     }
-    PG_CATCH();
-    {
-        MemoryContext oldcxt = MemoryContextSwitchTo(r->cxt);
-        ErrorData* edata     = CopyErrorData();
-        const char* msg      = edata->message ? edata->message : "unknown error";
-        size_t plen          = sizeof(PGCH_MSG_PREFIX) - 1;
-
-        /* Callers re-prefix when reporting; don't carry it twice. */
-        if (plen && strncmp(msg, PGCH_MSG_PREFIX, plen) == 0) {
-            msg += plen;
-        }
-        r->error = pstrdup(msg);
-        FlushErrorState();
-        FreeErrorData(edata);
-        MemoryContextSwitchTo(oldcxt);
-        r->done = true;
-        return false;
-    }
-    PG_END_TRY();
 
     r->row++;
     return true;
@@ -1200,7 +1159,6 @@ pgch_reader_free(pgch_reader* r) {
         chc_block_destroy(unconstify(chc_block*, r->cur), &pgch_alloc);
         r->cur = NULL;
     }
-    /* error is palloc'd in r->cxt; it goes away with that context. */
     r->error = NULL;
 }
 
@@ -1214,25 +1172,21 @@ struct pgch_convert_state {
     Oid outtype;
     pgch__convert_fn func;
 
-    /* record */
     TupleConversionMap* tupmap;
     TupleDesc indesc;
     TupleDesc outdesc;
     pgch_convert_state** field_states;
 
-    /* array */
-    Oid item_type; /* element type of the array built, post elem_state */
+    Oid item_type;
     pgch_convert_state* elem_state;
     int16 typlen;
     bool typbyval;
     char typalign;
 
-    /* text */
     int32 typmod;
     Oid typinput;
     Oid typioparam;
 
-    /* generic */
     CoercionPathType ctype;
     Oid castfunc;
 };
@@ -1256,7 +1210,6 @@ pgch__convert_record(pgch_convert_state* state, Datum val) {
     for (size_t i = 0; i < slot->len; i++) {
         pgch_convert_state* s = state->field_states[i];
 
-        /* Null fields carry no value to convert or to build state from. */
         if (slot->nulls[i]) {
             continue;
         }
@@ -1264,7 +1217,6 @@ pgch__convert_record(pgch_convert_state* state, Datum val) {
         if (s == NULL && slot->types[i] == RECORDOID) {
             MemoryContext oldcxt = MemoryContextSwitchTo(GetMemoryChunkContext(state));
 
-            /* indesc carries the field's target type, composite or RECORDOID. */
             s = pgch_convert_init(
                 slot->datums[i], RECORDOID, TupleDescAttr(state->indesc, i)->atttypid
             );
@@ -1282,7 +1234,6 @@ pgch__convert_record(pgch_convert_state* state, Datum val) {
         val = heap_copy_tuple_as_datum(htup, state->indesc);
 
         if (state->outtype == TEXTOID) {
-            /* a lot of allocations, not so efficient */
             val = CStringGetTextDatum(
                 DatumGetCString(OidFunctionCall1(F_RECORD_OUT, val))
             );
@@ -1300,11 +1251,6 @@ pgch__convert_record(pgch_convert_state* state, Datum val) {
     return val;
 }
 
-/*
- * Walk a nested pgch_array into a flat datum buffer, verifying each level
- * matches the dims taken from the first child. Returns false if the shape is
- * jagged so the caller can fall back to a slower path.
- */
 static bool
 pgch__flatten_array(
     pgch_array* slot,
@@ -1336,11 +1282,6 @@ pgch__flatten_array(
     return true;
 }
 
-/*
- * Emit a nested pgch_array as a PG array text literal, quoting each leaf and
- * escaping `\` and `"`. Jagged fallback, so a ragged CH array surfaces
- * array_in's malformed-literal error rather than a wrong shape.
- */
 static void
 pgch__emit_array_text(pgch_array* slot, FmgrInfo* outfn, StringInfo buf) {
     appendStringInfoChar(buf, '{');
@@ -1372,7 +1313,6 @@ pgch__emit_array_text(pgch_array* slot, FmgrInfo* outfn, StringInfo buf) {
     appendStringInfoChar(buf, '}');
 }
 
-/* Convert leaf elements in place; interior levels are carriers, not values. */
 static void
 pgch__convert_elems(pgch_convert_state* elem, pgch_array* slot) {
     for (size_t i = 0; i < slot->len; i++) {
@@ -1489,7 +1429,7 @@ pgch__convert_from_text(pgch_convert_state* state, Datum val) {
     );
 }
 
-/* UInt8 decodes as int2 (CH's historical bool); narrow it back. */
+/* ClickHouse UInt8 maps to smallint, convert requested boolean explicitly */
 static Datum
 pgch__convert_bool(pgch_convert_state* state pg_attribute_unused(), Datum val) {
     return BoolGetDatum(DatumGetInt16(val));
@@ -1500,7 +1440,6 @@ pgch_convert(void* state, Datum val) {
     return state ? ((pgch_convert_state*)state)->func(state, val) : val;
 }
 
-/* First non-null leaf of a nested carrier, for building element state. */
 static bool
 pgch__array_leaf(const pgch_array* slot, Datum* out) {
     for (size_t i = 0; i < slot->len; i++) {
@@ -1516,18 +1455,12 @@ pgch__array_leaf(const pgch_array* slot, Datum* out) {
     return false;
 }
 
-/*
- * Shared by both entry points. `ct` is the column's CH type when the caller
- * had one, in which case val is not read: every shape the value would have
- * supplied comes off the type instead.
- */
 static pgch_convert_state*
 pgch__convert_init(const chc_type* ct, Datum val, Oid intype, Oid outtype) {
-    /* Both are raw byte carriers; no cast needed. */
     if (intype == TEXTOID && outtype == BYTEAOID) {
         return NULL;
     }
-    /* Nothing / Void columns are always NULL, so there is nothing to convert. */
+    /* ClickHouse Nothing and Void values are always NULL */
     if (!OidIsValid(intype)) {
         return NULL;
     }
@@ -1545,7 +1478,7 @@ pgch__convert_init(const chc_type* ct, Datum val, Oid intype, Oid outtype) {
     if (intype == ANYARRAYOID) {
         pgch_array* slot     = ct ? NULL : (pgch_array*)DatumGetPointer(val);
         const chc_type* leaf = ct;
-        /* A domain over an array carries no typelem of its own. */
+        /* PostgreSQL array domains expose element type through base type */
         Oid out_elem =
             OidIsValid(outtype) ? get_element_type(getBaseType(outtype)) : InvalidOid;
 
@@ -1561,20 +1494,14 @@ pgch__convert_init(const chc_type* ct, Datum val, Oid intype, Oid outtype) {
         }
         state->func = pgch__convert_array;
 
-        /*
-         * find_coercion_pathway answers ARRAYCOERCE for a pair of array types,
-         * which has no runtime here, so element conversion is its own state
-         * run over the carrier's leaves. The array is then built at the
-         * target's element type directly.
-         */
+        /* PostgreSQL reports array casts separately from scalar element casts */
         if (OidIsValid(out_elem) && out_elem != state->item_type) {
             Datum leafval  = (Datum)0;
             bool have_leaf = ct || pgch__array_leaf(slot, &leafval);
 
             if (have_leaf || state->item_type != RECORDOID) {
-                state->elem_state = pgch__convert_init(
-                    leaf, leafval, state->item_type, out_elem
-                );
+                state->elem_state =
+                    pgch__convert_init(leaf, leafval, state->item_type, out_elem);
                 state->item_type = out_elem;
                 state->intype    = outtype;
             }
@@ -1593,12 +1520,6 @@ pgch__convert_init(const chc_type* ct, Datum val, Oid intype, Oid outtype) {
         state->indesc       = CreateTemplateTupleDesc(nfields);
         state->field_states = palloc(sizeof(void*) * nfields);
 
-        /*
-         * Resolve the target descriptor before the fields: a nested Tuple has
-         * to convert into whatever composite the target declares for that
-         * field, otherwise it lands as an anonymous record and the tuple map
-         * rejects it on type.
-         */
         if (!(outtype == RECORDOID || outtype == TEXTOID)) {
             TypeCacheEntry* typentry;
             TupleDesc tupdesc;
@@ -1647,7 +1568,6 @@ pgch__convert_init(const chc_type* ct, Datum val, Oid intype, Oid outtype) {
                 item_type = TupleDescAttr(state->outdesc, i)->atttypid;
             }
 
-            /* Null fields hold Datum 0; convert_record fills these lazily. */
             state->field_states[i] =
                 isnull ? NULL
                        : pgch__convert_init(
@@ -1699,7 +1619,6 @@ pgch__convert_init(const chc_type* ct, Datum val, Oid intype, Oid outtype) {
                 break;
             case COERCION_PATH_RELABELTYPE:
 
-                /* No conversion needed unless an array rebuild is pending. */
                 if (state->func == NULL) {
                     goto no_conversion;
                 }
@@ -1745,9 +1664,9 @@ pgch_reader_convert_init(const pgch_reader* r, size_t col, Oid outtype) {
 void
 pgch_reader_fill(const pgch_reader* r, void** states, Datum* values, bool* nulls) {
     for (size_t i = 0; i < r->ncols; i++) {
-        nulls[i]  = r->nulls[i];
-        values[i] = nulls[i] ? (Datum)0
-                             : pgch_convert(states ? states[i] : NULL, r->values[i]);
+        nulls[i] = r->nulls[i];
+        values[i] =
+            nulls[i] ? (Datum)0 : pgch_convert(states ? states[i] : NULL, r->values[i]);
     }
 }
 

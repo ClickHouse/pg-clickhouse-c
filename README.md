@@ -1,37 +1,21 @@
 # pg-clickhouse-c
 
-PostgreSQL bindings for [clickhouse-c]. Header-only, three headers, no
-transport: turn a ClickHouse Native block into PostgreSQL `Datum`s and back.
+Turn a ClickHouse Native block into PostgreSQL `Datum`s and back.
 
-clickhouse-c reads and writes the Native wire format over a caller-supplied
-`chc_io`. This library supplies the PostgreSQL half: `palloc` behind
-`chc_alloc`, `chc_err` mapped onto `ereport`, CH types mapped onto PG type
-OIDs, and per-row `Datum` construction for every column shape the Native
-format carries.
+clickhouse-c is used for Native format over a caller-supplied `chc_io`.
+This library supplies the PostgreSQL half: `palloc` behind `chc_alloc`,
+`chc_err` mapped onto `ereport`, CH types mapped onto PG type OIDs, and
+of course `Datum` construction.
 
-Extracted from [pg_clickhouse]'s binary driver, with the TCP client and FDW
-plumbing left behind. Nothing here opens a socket, runs a query, or knows
-whether the bytes came from a ClickHouse server, `clickhouse local`, or an
-embedded [chDB].
-
-## Why Native
-
-Text formats (`TSV`, `CSV`) only carry the types PG and CH happen to
-serialize identically. `Array`, `Nullable` inside `LowCardinality`,
-`Decimal128`/`Decimal256`, nested arrays, `Enum`, `Tuple` all differ in
-punctuation, escaping, or precision, so a text round trip either mangles them
-or forces the whole column to `String`.
-
-Native carries the schema in the block header and each column in its own
-layout, so the mapping is explicit at both ends and arrays cost no escaping
-at all.
+Nothing here opens a socket, runs a query, or knows whether bytes came
+from a ClickHouse server, `clickhouse local`, or an embedded [chDB].
 
 ## Quickstart
 
 Encode PG values into one Native block:
 
 ```c
-/* glue.c -- the one TU carrying both implementations */
+/* Compile both implementations in one translation unit */
 #define CHC_IMPLEMENTATION
 #define PGCH_IMPLEMENTATION
 #include "clickhouse.h"
@@ -39,7 +23,7 @@ Encode PG values into one Native block:
 #include "pg-clickhouse-decode.h"
 #include "pg-clickhouse-encode.h"
 
-/* Types come from the structure you declared to ClickHouse. */
+/* Match writer types to declared ClickHouse structure */
 chc_type *t;
 chc_err err = {};
 if (chc_type_parse("Array(Int32)", 12, &pgch_alloc, &t, &err) != CHC_OK)
@@ -51,22 +35,22 @@ pgch_writer *w = pgch_writer_new(CurrentMemoryContext, &col, 1);
 for (int i = 0; i < nrows; i++)
     pgch_append_datum(w, 0, values[i], INT4ARRAYOID, nulls[i]);
 
-/* Serialize to memory; hand the bytes to whatever consumes Native. */
+/* Serialize block into memory */
 pgch_buf out = {};
 chc_io io;
 pgch_buf_io(&out, &io);
 
-chc_block_opts opts = {};   /* chDB / clickhouse-local: no BlockInfo */
+chc_block_opts opts = {};   /* Use local framing for chDB and clickhouse-local */
 if (chc_block_write(&io, pgch_writer_build(w), &opts, &err) != CHC_OK)
     pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
 
-pgch_writer_reset(w);       /* out.data/out.len now hold the block */
+pgch_writer_reset(w);       /* out now contains serialized block */
 ```
 
 Decode Native bytes into rows, driving block supply yourself:
 
 ```c
-/* next_block hands ownership to the reader, which destroys each block. */
+/* Transfer each returned block to reader */
 static const chc_block *
 next_block(void *ud) {
     my_stream *s = ud;
@@ -77,7 +61,7 @@ next_block(void *ud) {
         s->error = pstrdup(err.msg);
         return NULL;
     }
-    return b;   /* NULL at end of stream */
+    return b;   /* Return NULL at end of stream */
 }
 
 pgch_block_source src = { .ud = &s, .next_block = next_block, .error = my_error };
@@ -85,23 +69,23 @@ pgch_reader r;
 
 pgch_reader_init(&r, &src);
 while (pgch_reader_next(&r)) {
-    /* r.values[i] / r.nulls[i] / r.coltypes[i], ncols = r.ncols */
+    /* Consume r.values, r.nulls, and r.coltypes */
 }
 if (r.error)
     ereport(ERROR, errcode(ERRCODE_FDW_ERROR), errmsg("%s", r.error));
 pgch_reader_free(&r);
 ```
 
-`r.values[i]` is typed by `r.coltypes[i]`, which is the OID
-`pgch_datum_oid` assigns to the column's CH type. Composite columns arrive as
-carriers rather than PG values: `pgch_convert` turns those into a real PG
-array or record once you know the target type.
+`r.values[i]` typed by `r.coltypes[i]`, which is OID `pgch_datum_oid` assigns
+to column's CH type. Array and Tuple columns arrive as intermediate
+representations rather than PG values: `pgch_convert` turns those into a real
+PG array or record once you know target type.
 
 ```c
-/* Build the conversion state once, off the per-row context. */
+/* Build conversion state outside row context */
 void *cs = pgch_convert_init(r.values[i], r.coltypes[i], target_oid);
 
-/* Then per row; NULL state means the Datum needs no conversion. */
+/* Convert each row, NULL state passes Datum through */
 values[i] = pgch_convert(cs, r.values[i]);
 ```
 
@@ -121,11 +105,11 @@ Out, one block per `pgch_writer_bytes` cut:
 ```c
 void *stream = chdb_stream_insert(conn, query, "Native");
 
-/* per row */
+/* Append one row */
 for (int i = 0; i < natts; i++)
     pgch_append_datum(w, i, values[i], atttypids[i], nulls[i]);
 
-/* per block */
+/* Flush one block */
 pgch_buf buf = {};
 chc_io io;
 pgch_buf_io(&buf, &io);
@@ -145,12 +129,11 @@ static int
 chdb_read(void *ud, void *buf, size_t len, size_t *out_n, chc_err *err) {
     my_stream *s = ud;
 
-    /* Refill from the next chunk when the current one is drained. */
+    /* Fetch next chunk after consuming current chunk */
     if (s->cursor == s->len) {
         CHECK_FOR_INTERRUPTS();
         chdb_result *chunk = chdb_stream_fetch_result(s->conn, s->result);
-        /* chdb_result_error, then chdb_result_buffer / chdb_result_length;
-           zero length is end of stream, so report *out_n = 0. */
+        /* Check error, read buffer and length, report zero length as end */
     }
     *out_n = Min(len, s->len - s->cursor);
     memcpy(buf, s->data + s->cursor, *out_n);
@@ -201,11 +184,11 @@ PG_CPPFLAGS += -DPGCH_MSG_PREFIX='"pg_chdb: "'
 
 ## Headers
 
-| Header | Purpose |
+| Header | Consumer API |
 |---|---|
-| [`pg-clickhouse.h`](doc/pg-clickhouse.md) | Core: `pgch_alloc`, `pgch_raise`, type OID mapping, Array / Tuple carriers, `pgch_buf` as a `chc_io` write sink |
-| [`pg-clickhouse-decode.h`](doc/pg-clickhouse-decode.md) | Block -> `Datum`: `pgch_read_value`, the `pgch_reader` row cursor, carrier-to-PG-value conversion |
-| [`pg-clickhouse-encode.h`](doc/pg-clickhouse-encode.md) | `Datum` -> block: the `pgch_writer` buffer tree, typed appends, `chc_block_builder` assembly |
+| [`pg-clickhouse.h`](doc/pg-clickhouse.md) | Errors, allocation, type mappings, query settings, intermediate representations, byte buffers |
+| [`pg-clickhouse-decode.h`](doc/pg-clickhouse-decode.md) | Block and chunk sources, row reader, target-type conversion |
+| [`pg-clickhouse-encode.h`](doc/pg-clickhouse-encode.md) | Writer lifecycle, Datum and typed appends, arrays, block output |
 
 Decode and encode each depend only on the core header; take one or both.
 
@@ -233,9 +216,8 @@ Decode and encode each depend only on the core header; take one or both.
 
 `UInt64` above `2^63 - 1` raises rather than wrapping; on PG 19 and later
 preset `reader.coltypes[i] = OID8OID` to take the whole unsigned range as
-`oid8`, and `oid8` encodes back into `UInt64` bit for bit. `bytea` encodes into
-`String` and `FixedString` verbatim. Decoding a `json` column instead of
-`jsonb` keeps ClickHouse's verbatim document text: preset
+`oid8`. `bytea` encodes into `String` and `FixedString`. Decoding `json`
+instead of `jsonb` keeps ClickHouse's text: preset
 `reader.coltypes[i] = JSONOID` after `pgch_reader_init`.
 
 A PG type with no arm of its own reaches a column through a cast, so `money`
@@ -279,7 +261,7 @@ check for the headers, since it is the TU that instantiates both
 implementations.
 
 ```sh
-make -C test CH_C_DIR=/path/to/clickhouse-c
+make -C test                 # clones clickhouse-c/ if absent
 make -C test install         # needs write access to the PG install
 make -C test installcheck    # needs superuser
 ```

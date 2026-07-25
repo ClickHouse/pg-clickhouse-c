@@ -1,14 +1,9 @@
 /*
- * pg-clickhouse.h -- PostgreSQL bindings for clickhouse-c, core header.
+ * PostgreSQL bindings shared by pg-clickhouse encoders and decoders
  *
- * palloc-backed chc_alloc, chc_err -> ereport mapping, CH type to PG type
- * OID mapping, a growable buffer doubling as a chc_io write sink, and the
- * intermediate Array / Tuple carriers that decode and encode share.
- *
- * Exactly one TU must `#define PGCH_IMPLEMENTATION` before including; other
- * TUs include for declarations only. Transport, block framing and query
- * execution stay with the caller: nothing here touches a socket, a chc_client
- * or a chdb handle.
+ * Define PGCH_IMPLEMENTATION in one translation unit. Include this header
+ * without that definition everywhere else. Consumers provide transport,
+ * block framing, and query execution
  */
 
 #ifndef PG_CLICKHOUSE_H
@@ -29,7 +24,7 @@
 extern "C" {
 #endif
 
-/* pg_noreturn arrived in PG 18. */
+/* PostgreSQL added pg_noreturn in version 18 */
 #ifndef pg_noreturn
 #define pg_noreturn pg_attribute_noreturn()
 #endif
@@ -37,9 +32,8 @@ extern "C" {
 /* ---- errors --------------------------------------------------------- */
 
 /*
- * Prepended to every message this library ereports. Set from the build, eg
- * PG_CPPFLAGS += -DPGCH_MSG_PREFIX='"pg_chdb: "', so every TU expanding
- * pgch_error agrees. Must be a string literal. Empty by default.
+ * Define as a string literal in build flags to prefix every reported error
+ * Leave undefined for no prefix
  */
 #ifndef PGCH_MSG_PREFIX
 #define PGCH_MSG_PREFIX ""
@@ -51,151 +45,125 @@ extern "C" {
 #define pgch_errorf(sqlstate, fmt, ...)                                                \
     ereport(ERROR, errcode(sqlstate), errmsg(PGCH_MSG_PREFIX fmt, __VA_ARGS__))
 
-/* ereport ERROR carrying err->msg, with `what` between prefix and message. */
+/* Raise ERROR with `what` inserted before clickhouse-c error message */
 pg_noreturn extern void
 pgch_raise(const chc_err* err, int sqlstate, const char* what);
 
 /* ---- allocator ------------------------------------------------------ */
 
 /*
- * palloc on CurrentMemoryContext at every call, MCXT_ALLOC_HUGE so decoded
- * block buffers can exceed the 1GB cap. Callers control placement by
- * switching context before entering clickhouse-c.
+ * Allocate clickhouse-c data in CurrentMemoryContext
+ * Switch contexts before calling clickhouse-c to control allocation lifetime
  */
 extern const chc_alloc pgch_alloc;
 
 /*
- * Zeroed chc_in for the caller's read loop. sizeof(chc_in) is visible only
- * where clickhouse-c's implementation is compiled, so this is defined only
- * when the PGCH_IMPLEMENTATION TU also carries CHC_IMPLEMENTATION.
+ * Return a zeroed input parser
+ * Available when implementation translation unit defines CHC_IMPLEMENTATION
  */
 extern chc_in*
 pgch_in_alloc(void);
 
 /* ---- type mapping --------------------------------------------------- */
 
-/* Scalar CH kind -> PG type OID; InvalidOid for wrapper and unsupported kinds. */
+/* Map scalar ClickHouse kinds to PostgreSQL type OIDs */
 extern const Oid pgch_kind_oids[CHC_KIND_COUNT];
 
-/* Power-of-10 lookup; CH bounds DateTime64 and Decimal scale to [0, 9]. */
+/* Provide powers of ten for supported DateTime64 and Time64 scales */
 extern const int64_t pgch_pow10[10];
 
 /*
- * OID describing the Datum pgch_read_value produces: scalars map through
- * pgch_kind_oids, Array yields ANYARRAYOID (a pgch_array*), Tuple yields
- * RECORDOID (a pgch_tuple*). Nullable and LowCardinality are transparent.
+ * Return OID describing Datum produced by pgch_read_value
+ * Return ANYARRAYOID for pgch_array and RECORDOID for pgch_tuple
  */
 extern Oid
 pgch_datum_oid(const chc_type* type);
 
 /*
- * Real PG type for a CH column: as pgch_datum_oid, except Array resolves to
- * the PG array type of its leaf element. Use when declaring a TupleDesc.
+ * Return PostgreSQL column type for a ClickHouse type
+ * Resolve Array to PostgreSQL array type for its leaf element
  */
 extern Oid
 pgch_native_oid(const chc_type* type);
 
 /*
- * As pgch_native_oid, with `what` (eg `column "c2"`) spliced into the message
- * of an unmapped type. NULL what behaves as pgch_native_oid.
+ * Return pgch_native_oid result and add `what` to unsupported-type errors
+ * Pass NULL to omit context
  */
 extern Oid
 pgch_native_oid_for(const chc_type* type, const char* what);
 
-/*
- * Strip Nullable, then LowCardinality and any Nullable inside it. Sets
- * *out_nullable when either layer was present.
- */
+/* Remove Nullable and LowCardinality wrappers, report detected nullability */
 extern const chc_type*
 pgch_unwrap(const chc_type* type, bool* out_nullable);
 
 /* ---- PG type -> CH type name ---------------------------------------- */
 
-/*
- * Per-consumer choices the mapping leaves open. Zeroed is the conservative
- * set: no JSON, no LowCardinality, Decimal256(38) for unconstrained numeric.
- */
+/* Configure optional PostgreSQL to ClickHouse type mappings */
 typedef struct pgch_type_opts {
-    bool json_as_json;      /* jsonb -> JSON rather than String */
-    bool low_cardinality;   /* wrap String columns in LowCardinality */
-    bool numeric_as_string; /* unconstrained numeric -> String, avoiding the
-                             * silent truncation Decimal256(38) does to PG's
-                             * 16383 digits of scale */
+    bool json_as_json;      /* Map json and jsonb to JSON instead of String */
+    bool low_cardinality;   /* Wrap String columns in LowCardinality */
+    bool numeric_as_string; /* Map unconstrained numeric to String */
 } pgch_type_opts;
 
 /*
- * CH type to declare for a PG column, complete with its Nullable wrapper, so
- * the same string serves a `structure=` clause and chc_type_parse. Domains
- * take their base type's mapping, `T[]` becomes `Array(<T nullable per
- * notnull>)` since ClickHouse prohibits Nullable(Array(...)), and anything
- * unmapped becomes String, which the encoder reaches through the target's
- * output function. opts may be NULL for the defaults.
+ * Return palloc'd ClickHouse type declaration for a PostgreSQL column
+ * Include required Nullable wrapper, pass NULL opts for defaults
  */
 extern char*
 pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* opts);
 
-/* Double-quoted unless the name is already a bare CH identifier. */
+/* Return palloc'd ClickHouse identifier, quoted when needed */
 extern char*
 pgch_quote_ch_ident(const char* name);
 
-/*
- * `name type, ...` for every attribute of desc, dropped and generated columns
- * skipped: neither carries a value in a stream. Placing this in a query is the
- * caller's, this only owns the type names.
- */
+/* Return true when attribute carries a value in a Native stream */
+static inline bool
+pgch_attr_is_streamed(Form_pg_attribute attr) {
+    return !attr->attisdropped && !attr->attgenerated;
+}
+
+/* Return palloc'd `name type, ...` declaration for streamed attributes */
 extern char*
 pgch_structure_from_tupdesc(TupleDesc desc, const pgch_type_opts* opts);
 
 /* ---- server settings ------------------------------------------------ */
 
-/*
- * What a query must set for its Native output to be readable here, this
- * library's compatibility contract with the server rather than a consumer
- * preference. Binary type tags fail chc_block_read with CHC_ERR_TYPE; the
- * JSON setting exists from 24.10 and serializes JSON as String, the only
- * JSON serialization either library handles.
- */
+/* Apply to ClickHouse queries that return Native data for this library */
 #define PGCH_NATIVE_SETTINGS                                                           \
     "output_format_native_encode_types_in_binary_format=0,"                            \
     "output_format_native_write_json_as_string=1"
 
-/* Block framing for chDB and clickhouse local: no BlockInfo, no custom
- * serialization flag. The TCP path sets both per server revision. */
+/* Use for chDB and clickhouse-local Native framing */
 extern const chc_block_opts pgch_block_opts_local;
 
-/* ---- Array / Tuple carriers ----------------------------------------- */
+/* ---- Intermediate Array / Tuple representations --------------------- */
 
 /*
- * An Array decoded from CH or staged for encoding. For nested arrays ndim > 1
- * and datums[i] points at a child pgch_array with ndim - 1. item_type is the
- * leaf scalar PG type; array_type is the PG array type, identical at every
- * depth because PG has one array type per element type regardless of ndim
- * (InvalidOid when built for encoding, where it is unused).
+ * Represent decoded or staged arrays
+ * For ndim greater than one, each datum points to a child pgch_array
  */
 typedef struct pgch_array {
     Datum* datums;
     bool* nulls;
     size_t len;
-    int ndim;       /* nesting depth, >= 1 */
-    Oid item_type;  /* leaf scalar PG type */
-    Oid array_type; /* PG array type */
+    int ndim;       /* Nesting depth, at least one */
+    Oid item_type;  /* PostgreSQL leaf type */
+    Oid array_type; /* PostgreSQL array type */
 } pgch_array;
 
-/* A Tuple decoded from CH. types[i] is the OID of datums[i], per pgch_datum_oid. */
+/* Represent a decoded ClickHouse Tuple */
 typedef struct pgch_tuple {
     Datum* datums;
     bool* nulls;
     Oid* types;
     size_t len;
-    const char* ch_type_name; /* for error messages */
+    const char* ch_type_name;
 } pgch_tuple;
 
 /* ---- byte buffer ---------------------------------------------------- */
 
-/*
- * Growable palloc'd byte buffer. Grows against CurrentMemoryContext, so
- * switch before the first append. Freed by deleting that context.
- */
+/* Store growable bytes in CurrentMemoryContext */
 typedef struct pgch_buf {
     uint8_t* data;
     size_t len;
@@ -211,11 +179,7 @@ pgch_buf_append_zero(pgch_buf* b, size_t n);
 extern void
 pgch_buf_reset(pgch_buf* b);
 
-/*
- * Fill *out_io with a write-only chc_io appending to b, for handing
- * chc_block_write output to an in-memory consumer. read and check_cancel
- * are NULL; b must outlive out_io.
- */
+/* Initialize a write-only chc_io that appends to b, b must outlive out_io */
 extern void
 pgch_buf_io(pgch_buf* b, chc_io* out_io);
 
@@ -228,7 +192,7 @@ pgch_buf_io(pgch_buf* b, chc_io* out_io);
 #include "lib/stringinfo.h"
 #include "utils/lsyscache.h"
 
-/* CH Date / Date32 / DateTime epoch is unix; offset to PG epoch (2000-01-01) */
+/* ClickHouse uses Unix epoch, PostgreSQL uses 2000-01-01 */
 #define PGCH__DATE_OFFSET (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE)
 
 /* ---- errors --------------------------------------------------------- */
@@ -328,7 +292,6 @@ const int64_t pgch_pow10[10] = {
     1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000,
 };
 
-/* ` (column "c")` for a message tail, empty when the caller has no context */
 static const char*
 pgch__where(const char* what) {
     return what ? psprintf(" (%s)", what) : "";
@@ -384,10 +347,7 @@ pgch_native_oid_for(const chc_type* type, const char* what) {
     case CHC_LOW_CARDINALITY:
         return pgch_native_oid_for(chc_type_child(type, 0), what);
     case CHC_ARRAY: {
-        /*
-         * PG has one array type per element type regardless of nesting, so
-         * walk past nested Array layers before looking it up.
-         */
+        /* PostgreSQL uses one array type for every nesting depth */
         const chc_type* leaf = type;
         Oid array_type;
 
@@ -425,7 +385,7 @@ pgch_unwrap(const chc_type* type, bool* out_nullable) {
     }
     if (chc_type_kind(type) == CHC_LOW_CARDINALITY) {
         type = chc_type_child(type, 0);
-        /* Nullable lives inside LowCardinality, not above it. */
+        /* ClickHouse nests Nullable inside LowCardinality */
         if (chc_type_kind(type) == CHC_NULLABLE) {
             nullable = true;
             type     = chc_type_child(type, 0);
@@ -441,7 +401,6 @@ pgch_unwrap(const chc_type* type, bool* out_nullable) {
 
 const chc_block_opts pgch_block_opts_local = {};
 
-/* Precision and scale out of a numeric typmod; false when unconstrained. */
 static bool
 pgch__numeric_typmod(int32 typmod, int* precision, int* scale) {
     if (typmod < (int32)VARHDRSZ) {
@@ -449,7 +408,7 @@ pgch__numeric_typmod(int32 typmod, int* precision, int* scale) {
     }
     *precision = (int)(((typmod - VARHDRSZ) >> 16) & 0xffff);
 #if PG_VERSION_NUM >= 150000
-    /* PG 15 gave numeric negative scales, biased by 1024 in the low 11 bits. */
+    /* PostgreSQL 15 stores signed numeric scale with a 1024 bias */
     *scale = (int)((((typmod - VARHDRSZ) & 0x7ff) ^ 1024) - 1024);
 #else
     *scale = (int)((typmod - VARHDRSZ) & 0xffff);
@@ -457,11 +416,6 @@ pgch__numeric_typmod(int32 typmod, int* precision, int* scale) {
     return true;
 }
 
-/*
- * Scalar CH type name, before any Nullable or LowCardinality wrapper. NULL
- * means String, which every remaining PG type reaches through its output
- * function.
- */
 static const char*
 pgch__ch_scalar(Oid typid, int32 typmod, const pgch_type_opts* opts) {
     switch (typid) {
@@ -487,10 +441,7 @@ pgch__ch_scalar(Oid typid, int32 typmod, const pgch_type_opts* opts) {
     case NUMERICOID: {
         int precision, scale;
 
-        /*
-         * ClickHouse caps Decimal at 76 digits and has no negative scale, so
-         * anything else falls back to the unconstrained choice.
-         */
+        /* ClickHouse Decimal supports up to 76 digits and no negative scale */
         if (pgch__numeric_typmod(typmod, &precision, &scale) && precision >= 1 &&
             precision <= 76 && scale >= 0 && scale <= precision) {
             return psprintf("Decimal(%d,%d)", precision, scale);
@@ -500,12 +451,12 @@ pgch__ch_scalar(Oid typid, int32 typmod, const pgch_type_opts* opts) {
     case UUIDOID:
         return "UUID";
     case DATEOID:
-        /* Date is unsigned days from 1970; Date32 covers PG's negative side. */
+        /* ClickHouse Date cannot represent dates before 1970 */
         return "Date32";
     case TIMEOID:
         return "Time64(6)";
     case TIMESTAMPOID:
-        /* Native carries an int64, so no session zone leaks into the wire. */
+        /* Native stores DateTime64 as an integer without session timezone */
         return "DateTime64(6)";
     case TIMESTAMPTZOID:
         return "DateTime64(6, 'UTC')";
@@ -514,12 +465,9 @@ pgch__ch_scalar(Oid typid, int32 typmod, const pgch_type_opts* opts) {
         return opts->json_as_json ? "JSON" : NULL;
     default:
         /*
-         * String covers the rest, deliberately: bpchar(n) and varchar(n)
-         * because FixedString(n) counts bytes where PG counts characters,
-         * inet because one PG column holds both families, interval because
-         * ClickHouse's Interval has no columnar serialization, and every
-         * enum, geo, bit and network type because their output function is
-         * the only agreed rendering.
+         * FixedString counts bytes while PostgreSQL character typmods count
+         * characters. String also provides common representation for types
+         * without matching Native column types
          */
         return NULL;
     }
@@ -536,10 +484,7 @@ pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* op
     }
     typid = getBaseTypeAndTypmod(typid, &typmod);
 
-    /*
-     * Nullable(Array(...)) is prohibited server side, so a nullable array
-     * column pushes the nullability onto its elements instead.
-     */
+    /* ClickHouse rejects Nullable(Array), apply nullability to elements */
     elemtype = get_element_type(typid);
     if (OidIsValid(elemtype)) {
         return psprintf("Array(%s)", pgch_ch_type_for(elemtype, typmod, notnull, opts));
@@ -554,7 +499,7 @@ pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* op
         }
         base = "String";
     }
-    /* Nullable(JSON) is rejected server side; JSON already carries null. */
+    /* ClickHouse rejects Nullable(JSON), JSON already represents null */
     if (notnull || strcmp(base, "JSON") == 0) {
         return pstrdup(base);
     }
@@ -577,7 +522,7 @@ pgch_quote_ch_ident(const char* name) {
     initStringInfo(&buf);
     appendStringInfoChar(&buf, '"');
     for (const char* p = name; *p; p++) {
-        /* SQL-style quoting doubles the quote; backslash still escapes. */
+        /* ClickHouse quoted identifiers escape quotes and backslashes */
         if (*p == '"' || *p == '\\') {
             appendStringInfoChar(&buf, *p == '"' ? '"' : '\\');
         }
@@ -595,7 +540,7 @@ pgch_structure_from_tupdesc(TupleDesc desc, const pgch_type_opts* opts) {
     for (int i = 0; i < desc->natts; i++) {
         Form_pg_attribute a = TupleDescAttr(desc, i);
 
-        if (a->attisdropped || a->attgenerated) {
+        if (!pgch_attr_is_streamed(a)) {
             continue;
         }
         if (buf.len) {
@@ -621,7 +566,7 @@ pgch_buf_reserve(pgch_buf* b, size_t need) {
     size_t ncap = b->cap ? b->cap : 64;
 
     while (ncap < need) {
-        ncap *= 2;
+        ncap = ncap > SIZE_MAX / 2 ? need : ncap * 2;
     }
     b->data =
         b->data

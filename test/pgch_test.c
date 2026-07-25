@@ -1,10 +1,8 @@
 /*
- * pgch_test.c -- SQL surface for exercising pg-clickhouse-c in a backend.
+ * Expose pg-clickhouse-c through SQL tests
  *
- * Encodes PG Datums into a one-column Native block, hands the bytes back as
- * bytea, and decodes such bytes into text. Round trips run entirely in memory:
- * no ClickHouse server, no chDB. This is also the TU carrying both
- * implementations, so it doubles as the compile check for the headers.
+ * Run Native round trips in memory without ClickHouse or chDB
+ * Compile both header implementations here
  */
 
 #include "postgres.h"
@@ -46,6 +44,15 @@ parse_ch_type(text* name) {
 }
 
 static bytea*
+bytea_from_buf(const pgch_buf* buf) {
+    bytea* out = (bytea*)palloc(VARHDRSZ + buf->len);
+
+    SET_VARSIZE(out, VARHDRSZ + buf->len);
+    memcpy(VARDATA(out), buf->data, buf->len);
+    return out;
+}
+
+static bytea*
 encode_rows(text* chtype, Datum* vals, bool* nulls, int nrows, Oid valtype) {
     chc_type* t    = parse_ch_type(chtype);
     pgch_col col   = { .name = "c", .name_len = 1, .type = t };
@@ -72,9 +79,7 @@ encode_rows(text* chtype, Datum* vals, bool* nulls, int nrows, Oid valtype) {
         pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
     }
 
-    out = (bytea*)palloc(VARHDRSZ + buf.len);
-    SET_VARSIZE(out, VARHDRSZ + buf.len);
-    memcpy(VARDATA(out), buf.data, buf.len);
+    out = bytea_from_buf(&buf);
 
     pgch_writer_reset(w);
     pgch_writer_free(w);
@@ -83,7 +88,7 @@ encode_rows(text* chtype, Datum* vals, bool* nulls, int nrows, Oid valtype) {
 
 PG_FUNCTION_INFO_V1(pgch_encode);
 
-/* (ch_type text, val anyelement) -> bytea: one-row block. */
+/* Encode one row into one-column Native block */
 Datum
 pgch_encode(PG_FUNCTION_ARGS) {
     Datum val   = PG_ARGISNULL(1) ? (Datum)0 : PG_GETARG_DATUM(1);
@@ -98,7 +103,7 @@ pgch_encode(PG_FUNCTION_ARGS) {
 
 PG_FUNCTION_INFO_V1(pgch_encode_rows);
 
-/* (ch_type text, vals anyarray) -> bytea: one row per array element. */
+/* Encode one row per array element */
 Datum
 pgch_encode_rows(PG_FUNCTION_ARGS) {
     Oid arrtype = get_fn_expr_argtype(fcinfo->flinfo, 1);
@@ -133,11 +138,7 @@ pgch_encode_rows(PG_FUNCTION_ARGS) {
     PG_RETURN_BYTEA_P(encode_rows(PG_GETARG_TEXT_PP(0), vals, nulls, nvals, elemtype));
 }
 
-/*
- * Block source over submitted bytes. An ioless chc_in cannot tell a clean end
- * of stream from a truncated block, so CHC_WOULD_BLOCK once every byte is
- * consumed means "no more blocks" here.
- */
+/* I/O-free clickhouse-c input reports CHC_WOULD_BLOCK after submitted bytes */
 typedef struct {
     chc_in* in;
     bool done;
@@ -173,22 +174,38 @@ bytes_source_error(void* ud) {
     return ((bytes_source*)ud)->error;
 }
 
-/*
- * Column 0 of every row of an already-initialized reader, as text.
- * from_type builds the conversion state off the column's CH type rather than
- * off the first non-null value.
- */
-static ArrayType*
+/* Initialize reader over bytea, caller keeps src alive */
+static void
+reader_from_bytea(pgch_reader* r, bytes_source* src, bytea* data) {
+    pgch_block_source bsrc;
+    chc_err err = {};
+
+    src->in    = pgch_in_alloc();
+    src->done  = false;
+    src->error = NULL;
+    if (chc_in_init_ioless(src->in, &pgch_alloc) != CHC_OK) {
+        elog(ERROR, "chc_in_init_ioless failed");
+    }
+    if (chc_in_submit(src->in, VARDATA_ANY(data), VARSIZE_ANY_EXHDR(data), &err) !=
+        CHC_OK) {
+        pgch_raise(&err, ERRCODE_FDW_ERROR, "submit: ");
+    }
+
+    bsrc.ud         = src;
+    bsrc.next_block = bytes_next_block;
+    bsrc.error      = bytes_source_error;
+
+    pgch_reader_init(r, &bsrc);
+}
+
+/* Decode first column as text, optionally prepare conversion from column type */
+static Datum
 decode_reader(pgch_reader* r_, Oid outtype, bool from_type) {
-    pgch_reader r   = *r_;
-    Datum* out      = NULL;
-    bool* nulls     = NULL;
-    int n           = 0;
-    int cap         = 0;
-    void* convstate = NULL;
-    bool converted  = false;
-    FmgrInfo outfn  = {};
-    ArrayType* result;
+    pgch_reader r        = *r_;
+    ArrayBuildState* out = initArrayResult(TEXTOID, CurrentMemoryContext, false);
+    void* convstate      = NULL;
+    bool converted       = false;
+    FmgrInfo outfn       = {};
 
     if (OidIsValid(outtype)) {
         Oid outfuncid;
@@ -210,30 +227,23 @@ decode_reader(pgch_reader* r_, Oid outtype, bool from_type) {
     }
 
     while (pgch_reader_next(&r)) {
-        if (n == cap) {
-            cap = cap ? cap * 2 : 8;
-            out =
-                out ? repalloc(out, cap * sizeof(Datum)) : palloc(cap * sizeof(Datum));
-            nulls = nulls ? repalloc(nulls, cap * sizeof(bool))
-                          : palloc(cap * sizeof(bool));
-        }
-        nulls[n] = r.nulls[0];
-        if (nulls[n]) {
-            out[n] = (Datum)0;
+        bool isnull = r.nulls[0];
+        Datum val   = (Datum)0;
+
+        if (isnull) {
         } else if (!OidIsValid(outtype)) {
-            out[n] =
+            val =
                 CStringGetTextDatum(pgch_value_to_cstring(r.coltypes[0], r.values[0]));
         } else {
-            /* State comes from the first non-null value, as the FDW does. */
             if (!converted) {
                 convstate = pgch_convert_init(r.values[0], r.coltypes[0], outtype);
                 converted = true;
             }
-            out[n] = CStringGetTextDatum(
+            val = CStringGetTextDatum(
                 OutputFunctionCall(&outfn, pgch_convert(convstate, r.values[0]))
             );
         }
-        n++;
+        accumArrayResult(out, val, isnull, TEXTOID, CurrentMemoryContext);
     }
     if (r.error) {
         elog(ERROR, "decode: %s", r.error);
@@ -243,44 +253,19 @@ decode_reader(pgch_reader* r_, Oid outtype, bool from_type) {
     }
     pgch_reader_free(&r);
 
-    result = construct_md_array(
-        out, nulls, 1, &n, (int[]){ 1 }, TEXTOID, -1, false, TYPALIGN_INT
-    );
-    return result;
+    return makeArrayResult(out, CurrentMemoryContext);
 }
 
-/*
- * Column 0 of every row as text. outtype InvalidOid renders the decoder's own
- * Datum; otherwise every value goes through pgch_convert into outtype first,
- * which is the path a composite target takes.
- */
-static ArrayType*
+static Datum
 decode_column(bytea* data, Oid outtype, bool from_type) {
     bytes_source src;
-    pgch_block_source bsrc;
     pgch_reader r;
-    chc_err err = {};
 
-    src.in    = pgch_in_alloc();
-    src.done  = false;
-    src.error = NULL;
-    if (chc_in_init_ioless(src.in, &pgch_alloc) != CHC_OK) {
-        elog(ERROR, "chc_in_init_ioless failed");
-    }
-    if (chc_in_submit(src.in, VARDATA_ANY(data), VARSIZE_ANY_EXHDR(data), &err) !=
-        CHC_OK) {
-        pgch_raise(&err, ERRCODE_FDW_ERROR, "submit: ");
-    }
-
-    bsrc.ud         = &src;
-    bsrc.next_block = bytes_next_block;
-    bsrc.error      = bytes_source_error;
-
-    pgch_reader_init(&r, &bsrc);
+    reader_from_bytea(&r, &src, data);
     return decode_reader(&r, outtype, from_type);
 }
 
-/* Hands the same bytes over in fixed-size pieces, for the refill path. */
+/* Supply fixed-size chunks */
 typedef struct {
     const uint8_t* data;
     size_t len;
@@ -295,14 +280,14 @@ feed_next_chunk(void* ud, const void** p, size_t* n, char** error) {
 
     (void)error;
     *p = f->data + f->pos;
-    *n = take; /* zero once drained: end of stream */
+    *n = take;
     f->pos += take;
     return true;
 }
 
 PG_FUNCTION_INFO_V1(pgch_decode_chunks);
 
-/* (data bytea, chunk int) -> text[]: pgch_decode over a pgch_chunk_source. */
+/* Decode Native bytes through chunk source */
 Datum
 pgch_decode_chunks(PG_FUNCTION_ARGS) {
     bytea* data = PG_GETARG_BYTEA_PP(0);
@@ -320,20 +305,20 @@ pgch_decode_chunks(PG_FUNCTION_ARGS) {
     src.cancelled  = NULL;
 
     pgch_reader_init_chunks(&r, &src, NULL);
-    PG_RETURN_ARRAYTYPE_P(decode_reader(&r, InvalidOid, false));
+    PG_RETURN_DATUM(decode_reader(&r, InvalidOid, false));
 }
 
 PG_FUNCTION_INFO_V1(pgch_decode);
 
-/* (data bytea) -> text[]: column 0 of every row, rendered by its PG type. */
+/* Decode first column of every row as text */
 Datum
 pgch_decode(PG_FUNCTION_ARGS) {
-    PG_RETURN_ARRAYTYPE_P(decode_column(PG_GETARG_BYTEA_PP(0), InvalidOid, false));
+    PG_RETURN_DATUM(decode_column(PG_GETARG_BYTEA_PP(0), InvalidOid, false));
 }
 
 PG_FUNCTION_INFO_V1(pgch_decode_as);
 
-/* (data bytea, target anyelement) -> text[]: rows converted into target's type. */
+/* Decode rows into requested PostgreSQL type */
 Datum
 pgch_decode_as(PG_FUNCTION_ARGS) {
     Oid outtype = get_fn_expr_argtype(fcinfo->flinfo, 1);
@@ -344,12 +329,12 @@ pgch_decode_as(PG_FUNCTION_ARGS) {
     if (!OidIsValid(outtype)) {
         elog(ERROR, "could not determine target type");
     }
-    PG_RETURN_ARRAYTYPE_P(decode_column(PG_GETARG_BYTEA_PP(0), outtype, false));
+    PG_RETURN_DATUM(decode_column(PG_GETARG_BYTEA_PP(0), outtype, false));
 }
 
 PG_FUNCTION_INFO_V1(pgch_decode_typed);
 
-/* As pgch_decode_as, with the conversion state built from the column type. */
+/* Decode rows with conversion prepared from ClickHouse column type */
 Datum
 pgch_decode_typed(PG_FUNCTION_ARGS) {
     Oid outtype = get_fn_expr_argtype(fcinfo->flinfo, 1);
@@ -360,12 +345,12 @@ pgch_decode_typed(PG_FUNCTION_ARGS) {
     if (!OidIsValid(outtype)) {
         elog(ERROR, "could not determine target type");
     }
-    PG_RETURN_ARRAYTYPE_P(decode_column(PG_GETARG_BYTEA_PP(0), outtype, true));
+    PG_RETURN_DATUM(decode_column(PG_GETARG_BYTEA_PP(0), outtype, true));
 }
 
 PG_FUNCTION_INFO_V1(pgch_pgtype);
 
-/* (ch_type text) -> text: the PG type this CH type decodes into. */
+/* Return PostgreSQL type for ClickHouse declaration */
 Datum
 pgch_pgtype(PG_FUNCTION_ARGS) {
     chc_type* t = parse_ch_type(PG_GETARG_TEXT_PP(0));
@@ -375,13 +360,12 @@ pgch_pgtype(PG_FUNCTION_ARGS) {
 
 PG_FUNCTION_INFO_V1(pgch_native_settings);
 
-/* () -> text: the settings string a query must carry, pinned by expected out. */
+/* Return required Native query settings */
 Datum
 pgch_native_settings(PG_FUNCTION_ARGS pg_attribute_unused()) {
     PG_RETURN_TEXT_P(cstring_to_text(PGCH_NATIVE_SETTINGS));
 }
 
-/* json_as_json / low_cardinality / numeric_as_string, from arg `first` on. */
 static pgch_type_opts
 type_opts(FunctionCallInfo fcinfo, int first) {
     pgch_type_opts opts = {};
@@ -394,7 +378,7 @@ type_opts(FunctionCallInfo fcinfo, int first) {
 
 PG_FUNCTION_INFO_V1(pgch_chtype);
 
-/* (decl text, notnull bool, opts...) -> text: CH type for a PG declaration. */
+/* Return ClickHouse type for PostgreSQL declaration */
 Datum
 pgch_chtype(PG_FUNCTION_ARGS) {
     char* decl          = text_to_cstring(PG_GETARG_TEXT_PP(0));
@@ -408,14 +392,14 @@ pgch_chtype(PG_FUNCTION_ARGS) {
     parseTypeString(decl, &typid, &typmod, false);
 #endif
 
-    PG_RETURN_TEXT_P(cstring_to_text(
-        pgch_ch_type_for(typid, typmod, PG_GETARG_BOOL(1), &opts)
-    ));
+    PG_RETURN_TEXT_P(
+        cstring_to_text(pgch_ch_type_for(typid, typmod, PG_GETARG_BOOL(1), &opts))
+    );
 }
 
 PG_FUNCTION_INFO_V1(pgch_structure);
 
-/* (rel regclass, opts...) -> text: the structure clause for a relation. */
+/* Return ClickHouse structure for relation */
 Datum
 pgch_structure(PG_FUNCTION_ARGS) {
     Relation rel        = table_open(PG_GETARG_OID(0), AccessShareLock);
@@ -426,7 +410,6 @@ pgch_structure(PG_FUNCTION_ARGS) {
     PG_RETURN_TEXT_P(cstring_to_text(s));
 }
 
-/* Writer columns from a descriptor, the types pgch_ch_type_for declares. */
 static pgch_writer*
 writer_for_tupdesc(TupleDesc desc, const pgch_type_opts* opts, size_t* out_ncols) {
     pgch_col* cols = palloc0(desc->natts * sizeof(pgch_col));
@@ -439,7 +422,7 @@ writer_for_tupdesc(TupleDesc desc, const pgch_type_opts* opts, size_t* out_ncols
         chc_err err = {};
         chc_type* t;
 
-        if (a->attisdropped || a->attgenerated) {
+        if (!pgch_attr_is_streamed(a)) {
             continue;
         }
         chtype = pgch_ch_type_for(a->atttypid, a->atttypmod, a->attnotnull, opts);
@@ -457,7 +440,7 @@ writer_for_tupdesc(TupleDesc desc, const pgch_type_opts* opts, size_t* out_ncols
     return w;
 }
 
-/* table_beginscan gained a caller flags argument in PG 19. */
+/* PostgreSQL 19 added caller flags to table_beginscan */
 static TableScanDesc
 begin_scan(Relation rel) {
 #if PG_VERSION_NUM >= 190000
@@ -469,13 +452,7 @@ begin_scan(Relation rel) {
 
 PG_FUNCTION_INFO_V1(pgch_table_roundtrip);
 
-/*
- * (rel regclass, opts..., null_array_empty, nonfinite) -> text[]: every row of
- * the relation through the declared structure and back into the column's own
- * PG type, one text per row with columns joined by '|'. The whole COPY shape:
- * pgch_ch_type_for, pgch_append_slot, pgch_writer_flush,
- * pgch_reader_convert_init.
- */
+/* Round-trip every relation row through generated ClickHouse structure */
 Datum
 pgch_table_roundtrip(PG_FUNCTION_ARGS) {
     Relation rel        = table_open(PG_GETARG_OID(0), AccessShareLock);
@@ -489,22 +466,20 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
     bytea* bytes;
     Oid* targets  = palloc0(ncols * sizeof(Oid));
     FmgrInfo* out = palloc0(ncols * sizeof(FmgrInfo));
+    Datum* values = palloc0(ncols * sizeof(Datum));
+    bool* nulls   = palloc0(ncols * sizeof(bool));
     void** states;
     bytes_source src;
-    pgch_block_source bsrc;
     pgch_reader r;
-    chc_err err = {};
-    Datum* rows = NULL;
-    int nrows   = 0;
-    int cap     = 0;
-    size_t j    = 0;
+    ArrayBuildState* rows = initArrayResult(TEXTOID, CurrentMemoryContext, false);
+    size_t j              = 0;
 
     for (int i = 0; i < desc->natts; i++) {
         Form_pg_attribute a = TupleDescAttr(desc, i);
         Oid outfunc;
         bool varlena;
 
-        if (a->attisdropped || a->attgenerated) {
+        if (!pgch_attr_is_streamed(a)) {
             continue;
         }
         targets[j] = a->atttypid;
@@ -528,31 +503,14 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
     table_close(rel, AccessShareLock);
 
     pgch_writer_flush(w, &buf, NULL);
-    bytes = (bytea*)palloc(VARHDRSZ + buf.len);
-    SET_VARSIZE(bytes, VARHDRSZ + buf.len);
-    memcpy(VARDATA(bytes), buf.data, buf.len);
+    bytes = bytea_from_buf(&buf);
     pgch_writer_free(w);
 
-    src.in    = pgch_in_alloc();
-    src.done  = false;
-    src.error = NULL;
-    if (chc_in_init_ioless(src.in, &pgch_alloc) != CHC_OK) {
-        elog(ERROR, "chc_in_init_ioless failed");
-    }
-    if (chc_in_submit(src.in, VARDATA(bytes), VARSIZE_ANY_EXHDR(bytes), &err) !=
-        CHC_OK) {
-        pgch_raise(&err, ERRCODE_FDW_ERROR, "submit: ");
-    }
-    bsrc.ud         = &src;
-    bsrc.next_block = bytes_next_block;
-    bsrc.error      = bytes_source_error;
-
-    pgch_reader_init(&r, &bsrc);
+    reader_from_bytea(&r, &src, bytes);
     if (r.error) {
         elog(ERROR, "decode: %s", r.error);
     }
 
-    /* State off the column type, so an all-NULL column needs no first row. */
     states = palloc0(ncols * sizeof(void*));
     for (size_t i = 0; i < ncols; i++) {
         states[i] = pgch_reader_convert_init(&r, i, targets[i]);
@@ -560,8 +518,6 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
 
     while (pgch_reader_next(&r)) {
         StringInfoData row;
-        Datum* values = palloc0(ncols * sizeof(Datum));
-        bool* nulls   = palloc0(ncols * sizeof(bool));
 
         pgch_reader_fill(&r, states, values, nulls);
         initStringInfo(&row);
@@ -574,19 +530,14 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
             );
         }
 
-        if (nrows == cap) {
-            cap  = cap ? cap * 2 : 8;
-            rows = rows ? repalloc(rows, cap * sizeof(Datum))
-                        : palloc(cap * sizeof(Datum));
-        }
-        rows[nrows++] = CStringGetTextDatum(row.data);
+        accumArrayResult(
+            rows, CStringGetTextDatum(row.data), false, TEXTOID, CurrentMemoryContext
+        );
     }
     if (r.error) {
         elog(ERROR, "decode: %s", r.error);
     }
     pgch_reader_free(&r);
 
-    PG_RETURN_ARRAYTYPE_P(construct_md_array(
-        rows, NULL, 1, &nrows, (int[]){ 1 }, TEXTOID, -1, false, TYPALIGN_INT
-    ));
+    PG_RETURN_DATUM(makeArrayResult(rows, CurrentMemoryContext));
 }
