@@ -6,6 +6,12 @@ CREATE FUNCTION pgch_encode(ch_type text, val anyelement) RETURNS bytea
 CREATE FUNCTION pgch_encode_rows(ch_type text, vals anyarray) RETURNS bytea
     AS 'MODULE_PATHNAME' LANGUAGE c CALLED ON NULL INPUT;
 
+-- Encode one row of pairs, fields counting values written per pair
+CREATE FUNCTION pgch_encode_pairs(ch_type text, keys text[], vals bigint[],
+                                  fields int DEFAULT 2,
+                                  nest bool DEFAULT false) RETURNS bytea
+    AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
+
 CREATE FUNCTION pgch_decode(data bytea) RETURNS text[]
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 

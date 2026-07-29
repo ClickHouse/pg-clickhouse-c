@@ -13,8 +13,10 @@ FROM unnest(ARRAY[
     'date', 'time', 'timestamp', 'timestamptz', 'timetz', 'interval',
     'uuid', 'json', 'jsonb',
     'inet', 'cidr', 'macaddr', 'macaddr8', 'bit(4)', 'varbit(6)',
-    'point', 'polygon', 'money', 'tsvector', 'tsquery', 'jsonpath',
-    'int4[]', 'text[]', 'numeric(12,6)[]', 'interval[]'
+    'point', 'lseg', 'path', 'polygon', 'box', 'circle', 'line',
+    'money', 'tsvector', 'tsquery', 'jsonpath',
+    'int4[]', 'text[]', 'numeric(12,6)[]', 'interval[]',
+    'polygon[]', 'box[]'
 ]) AS d;
 
 -- Verify optional JSON, LowCardinality, and numeric mappings
@@ -34,7 +36,8 @@ SELECT d AS pg_type, c AS ch_type, pgch_pgtype(c) AS decodes_as
 FROM (SELECT d, pgch_chtype(d, true) AS c FROM unnest(ARRAY[
     'bool', 'int2', 'int4', 'int8', 'oid', 'xid8', 'float4', 'float8',
     'numeric(12,6)', 'text', 'date', 'time', 'timestamptz', 'uuid',
-    'int4[]', 'text[]'
+    'int4[]', 'text[]',
+    'point', 'lseg', 'path', 'polygon', 'box', 'circle', 'line', 'polygon[]'
 ]) AS d) q;
 
 -- Round-trip PostgreSQL types represented by ClickHouse String
@@ -120,8 +123,19 @@ ALTER TABLE copyshape DROP COLUMN mac;
 SELECT pgch_structure('copyshape');
 SELECT unnest(pgch_table_roundtrip('copyshape', null_array_empty => true));
 
+-- Carry a NULL ring or line as the empty one, which PostgreSQL cannot spell
+CREATE TABLE geoshape (poly polygon, p path, ls lseg, b box, polys polygon[]);
+INSERT INTO geoshape VALUES
+    ('((0,0),(1,1),(2,0))', '[(0,0),(1,1)]', '((1,1),(2,2))', '((1,1),(3,3))',
+     ARRAY['((0,0),(1,1),(2,0))', NULL]::polygon[]),
+    (NULL, NULL, NULL, NULL, NULL);
+
+SELECT pgch_structure('geoshape');
+SELECT unnest(pgch_table_roundtrip('geoshape', null_array_empty => true));
+
 -- Keep non-finite values, which Float columns take
 SELECT pgch_roundtrip('Float64', 'NaN'::float8) AS float_keeps_nan;
+SELECT pgch_roundtrip('Float32', '-Infinity'::float4) AS float_keeps_inf;
 
 -- Return required Native query settings
 SELECT pgch_native_settings();

@@ -32,7 +32,7 @@ SELECT pgch_roundtrip('Decimal(18,0)', 99999999999999999999::numeric);
 ERROR:  pgch: value "99999999999999999999" out of range for ClickHouse Decimal64
 -- Reject unsupported encoder types
 SELECT pgch_encode('Tuple(Int32)', ROW(1)::record);
-ERROR:  pgch: unsupported column type: Tuple(Int32)
+ERROR:  pgch: cannot encode record into ClickHouse Tuple(Int32) (column "c")
 SELECT pgch_encode('LowCardinality(Int32)', 1::int4);
 ERROR:  pgch: unsupported LowCardinality variant: Int32
 -- Reject Tuple targets with incompatible shape
@@ -48,26 +48,33 @@ SELECT pgch_decode_as(pgch_block('Tuple(Int32, Int32)', 1, '\x2a0000002a000000':
                       NULL::twofields);
 ERROR:  could not map tuple to returned type
 \set VERBOSITY default
+-- Reject Tuple field counts other than the column's arity
+SELECT pgch_encode_pairs('Map(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[], 1);
+ERROR:  pgch: Tuple took 1 of 2 values
+SELECT pgch_encode_pairs('Map(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[], 3);
+ERROR:  pgch: Tuple takes 2 values
+SELECT pgch_encode_pairs('Tuple(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[]);
+ERROR:  pgch: Array value into column "c"
+SELECT pgch_encode_pairs('Map(String)', ARRAY['a'], ARRAY[1]::bigint[]);
+ERROR:  pgch: Map wants key and value
 -- Reject types without PostgreSQL mapping
 SELECT pgch_pgtype('Int128');
 ERROR:  pgch: unsupported column type "Int128"
-SELECT pgch_pgtype('Map(String, Int32)');
-ERROR:  pgch: unsupported column type "Map(String, Int32)"
 SELECT pgch_pgtype('Nonsense');
 ERROR:  pgch: type parse: unknown type: Nonsense
 -- Reject unsupported types before reading rows, including nested types
-SELECT pgch_decode(pgch_block('Map(String, Int32)', 0, ''::bytea));
-ERROR:  decode: unsupported column type "Map(String, Int32)" (column "c")
 SELECT pgch_decode(pgch_block('Tuple()', 0, ''::bytea));
 ERROR:  decode: returned tuple is empty (column "c")
+SELECT pgch_decode(pgch_block('Map(String)', 0, ''::bytea));
+ERROR:  decode: returned map wants key and value (column "c")
 SELECT pgch_decode(pgch_block('Array(Nothing)', 0, ''::bytea));
 ERROR:  decode: no PG array type for column type "Nothing" (column "c")
 SELECT pgch_decode(pgch_block('LowCardinality(Int32)', 0, ''::bytea));
 ERROR:  decode: unsupported LowCardinality inner type (column "c")
 SELECT pgch_decode(pgch_block('Array(Int128)', 1, '\x0000000000000000'::bytea));
 ERROR:  decode: unsupported column type "Int128" (column "c")
-SELECT pgch_decode(pgch_block('Tuple(Int32, Map(String, Int32))', 0, ''::bytea));
-ERROR:  decode: unsupported column type "Map(String, Int32)" (column "c")
+SELECT pgch_decode(pgch_block('Tuple(Int32, Map(String, Int128))', 0, ''::bytea));
+ERROR:  decode: unsupported column type "Int128" (column "c")
 -- Identify unnamed columns by position
 SELECT pgch_decode('\x01000006'::bytea || convert_to('Int128', 'UTF8'));
 ERROR:  decode: unsupported column type "Int128" (column 1)

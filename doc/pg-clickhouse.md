@@ -81,12 +81,17 @@ unsupported kinds contain `InvalidOid`.
 - Scalar types return mapped scalar OID
 - `Array` returns `ANYARRAYOID`, representing `pgch_array *`
 - `Tuple` returns `RECORDOID`, representing `pgch_tuple *`
+- `Map` returns `ANYARRAYOID` over `pgch_tuple *` pairs, as ClickHouse stores
+  it as `Array(Tuple(K, V))`
+- `Polygon`, `MultiPolygon`, and `MultiLineString` return `ANYARRAYOID`, having
+  no PostgreSQL multi-geometry counterpart
 - `Nullable` and `LowCardinality` return inner mapping
 - `Nothing` and `Void` return `InvalidOid`
 
 `pgch_native_oid` returns type suitable for a PostgreSQL column descriptor.
 Unlike `pgch_datum_oid`, it resolves `Array` to PostgreSQL array OID for leaf
-type. Unsupported mappings raise `ERRCODE_FDW_INVALID_DATA_TYPE`.
+type, and `Map` to `record[]`. Unsupported mappings raise
+`ERRCODE_FDW_INVALID_DATA_TYPE`.
 
 `pgch_native_oid_for` behaves like `pgch_native_oid` and adds `what` to an
 unsupported-type error. Pass `NULL` to omit context.
@@ -95,8 +100,8 @@ unsupported-type error. Pass `NULL` to omit context.
 inside `LowCardinality`. When `out_nullable` is not `NULL`, it reports whether
 either nullable wrapper was present.
 
-`pgch_pow10` contains powers from `10^0` through `10^9` for scaled typed
-append APIs.
+`pgch_pow10` contains powers from `10^0` through `10^9` for scaling `DateTime64`
+and `Time64` values.
 
 ## PostgreSQL to ClickHouse types
 
@@ -138,6 +143,24 @@ array and never its elements, and ClickHouse does not support
 Types without dedicated mapping use `String`. `JSON` remains unwrapped because
 ClickHouse rejects `Nullable(JSON)`.
 
+Geometric types map onto the ClickHouse geo types and Tuples over them:
+
+| PostgreSQL | ClickHouse                               |
+| ---------- | ---------------------------------------- |
+| `point`    | `Point`                                  |
+| `lseg`     | `LineString`, two points                 |
+| `path`     | `LineString`, closed repeating its first |
+| `polygon`  | `Ring`                                   |
+| `box`      | `Tuple(high Point, low Point)`           |
+| `circle`   | `Tuple(center Point, radius Float64)`    |
+| `line`     | `Tuple(a Float64, b Float64, c Float64)` |
+
+`Ring` and `LineString` are `Array(Point)`, so they stay unwrapped like `JSON`
+and carry a NULL as the empty ring or line, which PostgreSQL cannot spell.
+Nullable `point`, `box`, `circle` and `line` columns are nullable Tuples, which
+ClickHouse gates behind `allow_experimental_nullable_tuple_type`. Request it
+alongside `PGCH_NATIVE_SETTINGS` when a query can produce one.
+
 `pgch_quote_ch_ident` returns unquoted name when valid bare ClickHouse
 identifier, otherwise returns quoted and escaped identifier.
 
@@ -165,7 +188,8 @@ extern const chc_block_opts pgch_block_opts_local;
 Apply `PGCH_NATIVE_SETTINGS` to queries returning Native data. First setting
 keeps textual type names expected by clickhouse-c. Second serializes
 ClickHouse `JSON` columns as document strings and requires ClickHouse 24.10 or
-later.
+later. The macro carries only what the wire format needs; settings that gate a
+type rather than its serialization stay with the query builder.
 
 Use `pgch_block_opts_local` with chDB and `clickhouse-local`. For TCP server
 traffic, set `has_block_info` and `has_custom_serialization` according to

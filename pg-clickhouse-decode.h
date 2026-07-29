@@ -174,7 +174,9 @@ pgch_value_to_cstring(Oid coltype, Datum value);
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
+#include "utils/float.h"
 #include "utils/fmgroids.h"
+#include "utils/geo_decls.h"
 #include "utils/inet.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -378,6 +380,125 @@ pgch__read_uuid(const chc_column* col, uint64_t row) {
     return UUIDPGetDatum(u);
 }
 
+/* ClickHouse Point is Tuple(Float64, Float64), one column per axis */
+static Datum
+pgch__read_point(const chc_column* col, uint64_t row) {
+    Point* p = (Point*)palloc(sizeof(Point));
+
+    p->x = pgch__rd_f64(
+        (const uint8_t*)chc_column_fixed_data(chc_column_tuple_child(col, 0), NULL), row
+    );
+    p->y = pgch__rd_f64(
+        (const uint8_t*)chc_column_fixed_data(chc_column_tuple_child(col, 1), NULL), row
+    );
+    return PointPGetDatum(p);
+}
+
+/* Ring and LineString are Array(Point), so a row is a slice of the axis columns */
+static int
+pgch__read_axes(
+    const chc_column* col,
+    uint64_t row,
+    const double** xs,
+    const double** ys
+) {
+    const uint64_t* offs  = chc_column_array_offsets(col);
+    uint64_t start        = row == 0 ? 0 : offs[row - 1];
+    uint64_t npts         = offs[row] - start;
+    const chc_column* pts = chc_column_array_values(col);
+
+    /* PostgreSQL counts points in an int32 and stores them inline */
+    if (npts > (INT_MAX - offsetof(POLYGON, p)) / sizeof(Point)) {
+        pgch_error(ERRCODE_PROGRAM_LIMIT_EXCEEDED, "too many points requested");
+    }
+    *xs = (const double*)chc_column_fixed_data(chc_column_tuple_child(pts, 0), NULL) +
+          start;
+    *ys = (const double*)chc_column_fixed_data(chc_column_tuple_child(pts, 1), NULL) +
+          start;
+    return (int)npts;
+}
+
+static void
+pgch__fill_points(Point* out, const double* xs, const double* ys, int npts) {
+    for (int i = 0; i < npts; i++) {
+        out[i].x = xs[i];
+        out[i].y = ys[i];
+    }
+}
+
+/* make_bound_box from src/backend/utils/adt/geo_ops.c, static there */
+static void
+pgch__bound_box(POLYGON* poly) {
+    float8 x1 = poly->p[0].x, x2 = x1;
+    float8 y1 = poly->p[0].y, y2 = y1;
+
+    for (int i = 1; i < poly->npts; i++) {
+        if (float8_lt(poly->p[i].x, x1)) {
+            x1 = poly->p[i].x;
+        }
+        if (float8_gt(poly->p[i].x, x2)) {
+            x2 = poly->p[i].x;
+        }
+        if (float8_lt(poly->p[i].y, y1)) {
+            y1 = poly->p[i].y;
+        }
+        if (float8_gt(poly->p[i].y, y2)) {
+            y2 = poly->p[i].y;
+        }
+    }
+    poly->boundbox.low.x  = x1;
+    poly->boundbox.high.x = x2;
+    poly->boundbox.low.y  = y1;
+    poly->boundbox.high.y = y2;
+}
+
+/* A Ring is closed by definition, as a PostgreSQL polygon is */
+static Datum
+pgch__read_polygon(const chc_column* col, uint64_t row, bool* is_null) {
+    const double *xs, *ys;
+    int npts = pgch__read_axes(col, row, &xs, &ys);
+    size_t size;
+    POLYGON* poly;
+
+    /* PostgreSQL has no pointless polygon, so an empty ring reads as NULL */
+    if (npts == 0) {
+        *is_null = true;
+        return (Datum)0;
+    }
+    size = offsetof(POLYGON, p) + sizeof(Point) * npts;
+    poly = (POLYGON*)palloc0(size);
+    SET_VARSIZE(poly, size);
+    poly->npts = npts;
+    pgch__fill_points(poly->p, xs, ys, npts);
+    pgch__bound_box(poly);
+    return PolygonPGetDatum(poly);
+}
+
+/* A LineString repeating its first point is the closed path that wrote it */
+static Datum
+pgch__read_path(const chc_column* col, uint64_t row, bool* is_null) {
+    const double *xs, *ys;
+    int npts = pgch__read_axes(col, row, &xs, &ys);
+    bool closed =
+        npts > 1 && float8_eq(xs[0], xs[npts - 1]) && float8_eq(ys[0], ys[npts - 1]);
+    size_t size;
+    PATH* path;
+
+    npts -= closed;
+    /* PostgreSQL has no pointless path, so an empty line reads as NULL */
+    if (npts == 0) {
+        *is_null = true;
+        return (Datum)0;
+    }
+    size = offsetof(PATH, p) + sizeof(Point) * npts;
+    path = (PATH*)palloc0(size);
+    SET_VARSIZE(path, size);
+    path->npts   = npts;
+    path->closed = closed;
+    pgch__fill_points(path->p, xs, ys, npts);
+    return PathPGetDatum(path);
+}
+
 /* ClickHouse stores IPv4 as native uint32, PostgreSQL inet uses network order */
 static Datum
 pgch__read_ipv4(const chc_column* col, uint64_t row) {
@@ -517,6 +638,44 @@ pgch__read_lc(
     return pgch__read_string(dict, k);
 }
 
+/*
+ * Walk an array shaped type to element pgch_array, reporting how many
+ * PostgreSQL dimensions it spans and type walk stopped on.
+ * Includes CH types which are represented by arrays in native format.
+ */
+static Oid
+pgch__array_item(const chc_type* type, const chc_type** leaf, int* ndim) {
+    int dims = 0;
+
+    for (;;) {
+        type  = pgch_unwrap(type, NULL);
+        *leaf = type;
+        switch (chc_type_kind(type)) {
+        case CHC_ARRAY:
+            dims++;
+            type = chc_type_child(type, 0);
+            continue;
+        /* Map holds Tuple(K, V) pairs */
+        case CHC_MAP:
+            *ndim = dims + 1;
+            return RECORDOID;
+        case CHC_POLYGON:
+            *ndim = dims + 1;
+            return pgch_kind_oids[CHC_RING];
+        /* MultiPolygon nests its rings one level deeper than Polygon */
+        case CHC_MULTI_POLYGON:
+            *ndim = dims + 2;
+            return pgch_kind_oids[CHC_RING];
+        case CHC_MULTI_LINE_STRING:
+            *ndim = dims + 1;
+            return pgch_kind_oids[CHC_LINE_STRING];
+        default:
+            *ndim = dims;
+            return pgch_datum_oid(type);
+        }
+    }
+}
+
 static Datum
 pgch__read_array(
     const chc_column* col,
@@ -532,18 +691,13 @@ pgch__read_array(
     const chc_type* inner_t = chc_type_child(type, 0);
     const chc_column* inner = chc_column_array_values(col);
     pgch_array* slot        = (pgch_array*)palloc(sizeof(pgch_array));
-    const chc_type* leaf    = type;
-    int ndim                = 0;
+    const chc_type* leaf;
+    int ndim;
 
+    slot->len = len;
     /* PostgreSQL uses one array type for every nesting depth */
-    while (chc_type_kind(leaf) == CHC_ARRAY) {
-        ndim++;
-        leaf = chc_type_child(leaf, 0);
-    }
-
-    slot->len        = len;
+    slot->item_type  = pgch__array_item(type, &leaf, &ndim);
     slot->ndim       = ndim;
-    slot->item_type  = pgch_datum_oid(leaf);
     slot->array_type = get_array_type(slot->item_type);
     if (!OidIsValid(slot->array_type)) {
         pgch_errorf(
@@ -571,6 +725,94 @@ pgch__read_array(
     *valtype = ANYARRAYOID;
     *is_null = false;
     return PointerGetDatum(slot);
+}
+
+/* Geo types carry no children, so a level's element kind follows from the kind */
+static chc_kind
+pgch__geo_child(chc_kind kind) {
+    switch (kind) {
+    case CHC_MULTI_POLYGON:
+        return CHC_POLYGON;
+    case CHC_POLYGON:
+        return CHC_RING;
+    case CHC_MULTI_LINE_STRING:
+        return CHC_LINE_STRING;
+    case CHC_RING:
+    case CHC_LINE_STRING:
+        return CHC_POINT;
+    default:
+        pg_unreachable();
+    }
+}
+
+static Datum
+pgch__read_geo(
+    const chc_column* col,
+    chc_kind kind,
+    uint64_t row,
+    Oid* valtype,
+    bool* is_null
+);
+
+/* PostgreSQL has no multi-geometry types, so their members become array items */
+static Datum
+pgch__read_geo_array(
+    const chc_column* col,
+    chc_kind kind,
+    uint64_t row,
+    Oid* valtype,
+    bool* is_null
+) {
+    const uint64_t* offs    = chc_column_array_offsets(col);
+    uint64_t start          = row == 0 ? 0 : offs[row - 1];
+    uint64_t len            = offs[row] - start;
+    const chc_column* inner = chc_column_array_values(col);
+    chc_kind child          = pgch__geo_child(kind);
+    pgch_array* slot        = (pgch_array*)palloc(sizeof(pgch_array));
+
+    slot->len  = len;
+    slot->ndim = kind == CHC_MULTI_POLYGON ? 2 : 1;
+    slot->item_type =
+        pgch_kind_oids[kind == CHC_MULTI_LINE_STRING ? CHC_LINE_STRING : CHC_RING];
+    slot->array_type = get_array_type(slot->item_type);
+    slot->datums     = len ? (Datum*)palloc0(sizeof(Datum) * len) : NULL;
+    slot->nulls      = len ? (bool*)palloc0(sizeof(bool) * len) : NULL;
+
+    for (uint64_t i = 0; i < len; i++) {
+        Oid scratch = slot->item_type;
+
+        slot->datums[i] =
+            pgch__read_geo(inner, child, start + i, &scratch, &slot->nulls[i]);
+    }
+
+    *valtype = ANYARRAYOID;
+    *is_null = false;
+    return PointerGetDatum(slot);
+}
+
+static Datum
+pgch__read_geo(
+    const chc_column* col,
+    chc_kind kind,
+    uint64_t row,
+    Oid* valtype,
+    bool* is_null
+) {
+    *valtype = pgch_kind_oids[kind];
+    switch (kind) {
+    case CHC_POINT:
+        return pgch__read_point(col, row);
+    case CHC_RING:
+        return pgch__read_polygon(col, row, is_null);
+    case CHC_LINE_STRING:
+        return pgch__read_path(col, row, is_null);
+    case CHC_POLYGON:
+    case CHC_MULTI_POLYGON:
+    case CHC_MULTI_LINE_STRING:
+        return pgch__read_geo_array(col, kind, row, valtype, is_null);
+    default:
+        pg_unreachable();
+    }
 }
 
 static Datum
@@ -604,6 +846,43 @@ pgch__read_tuple(
     }
 
     *valtype = RECORDOID;
+    *is_null = false;
+    return PointerGetDatum(slot);
+}
+
+/*
+ * Map is Array(Tuple(K, V)) carrying no Tuple type of its own, so the pair
+ * reads against the Map type, whose two children are the field types
+ */
+static Datum
+pgch__read_map(
+    const chc_column* col,
+    const chc_type* type,
+    uint64_t row,
+    Oid* valtype,
+    bool* is_null
+) {
+    const uint64_t* offs      = chc_column_array_offsets(col);
+    uint64_t start            = row == 0 ? 0 : offs[row - 1];
+    uint64_t len              = offs[row] - start;
+    const chc_column* entries = chc_column_array_values(col);
+    pgch_array* slot          = (pgch_array*)palloc(sizeof(pgch_array));
+
+    slot->len        = len;
+    slot->ndim       = 1;
+    slot->item_type  = RECORDOID;
+    slot->array_type = RECORDARRAYOID;
+    slot->datums     = len ? (Datum*)palloc0(sizeof(Datum) * len) : NULL;
+    slot->nulls      = len ? (bool*)palloc0(sizeof(bool) * len) : NULL;
+
+    for (uint64_t i = 0; i < len; i++) {
+        Oid scratch = RECORDOID;
+
+        slot->datums[i] =
+            pgch__read_tuple(entries, type, start + i, &scratch, &slot->nulls[i]);
+    }
+
+    *valtype = ANYARRAYOID;
     *is_null = false;
     return PointerGetDatum(slot);
 }
@@ -788,6 +1067,13 @@ pgch_read_value(
     }
     case CHC_UUID:
         return pgch__read_uuid(col, row);
+    case CHC_POINT:
+    case CHC_RING:
+    case CHC_LINE_STRING:
+    case CHC_POLYGON:
+    case CHC_MULTI_POLYGON:
+    case CHC_MULTI_LINE_STRING:
+        return pgch__read_geo(col, kind, row, valtype, is_null);
     case CHC_IPV4:
         return pgch__read_ipv4(col, row);
     case CHC_IPV6:
@@ -798,6 +1084,8 @@ pgch_read_value(
         return pgch__read_array(col, type, row, valtype, is_null);
     case CHC_TUPLE:
         return pgch__read_tuple(col, type, row, valtype, is_null);
+    case CHC_MAP:
+        return pgch__read_map(col, type, row, valtype, is_null);
     default:
         pgch_errorf(
             ERRCODE_FDW_INVALID_DATA_TYPE,
@@ -823,6 +1111,10 @@ pgch__append_shape(StringInfo buf, const chc_type* type) {
         appendStringInfoChar(buf, 'a');
         pgch__append_shape(buf, chc_type_child(type, 0));
         return;
+    /* Map reads as Array(Tuple(K, V)), so it shares that shape */
+    case CHC_MAP:
+        appendStringInfoChar(buf, 'a');
+        /* fall through */
     case CHC_TUPLE: {
         size_t n = chc_type_n_children(type);
 
@@ -833,6 +1125,12 @@ pgch__append_shape(StringInfo buf, const chc_type* type) {
         appendStringInfoChar(buf, ')');
         return;
     }
+    /* Multi-geometry types share an array Datum, so the kind separates them */
+    case CHC_POLYGON:
+    case CHC_MULTI_POLYGON:
+    case CHC_MULTI_LINE_STRING:
+        appendStringInfo(buf, "g%d;", (int)kind);
+        return;
     default:
         appendStringInfo(buf, "%u;", pgch_kind_oids[kind]);
     }
@@ -870,22 +1168,25 @@ pgch__check_type(const chc_type* type) {
         return NULL;
     }
     case CHC_ARRAY: {
-        const chc_type* leaf = type;
-        const char* msg      = pgch__check_type(chc_type_child(type, 0));
+        const chc_type* leaf;
+        int ndim;
+        const char* msg = pgch__check_type(chc_type_child(type, 0));
 
         if (msg) {
             return msg;
         }
-        while (chc_type_kind(leaf) == CHC_ARRAY) {
-            leaf = chc_type_child(leaf, 0);
-        }
-        if (!OidIsValid(get_array_type(pgch_datum_oid(leaf)))) {
+        if (!OidIsValid(get_array_type(pgch__array_item(type, &leaf, &ndim)))) {
             return psprintf(
                 "no PG array type for column type \"%s\"", chc_type_name(leaf, NULL)
             );
         }
         return NULL;
     }
+    case CHC_MAP:
+        if (chc_type_n_children(type) != 2) {
+            return "returned map wants key and value";
+        }
+        /* fall through */
     case CHC_TUPLE: {
         size_t n = chc_type_n_children(type);
 
@@ -901,6 +1202,11 @@ pgch__check_type(const chc_type* type) {
         }
         return NULL;
     }
+    /* Nodeless geo arrays over Ring or LineString, both of which PostgreSQL has */
+    case CHC_POLYGON:
+    case CHC_MULTI_POLYGON:
+    case CHC_MULTI_LINE_STRING:
+        return NULL;
     default:
         if (!OidIsValid(pgch_kind_oids[chc_type_kind(type)])) {
             return psprintf(
@@ -1397,6 +1703,121 @@ pgch__convert_array(pgch_convert_state* state, Datum val) {
     return pgch__convert_generic(state, val);
 }
 
+/* Flatten Point and Float64 fields left to right, as the writer fills them */
+static int
+pgch__tuple_axes(const pgch_tuple* slot, double* axes, int cap, int at) {
+    for (size_t i = 0; i < slot->len && at >= 0; i++) {
+        if (slot->nulls[i]) {
+            return -1;
+        }
+        switch (slot->types[i]) {
+        case POINTOID: {
+            Point* p = DatumGetPointP(slot->datums[i]);
+
+            if (at + 2 > cap) {
+                return -1;
+            }
+            axes[at++] = p->x;
+            axes[at++] = p->y;
+            break;
+        }
+        case FLOAT8OID:
+            if (at + 1 > cap) {
+                return -1;
+            }
+            axes[at++] = DatumGetFloat8(slot->datums[i]);
+            break;
+        case RECORDOID:
+            at = pgch__tuple_axes(
+                (pgch_tuple*)DatumGetPointer(slot->datums[i]), axes, cap, at
+            );
+            break;
+        default:
+            return -1;
+        }
+    }
+    return at;
+}
+
+/* box, circle and line have no cast from the Tuple of coordinates they cross as */
+static Datum
+pgch__convert_axes(pgch_convert_state* state, Datum val) {
+    pgch_tuple* slot = (pgch_tuple*)DatumGetPointer(val);
+    double axes[4];
+    int want = state->outtype == BOXOID ? 4 : 3;
+
+    if (pgch__tuple_axes(slot, axes, want, 0) != want) {
+        pgch_errorf(
+            ERRCODE_DATATYPE_MISMATCH,
+            "cannot return %s as %s",
+            slot->ch_type_name ? slot->ch_type_name : "?",
+            format_type_be(state->outtype)
+        );
+    }
+    switch (state->outtype) {
+    case BOXOID: {
+        BOX* box = (BOX*)palloc(sizeof(BOX));
+
+        box->high.x = axes[0];
+        box->high.y = axes[1];
+        box->low.x  = axes[2];
+        box->low.y  = axes[3];
+        return BoxPGetDatum(box);
+    }
+    case CIRCLEOID: {
+        CIRCLE* circle = (CIRCLE*)palloc(sizeof(CIRCLE));
+
+        circle->center.x = axes[0];
+        circle->center.y = axes[1];
+        circle->radius   = axes[2];
+        return CirclePGetDatum(circle);
+    }
+    case LINEOID: {
+        LINE* line = (LINE*)palloc(sizeof(LINE));
+
+        line->A = axes[0];
+        line->B = axes[1];
+        line->C = axes[2];
+        return LinePGetDatum(line);
+    }
+    }
+    pg_unreachable();
+}
+
+/* lseg is two points, which no cast makes of the point list it crosses as */
+static Datum
+pgch__convert_lseg(pgch_convert_state* state, Datum val) {
+    Point* pts;
+    int stored, npts;
+    LSEG* lseg;
+
+    if (state->intype == PATHOID) {
+        PATH* path = DatumGetPathP(val);
+
+        pts    = path->p;
+        stored = path->npts;
+        /* A closed path stands for the point list with its first point again */
+        npts = stored + (path->closed ? 1 : 0);
+    } else {
+        POLYGON* poly = DatumGetPolygonP(val);
+
+        pts    = poly->p;
+        stored = npts = poly->npts;
+    }
+    if (npts != 2) {
+        pgch_errorf(
+            ERRCODE_DATATYPE_MISMATCH,
+            "cannot return %d points as %s",
+            npts,
+            format_type_be(state->outtype)
+        );
+    }
+    lseg       = (LSEG*)palloc(sizeof(LSEG));
+    lseg->p[0] = pts[0];
+    lseg->p[1] = pts[1 % stored];
+    return LsegPGetDatum(lseg);
+}
+
 static Datum
 pgch__convert_from_text(pgch_convert_state* state, Datum val) {
     return InputFunctionCall(
@@ -1458,10 +1879,9 @@ pgch__convert_init(const chc_type* ct, Datum val, Oid intype, Oid outtype) {
             OidIsValid(outtype) ? get_element_type(getBaseType(outtype)) : InvalidOid;
 
         if (ct) {
-            while (chc_type_kind(leaf) == CHC_ARRAY) {
-                leaf = chc_type_child(leaf, 0);
-            }
-            state->item_type = pgch_datum_oid(leaf);
+            int ndim;
+
+            state->item_type = pgch__array_item(ct, &leaf, &ndim);
             state->intype    = pgch_native_oid(ct);
         } else {
             state->item_type = slot->item_type;
@@ -1474,17 +1894,30 @@ pgch__convert_init(const chc_type* ct, Datum val, Oid intype, Oid outtype) {
             Datum leafval  = (Datum)0;
             bool have_leaf = ct || pgch__array_leaf(slot, &leafval);
 
+            /* Records without a value to inspect are empty or all NULL, so
+             * they need the element type named but no conversion built */
             if (have_leaf || state->item_type != RECORDOID) {
                 state->elem_state =
                     pgch__convert_init(leaf, leafval, state->item_type, out_elem);
-                state->item_type = out_elem;
-                state->intype    = outtype;
             }
+            state->item_type = out_elem;
+            state->intype    = outtype;
         }
         get_typlenbyvalalign(
             state->item_type, &state->typlen, &state->typbyval, &state->typalign
         );
         intype = state->intype;
+    }
+
+    /* Geometric types PostgreSQL cannot cast from the shape they cross as */
+    if (intype == RECORDOID &&
+        (outtype == BOXOID || outtype == CIRCLEOID || outtype == LINEOID)) {
+        state->func = pgch__convert_axes;
+        return state;
+    }
+    if (outtype == LSEGOID && (intype == PATHOID || intype == POLYGONOID)) {
+        state->func = pgch__convert_lseg;
+        return state;
     }
 
     if (intype == RECORDOID) {
@@ -1669,10 +2102,12 @@ pgch_value_to_cstring(Oid coltype, Datum value) {
 
     if (coltype == ANYARRAYOID) {
         pgch_array* slot = (pgch_array*)DatumGetPointer(value);
-        void* state      = pgch_convert_init(value, ANYARRAYOID, slot->array_type);
-        Datum arr        = pgch_convert(state, value);
+        /* Anonymous records have no array to build, so render them as text */
+        Oid array_type = slot->item_type == RECORDOID ? TEXTARRAYOID : slot->array_type;
+        void* state    = pgch_convert_init(value, ANYARRAYOID, array_type);
+        Datum arr      = pgch_convert(state, value);
 
-        getTypeOutputInfo(slot->array_type, &out_func, &varlena);
+        getTypeOutputInfo(array_type, &out_func, &varlena);
         if (state) {
             pgch_convert_free(state);
         }

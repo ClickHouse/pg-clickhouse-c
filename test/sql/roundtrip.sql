@@ -98,6 +98,70 @@ SELECT pgch_roundtrip('Array(LowCardinality(String))', ARRAY['a', 'b', 'a']::tex
        pgch_roundtrip('Array(Date)', ARRAY['2024-01-15', '1999-12-31']::date[]),
        pgch_roundtrip('Array(Decimal(9,2))', ARRAY[1.25, -3.5]::numeric[]);
 
+-- Round-trip geometric types through the geo declarations they map to
+CREATE FUNCTION geo_rt(lit text, typ text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE res text;
+BEGIN
+    EXECUTE format('SELECT pgch_roundtrip_as(pgch_chtype(%L, true), %L::%s)',
+                   typ, lit, typ) INTO res;
+    RETURN res;
+END $$;
+
+SELECT typ, pgch_chtype(typ, true) AS ch, geo_rt(lit, typ) AS value
+FROM (VALUES
+    ('point',   '(1,2)'),
+    ('point',   '(1,nan)'),
+    ('lseg',    '((1,1),(2,2))'),
+    ('lseg',    '((1,1),(1,1))'),
+    ('path',    '[(1,1),(2,2),(3,1)]'),
+    ('path',    '((1,1),(2,2),(3,1))'),
+    ('path',    '((1,nan))'),
+    -- An open path whose ends meet is indistinguishable from a closed one
+    ('path',    '[(1,1),(2,2),(1,1)]'),
+    ('polygon', '((1,1),(2,2),(3,1))'),
+    ('box',     '((1,1),(3,3))'),
+    ('box',     '((nan,1),(3,3))'),
+    ('circle',  '<(1,2),3>'),
+    ('line',    '{1,-1,0}'),
+    ('line',    '{nan,1,nan}')
+) g(typ, lit);
+
+-- Round-trip arrays of geometric types
+SELECT pgch_roundtrip_as('Array(Ring)',
+                         ARRAY['((0,0),(1,1),(2,0))',
+                               '((5,5),(6,6),(7,5))']::polygon[]) AS rings,
+       pgch_roundtrip_as('Array(LineString)',
+                         ARRAY['[(0,0),(1,1)]', '((5,5),(6,6))']::path[]) AS lines,
+       pgch_roundtrip_as('Array(Nullable(Tuple(high Point, low Point)))',
+                         ARRAY['((1,1),(3,3))', NULL]::box[]) AS boxes;
+
+SELECT pgch_decode_typed(
+    pgch_encode('Array(Polygon)',
+                ARRAY[ARRAY['((0,0),(1,1),(2,0))']]::polygon[]),
+    NULL::polygon[]
+);
+
+-- Round-trip multi-geometries, which PostgreSQL spells as arrays
+SELECT pgch_roundtrip_as('Polygon',
+                         ARRAY['((0,0),(1,1),(2,0))', '((5,5),(6,6),(7,5))']::polygon[]),
+       pgch_roundtrip_as('MultiLineString',
+                         ARRAY['[(0,0),(1,1)]', '((5,5),(6,6))']::path[]),
+       pgch_roundtrip_as('MultiPolygon',
+                         ARRAY[ARRAY['((0,0),(1,1),(2,0))'],
+                               ARRAY['((5,5),(6,6),(7,5))']]::polygon[]);
+
+-- Read geo columns into the other geometric types PostgreSQL has
+SELECT pgch_decode_typed(pgch_encode('LineString', '((1,1),(2,2))'::lseg),
+                         NULL::lseg) AS line_as_lseg,
+       pgch_decode_typed(pgch_encode('Ring', '((0,0),(1,1),(2,0))'::polygon),
+                         NULL::box) AS ring_as_box,
+       pgch_decode_typed(pgch_encode('Ring', '((0,0),(1,1),(2,0))'::polygon),
+                         NULL::path) AS ring_as_path;
+
+-- Reject a line that is not two points as lseg
+SELECT pgch_decode_typed(pgch_encode('LineString', '[(1,1),(2,2),(3,3)]'::path),
+                         NULL::lseg);
+
 -- Use PostgreSQL casts for types without direct encoder support
 SET lc_monetary = 'C';
 CREATE DOMAIN dint AS int4;
@@ -167,3 +231,23 @@ SELECT pgch_decode_as(b, NULL::nested_outer) AS from_value,
 FROM pgch_block('Tuple(Nullable(Tuple(Int32)), String)', 2,
                 '\x0100'::bytea || '\x0000000009000000'::bytea ||
                 '\x00'::bytea || '\x02' || convert_to('ok', 'UTF8')) AS b;
+
+-- Map writes and reads as Array(Tuple(K, V)), so both spellings agree
+CREATE TYPE pairformat AS (k text, v bigint);
+SELECT pgch_decode(pgch_encode_pairs('Map(String, Int64)',
+                                     ARRAY['a', 'b'], ARRAY[1, 2]::bigint[])) AS map,
+       pgch_decode(pgch_encode_pairs('Array(Tuple(String, Int64))',
+                                     ARRAY['a', 'b'], ARRAY[1, 2]::bigint[])) AS array_tuple;
+SELECT pgch_decode_as(pgch_encode_pairs('Map(String, Nullable(Int64))',
+                                        ARRAY['a', 'b'], ARRAY[1, NULL]::bigint[]),
+                      NULL::pairformat[]);
+SELECT pgch_decode(pgch_encode_pairs('Map(String, Int64)',
+                                     ARRAY[]::text[], ARRAY[]::bigint[]));
+SELECT pgch_pgtype('Map(String, Int64)');
+-- Nest tuples through the cursor, Nullable wrapping the inner one
+SELECT pgch_decode(pgch_encode_pairs('Map(String, Tuple(Int64))',
+                                     ARRAY['a', 'b'], ARRAY[1, 2]::bigint[],
+                                     2, true)) AS nested,
+       pgch_decode(pgch_encode_pairs('Array(Tuple(String, Nullable(Tuple(Int64))))',
+                                     ARRAY['a', 'b'], ARRAY[1, 2]::bigint[],
+                                     2, true)) AS nullable_nested;

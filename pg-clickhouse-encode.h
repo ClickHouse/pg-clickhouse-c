@@ -35,8 +35,6 @@ pgch_writer_new(MemoryContext parent, const pgch_col* cols, size_t ncols);
 extern void
 pgch_writer_free(pgch_writer* w);
 
-/* ---- policies ------------------------------------------------------- */
-
 /* Choose whether NULL arrays raise or become empty arrays */
 typedef enum pgch_null_array {
     PGCH_NULL_ARRAY_ERROR = 0,
@@ -69,15 +67,27 @@ extern Datum
 pgch_array_from_pg(Datum arr, Oid elemtype, int16 typlen, bool typbyval, char typalign);
 
 /*
- * Open array element context
+ * Open array element context, appends targeting the element column
  * Nest calls for nested arrays, close each call with pgch_array_end
  */
 extern void
 pgch_array_begin(pgch_writer* w, size_t col);
 extern void
 pgch_array_end(pgch_writer* w);
+
+/*
+ * Open tuple field context, appends filling fields left to right
+ * Close with pgch_tuple_end, which requires every field filled
+ * Write Map(K, V) as Array(Tuple(K, V)), which is how ClickHouse stores it
+ */
+extern void
+pgch_tuple_begin(pgch_writer* w, size_t col);
+extern void
+pgch_tuple_end(pgch_writer* w);
+
+/* Return true while any array or tuple context is open */
 extern bool
-pgch_array_active(const pgch_writer* w);
+pgch_nest_active(const pgch_writer* w);
 
 /* Return current ClickHouse kind, including active array element kind */
 extern chc_kind
@@ -130,6 +140,7 @@ pgch_writer_flush(pgch_writer* w, pgch_buf* out, const chc_block_opts* opts);
 #include "utils/arrayaccess.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
+#include "utils/geo_decls.h"
 #include "utils/inet.h"
 #include "utils/jsonb.h"
 #include "utils/lsyscache.h"
@@ -156,14 +167,6 @@ pgch__offs_len(const pgch_buf* b) {
     return b->len / sizeof(uint64_t);
 }
 
-typedef enum {
-    PGCH__FIXED,
-    PGCH__STRING,
-    PGCH__NULLABLE,
-    PGCH__ARRAY,
-    PGCH__LC,
-} pgch__node_kind;
-
 typedef struct pgch__node pgch__node;
 
 typedef struct pgch__cast {
@@ -182,8 +185,10 @@ typedef struct pgch__arrmeta {
     ArrayMetaState meta;
 } pgch__arrmeta;
 
+/* Buffer per clickhouse-c column node, so a tree finalizes into chc_column */
 struct pgch__node {
-    pgch__node_kind kind;
+    chc_col_kind layout;
+    chc_kind kind; /* Geo levels stand in for types the caller never named */
     const chc_type* type;
     Oid target;
     pgch__cast* cast;
@@ -212,6 +217,11 @@ struct pgch__node {
         } array;
 
         struct {
+            pgch__node** children;
+            size_t arity;
+        } tuple;
+
+        struct {
             pgch_buf data;
             pgch_buf offs;
             pgch_buf null_map;
@@ -227,6 +237,12 @@ typedef struct pgch__col {
     pgch__node* root;
 } pgch__col;
 
+/* Open Array or Tuple node, child indexing the Tuple field taking next value */
+typedef struct pgch__frame {
+    pgch__node* node;
+    size_t child;
+} pgch__frame;
+
 struct pgch_writer {
     MemoryContext cxt;
     MemoryContext bcxt;
@@ -238,24 +254,95 @@ struct pgch_writer {
 
     chc_block_builder bb;
 
-    pgch__node** cursor;
+    pgch__frame* cursor;
     size_t cursor_len;
     size_t cursor_cap;
     size_t cursor_col;
 };
+
+static void
+pgch__geo_fill(pgch__node* n, chc_kind kind);
+
+static pgch__node*
+pgch__geo_node(chc_kind kind) {
+    pgch__node* n = palloc0(sizeof(pgch__node));
+
+    pgch__geo_fill(n, kind);
+    return n;
+}
+
+/*
+ * Geo types nest Arrays over Point, which is Tuple(Float64, Float64): Ring and
+ * LineString one level, Polygon and MultiLineString two, MultiPolygon three
+ */
+static void
+pgch__geo_fill(pgch__node* n, chc_kind kind) {
+    chc_kind inner;
+
+    n->kind = kind;
+    if (kind == CHC_POINT) {
+        n->layout         = CHC_COL_TUPLE;
+        n->tuple.arity    = 2;
+        n->tuple.children = palloc0(n->tuple.arity * sizeof(pgch__node*));
+        for (size_t i = 0; i < n->tuple.arity; i++) {
+            pgch__node* axis = palloc0(sizeof(pgch__node));
+
+            axis->layout          = CHC_COL_FIXED;
+            axis->kind            = CHC_FLOAT64;
+            axis->fixed.elem_size = 8;
+            n->tuple.children[i]  = axis;
+        }
+        return;
+    }
+
+    switch (kind) {
+    case CHC_RING:
+    case CHC_LINE_STRING:
+        inner = CHC_POINT;
+        break;
+    case CHC_POLYGON:
+        inner = CHC_RING;
+        break;
+    case CHC_MULTI_POLYGON:
+        inner = CHC_POLYGON;
+        break;
+    case CHC_MULTI_LINE_STRING:
+        inner = CHC_LINE_STRING;
+        break;
+    default:
+        pg_unreachable();
+    }
+    n->layout       = CHC_COL_ARRAY;
+    n->array.values = pgch__geo_node(inner);
+}
+
+static pgch__node*
+pgch__node_new(const chc_type* t);
+
+/* Fill Tuple node over first arity children, the pair being a Map's key & value */
+static void
+pgch__tuple_fill(pgch__node* n, const chc_type* t, size_t arity) {
+    n->layout         = CHC_COL_TUPLE;
+    n->tuple.arity    = arity;
+    n->tuple.children = palloc0(arity * sizeof(pgch__node*));
+    for (size_t i = 0; i < arity; i++) {
+        n->tuple.children[i] = pgch__node_new(chc_type_child(t, i));
+    }
+}
 
 static pgch__node*
 pgch__node_new(const chc_type* t) {
     pgch__node* n = palloc0(sizeof(pgch__node));
 
     n->type = t;
+    n->kind = chc_type_kind(t);
     switch (chc_type_kind(t)) {
     case CHC_NULLABLE:
-        n->kind           = PGCH__NULLABLE;
+        n->layout         = CHC_COL_NULLABLE;
         n->nullable.inner = pgch__node_new(chc_type_child(t, 0));
         return n;
     case CHC_ARRAY:
-        n->kind         = PGCH__ARRAY;
+        n->layout       = CHC_COL_ARRAY;
         n->array.values = pgch__node_new(chc_type_child(t, 0));
         return n;
     case CHC_LOW_CARDINALITY: {
@@ -271,17 +358,47 @@ pgch__node_new(const chc_type* t) {
                 chc_type_name(base, NULL)
             );
         }
-        n->kind              = PGCH__LC;
+        n->layout            = CHC_COL_LOW_CARDINALITY;
         n->lc.inner_nullable = inner_nullable;
         return n;
     }
     case CHC_STRING:
-        n->kind = PGCH__STRING;
+        n->layout = CHC_COL_STRING;
         return n;
     case CHC_JSON:
-        n->kind        = PGCH__STRING;
+        n->layout      = CHC_COL_STRING;
         n->str.is_json = true;
         return n;
+    case CHC_POINT:
+    case CHC_RING:
+    case CHC_LINE_STRING:
+    case CHC_POLYGON:
+    case CHC_MULTI_POLYGON:
+    case CHC_MULTI_LINE_STRING:
+        pgch__geo_fill(n, chc_type_kind(t));
+        return n;
+    case CHC_TUPLE: {
+        size_t arity = chc_type_n_children(t);
+
+        if (arity == 0) {
+            pgch_error(ERRCODE_FDW_INVALID_DATA_TYPE, "Tuple column has no fields");
+        }
+        pgch__tuple_fill(n, t, arity);
+        return n;
+    }
+    case CHC_MAP: {
+        /* Map is Array(Tuple(K, V)), which clickhouse-c writes without a node */
+        pgch__node* entries = palloc0(sizeof(pgch__node));
+
+        if (chc_type_n_children(t) != 2) {
+            pgch_error(ERRCODE_FDW_INVALID_DATA_TYPE, "Map wants key and value");
+        }
+        entries->kind = CHC_TUPLE;
+        pgch__tuple_fill(entries, t, 2);
+        n->layout       = CHC_COL_ARRAY;
+        n->array.values = entries;
+        return n;
+    }
     case CHC_DATETIME64:
     case CHC_TIME64: {
         int scale = chc_type_datetime64_scale(t);
@@ -294,7 +411,7 @@ pgch__node_new(const chc_type* t) {
                 scale
             );
         }
-        n->kind             = PGCH__FIXED;
+        n->layout           = CHC_COL_FIXED;
         n->fixed.elem_size  = chc_type_elem_size(t);
         n->fixed.dt64_scale = (uint32_t)scale;
         return n;
@@ -309,7 +426,7 @@ pgch__node_new(const chc_type* t) {
                 chc_type_name(t, NULL)
             );
         }
-        n->kind            = PGCH__FIXED;
+        n->layout          = CHC_COL_FIXED;
         n->fixed.elem_size = es;
         return n;
     }
@@ -363,10 +480,34 @@ pgch_writer_set_null_array(pgch_writer* w, pgch_null_array policy) {
     w->null_array = policy;
 }
 
+/* Return node taking next value: an array's element or a tuple's current field */
 static inline pgch__node*
 pgch__cursor_node(const pgch_writer* w, size_t col) {
-    return w->cursor_len ? w->cursor[w->cursor_len - 1]->array.values
-                         : w->cols[col].root;
+    const pgch__frame* f;
+
+    if (!w->cursor_len) {
+        return w->cols[col].root;
+    }
+    f = &w->cursor[w->cursor_len - 1];
+    if (f->node->layout == CHC_COL_ARRAY) {
+        return f->node->array.values;
+    }
+    if (f->child >= f->node->tuple.arity) {
+        pgch_errorf(ERRCODE_FDW_ERROR, "Tuple takes %zu values", f->node->tuple.arity);
+    }
+    return f->node->tuple.children[f->child];
+}
+
+/* Move past the field just filled, array elements repeating one node instead */
+static inline void
+pgch__cursor_step(pgch_writer* w) {
+    if (w->cursor_len) {
+        pgch__frame* f = &w->cursor[w->cursor_len - 1];
+
+        if (f->node->layout == CHC_COL_TUPLE) {
+            f->child++;
+        }
+    }
 }
 
 static inline size_t
@@ -384,6 +525,21 @@ pgch__col_desc(const pgch_writer* w, size_t col) {
     return psprintf("column %zu", i);
 }
 
+pg_noreturn static void
+pgch__null_violation(pgch_writer* w, size_t col) {
+    const chc_type* t = w->cols[pgch__target_col(w, col)].t;
+    size_t tnlen;
+    const char* tname = chc_type_name(t, &tnlen);
+
+    pgch_errorf(
+        ERRCODE_NOT_NULL_VIOLATION,
+        "cannot append NULL to NOT NULL %.*s %s",
+        (int)tnlen,
+        tname ? tname : "?",
+        pgch__col_desc(w, col)
+    );
+}
+
 static pgch__node*
 pgch__resolve_leaf(pgch_writer* w, size_t col, bool isnull) {
     pgch__node* node;
@@ -394,30 +550,21 @@ pgch__resolve_leaf(pgch_writer* w, size_t col, bool isnull) {
         pgch_errorf(ERRCODE_FDW_ERROR, "column %zu out of range", col);
     }
     node = pgch__cursor_node(w, col);
+    pgch__cursor_step(w);
 
-    while (node->kind == PGCH__NULLABLE) {
+    while (node->layout == CHC_COL_NULLABLE) {
         pgch_buf_append(&node->nullable.null_map, &b, 1);
         nullable = true;
         node     = node->nullable.inner;
     }
-    if (node->kind == PGCH__LC && node->lc.inner_nullable) {
+    if (node->layout == CHC_COL_LOW_CARDINALITY && node->lc.inner_nullable) {
         pgch_buf_append(&node->lc.null_map, &b, 1);
         nullable = true;
     }
     if (isnull && !nullable) {
-        const chc_type* t = w->cols[pgch__target_col(w, col)].t;
-        size_t tnlen;
-        const char* tname = chc_type_name(t, &tnlen);
-
-        pgch_errorf(
-            ERRCODE_NOT_NULL_VIOLATION,
-            "cannot append NULL to NOT NULL %.*s %s",
-            (int)tnlen,
-            tname ? tname : "?",
-            pgch__col_desc(w, col)
-        );
+        pgch__null_violation(w, col);
     }
-    if (node->kind == PGCH__ARRAY) {
+    if (node->layout == CHC_COL_ARRAY) {
         pgch_errorf(
             ERRCODE_DATATYPE_MISMATCH,
             "scalar value into Array %s",
@@ -429,7 +576,7 @@ pgch__resolve_leaf(pgch_writer* w, size_t col, bool isnull) {
 
 static pgch_buf*
 pgch__fixed_data(pgch__node* node) {
-    if (node->kind != PGCH__FIXED) {
+    if (node->layout != CHC_COL_FIXED) {
         pgch_error(
             ERRCODE_DATATYPE_MISMATCH, "fixed-width value into non-fixed-width column"
         );
@@ -517,87 +664,45 @@ pgch__decimal_to_bytes(const char* s, uint32_t scale, size_t width, uint8_t* out
     memcpy(out, mag, width);
 }
 
+/* ---- little-endian fixed-width writes, one per width ---------------- */
+
+/* Kinds sharing a width share a writer, callers picking it by column kind */
+#define PGCH__APPEND_SCALAR(suffix, T, ARG)                                            \
+    static void pgch__append_##suffix(                                                 \
+        pgch_writer* w, size_t col, ARG val, bool isnull                               \
+    ) {                                                                                \
+        MemoryContext old = MemoryContextSwitchTo(w->cxt);                             \
+        pgch__node* node  = pgch__resolve_leaf(w, col, isnull);                        \
+        T v               = isnull ? 0 : (T)val;                                       \
+                                                                                       \
+        pgch_buf_append(pgch__fixed_data(node), &v, sizeof v);                         \
+        MemoryContextSwitchTo(old);                                                    \
+    }
+
+PGCH__APPEND_SCALAR(i8, int8_t, int64_t)
+PGCH__APPEND_SCALAR(i16, int16_t, int64_t)
+PGCH__APPEND_SCALAR(i32, int32_t, int64_t)
+PGCH__APPEND_SCALAR(i64, int64_t, int64_t)
+PGCH__APPEND_SCALAR(f32, float, double)
+PGCH__APPEND_SCALAR(f64, double, double)
+
+/* Fixed-width leaf takes n bytes as given, NULL rows taking zeros */
 static void
-pgch__append_int_kind(pgch__node* node, int64_t val) {
-    switch (chc_type_kind(node->type)) {
-    case CHC_INT8:
-    case CHC_UINT8:
-    case CHC_BOOL: {
-        int8_t v = (int8_t)val;
-
-        pgch_buf_append(pgch__fixed_data(node), &v, 1);
-        return;
-    }
-    case CHC_INT16:
-    case CHC_UINT16: {
-        int16_t v = (int16_t)val;
-
-        pgch_buf_append(pgch__fixed_data(node), &v, 2);
-        return;
-    }
-    case CHC_INT32:
-    case CHC_UINT32: {
-        int32_t v = (int32_t)val;
-
-        pgch_buf_append(pgch__fixed_data(node), &v, 4);
-        return;
-    }
-    case CHC_INT64:
-    case CHC_UINT64:
-        pgch_buf_append(pgch__fixed_data(node), &val, 8);
-        return;
-    default:
-        pgch_error(ERRCODE_DATATYPE_MISMATCH, "int value into non-integer column");
-    }
-}
-
-static void
-pgch__append_int(pgch_writer* w, size_t col, int64_t val, bool isnull) {
+pgch__append_raw(pgch_writer* w, size_t col, const void* p, size_t n, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
 
     if (isnull) {
-        pgch_buf_append_zero(pgch__fixed_data(node), node->fixed.elem_size);
+        pgch_buf_append_zero(pgch__fixed_data(node), n);
     } else {
-        pgch__append_int_kind(node, val);
-    }
-    MemoryContextSwitchTo(old);
-}
-
-static void
-pgch__append_bool(pgch_writer* w, size_t col, bool val, bool isnull) {
-    pgch__append_int(w, col, val, isnull);
-}
-
-static void
-pgch__append_double(pgch_writer* w, size_t col, double val, bool isnull) {
-    MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
-
-    if (isnull) {
-        pgch_buf_append_zero(pgch__fixed_data(node), 8);
-    } else {
-        pgch_buf_append(pgch__fixed_data(node), &val, 8);
-    }
-    MemoryContextSwitchTo(old);
-}
-
-static void
-pgch__append_float(pgch_writer* w, size_t col, float val, bool isnull) {
-    MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
-
-    if (isnull) {
-        pgch_buf_append_zero(pgch__fixed_data(node), 4);
-    } else {
-        pgch_buf_append(pgch__fixed_data(node), &val, 4);
+        pgch_buf_append(pgch__fixed_data(node), p, n);
     }
     MemoryContextSwitchTo(old);
 }
 
 static void
 pgch__append_bytes_fixed(pgch__node* node, const void* p, size_t n, bool isnull) {
-    chc_kind k     = chc_type_kind(node->type);
+    chc_kind k     = node->kind;
     pgch_buf* data = &node->fixed.data;
 
     if (k == CHC_FIXED_STRING) {
@@ -665,13 +770,13 @@ pgch__append_bytes(pgch_writer* w, size_t col, const void* p, size_t n, bool isn
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
 
-    switch (node->kind) {
-    case PGCH__LC:
+    switch (node->layout) {
+    case CHC_COL_LOW_CARDINALITY:
         pgch__append_row_offs(
             &node->lc.data, &node->lc.offs, isnull ? NULL : p, isnull ? 0 : n
         );
         break;
-    case PGCH__STRING:
+    case CHC_COL_STRING:
         if (isnull && node->str.is_json) {
             /* ClickHouse validates JSON values even when null map marks NULL */
             pgch__append_row_offs(&node->str.data, &node->str.offs, "{}", 2);
@@ -681,7 +786,7 @@ pgch__append_bytes(pgch_writer* w, size_t col, const void* p, size_t n, bool isn
             );
         }
         break;
-    case PGCH__FIXED:
+    case CHC_COL_FIXED:
         pgch__append_bytes_fixed(node, p, n, isnull);
         break;
     default:
@@ -694,233 +799,140 @@ static void
 pgch__append_decimal(pgch_writer* w, size_t col, const char* digits, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
-    size_t width;
+    pgch_buf* data    = pgch__fixed_data(node);
+    size_t width      = node->fixed.elem_size;
+    uint8_t raw[32]   = {};
 
-    switch (chc_type_kind(node->type)) {
-    case CHC_DECIMAL32:
-        width = 4;
-        break;
-    case CHC_DECIMAL64:
-        width = 8;
-        break;
-    case CHC_DECIMAL128:
-        width = 16;
-        break;
-    case CHC_DECIMAL256:
-        width = 32;
-        break;
-    default:
+    if (node->kind < CHC_DECIMAL32 || node->kind > CHC_DECIMAL256) {
         pgch_error(ERRCODE_DATATYPE_MISMATCH, "decimal into non-decimal column");
     }
-    uint8_t raw[32] = {};
-
-    if (!isnull && digits) {
+    if (!isnull) {
         uint32_t scale = (uint32_t)chc_type_decimal_scale(node->type);
 
         pgch__decimal_to_bytes(digits, scale, width, raw);
     }
-    pgch_buf_append(pgch__fixed_data(node), raw, width);
-    MemoryContextSwitchTo(old);
-}
-
-static void
-pgch__append_uuid(pgch_writer* w, size_t col, const uint8_t bytes[16], bool isnull) {
-    MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
-    uint8_t wire[16]  = {};
-
-    if (!isnull) {
-        uint64_t a, b;
-
-        memcpy(&a, bytes, 8);
-        memcpy(&b, bytes + 8, 8);
-        a = pg_ntoh64(a);
-        b = pg_ntoh64(b);
-        memcpy(wire, &a, 8);
-        memcpy(wire + 8, &b, 8);
-    }
-    pgch_buf_append(pgch__fixed_data(node), wire, 16);
-    MemoryContextSwitchTo(old);
-}
-
-/* ClickHouse stores IPv4 in host order and IPv6 in network order */
-static void
-pgch__append_inet(
-    pgch_writer* w,
-    size_t col,
-    const uint8_t* addr_be,
-    size_t addrlen,
-    bool isnull
-) {
-    MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
-    chc_kind k        = chc_type_kind(node->type);
-
-    if (k == CHC_IPV4 && addrlen == 4) {
-        uint32_t addr = 0;
-
-        if (!isnull && addr_be) {
-            uint32_t be;
-
-            memcpy(&be, addr_be, 4);
-            addr = pg_ntoh32(be);
-        }
-        pgch_buf_append(pgch__fixed_data(node), &addr, 4);
-        MemoryContextSwitchTo(old);
-        return;
-    }
-    if (k == CHC_IPV6 && addrlen == 16) {
-        uint8_t raw[16] = {};
-
-        if (!isnull && addr_be) {
-            memcpy(raw, addr_be, 16);
-        }
-        pgch_buf_append(pgch__fixed_data(node), raw, 16);
-        MemoryContextSwitchTo(old);
-        return;
-    }
-    pgch_error(ERRCODE_DATATYPE_MISMATCH, "cannot insert inet into non-inet column");
-}
-
-static void
-pgch__append_date_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull) {
-    MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
-    chc_kind k        = chc_type_kind(node->type);
-
-    if (k == CHC_DATE) {
-        uint16_t days = isnull ? 0 : (uint16_t)(seconds / SECS_PER_DAY);
-
-        pgch_buf_append(pgch__fixed_data(node), &days, 2);
-    } else if (k == CHC_DATE32) {
-        int32_t days = isnull ? 0 : (int32_t)(seconds / SECS_PER_DAY);
-
-        pgch_buf_append(pgch__fixed_data(node), &days, 4);
-    } else {
-        pgch_error(ERRCODE_DATATYPE_MISMATCH, "date into non-date column");
-    }
-    MemoryContextSwitchTo(old);
-}
-
-static void
-pgch__append_datetime_seconds(
-    pgch_writer* w,
-    size_t col,
-    int64_t seconds,
-    bool isnull
-) {
-    MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
-    uint32_t v        = isnull ? 0 : (uint32_t)seconds;
-
-    pgch_buf_append(pgch__fixed_data(node), &v, 4);
-    MemoryContextSwitchTo(old);
-}
-
-static void
-pgch__append_datetime64_raw(pgch_writer* w, size_t col, int64_t raw, bool isnull) {
-    MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
-    int64_t v         = isnull ? 0 : raw;
-
-    pgch_buf_append(pgch__fixed_data(node), &v, 8);
-    MemoryContextSwitchTo(old);
-}
-
-/* ClickHouse Time supports signed values up to 999 hours */
-static void
-pgch__append_time_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull) {
-    MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
-    int32_t v         = isnull ? 0 : (int32_t)seconds;
-
-    if (chc_type_kind(node->type) != CHC_TIME) {
-        pgch_error(ERRCODE_DATATYPE_MISMATCH, "time into non-Time column");
-    }
-    pgch_buf_append(pgch__fixed_data(node), &v, 4);
-    MemoryContextSwitchTo(old);
-}
-
-static void
-pgch__append_time64_raw(pgch_writer* w, size_t col, int64_t raw, bool isnull) {
-    MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
-    int64_t v         = isnull ? 0 : raw;
-
-    if (chc_type_kind(node->type) != CHC_TIME64) {
-        pgch_error(ERRCODE_DATATYPE_MISMATCH, "time into non-Time64 column");
-    }
-    pgch_buf_append(pgch__fixed_data(node), &v, 8);
+    pgch_buf_append(data, raw, width);
     MemoryContextSwitchTo(old);
 }
 
 static uint64_t
 pgch__node_rows(const pgch__node* n) {
-    switch (n->kind) {
-    case PGCH__FIXED:
+    switch (n->layout) {
+    case CHC_COL_FIXED:
         return n->fixed.elem_size ? n->fixed.data.len / n->fixed.elem_size : 0;
-    case PGCH__STRING:
+    case CHC_COL_STRING:
         return pgch__offs_len(&n->str.offs);
-    case PGCH__NULLABLE:
+    case CHC_COL_NULLABLE:
         return pgch__node_rows(n->nullable.inner);
-    case PGCH__ARRAY:
+    case CHC_COL_ARRAY:
         return pgch__offs_len(&n->array.offs);
-    case PGCH__LC:
+    case CHC_COL_TUPLE:
+        return pgch__node_rows(n->tuple.children[0]);
+    case CHC_COL_LOW_CARDINALITY:
         return pgch__offs_len(&n->lc.offs);
+    case CHC_COL_NOTHING:
+        break;
     }
     pg_unreachable();
 }
 
-void
-pgch_array_begin(pgch_writer* w, size_t col) {
+static void
+pgch__cursor_push(pgch_writer* w, size_t col, chc_col_kind layout) {
+    const char* what = layout == CHC_COL_ARRAY ? "Array" : "Tuple";
     pgch__node* node;
+    MemoryContext old;
 
     if (w->cursor_len) {
-        node = w->cursor[w->cursor_len - 1]->array.values;
+        node = pgch__cursor_node(w, col);
     } else {
         if (col >= w->ncols) {
-            pgch_errorf(ERRCODE_FDW_ERROR, "array_begin: column %zu out of range", col);
+            pgch_errorf(ERRCODE_FDW_ERROR, "column %zu out of range", col);
         }
         node = w->cols[col].root;
     }
 
-    MemoryContext old = MemoryContextSwitchTo(w->cxt);
+    old = MemoryContextSwitchTo(w->cxt);
 
-    if (node->kind == PGCH__NULLABLE && node->nullable.inner->kind == PGCH__ARRAY) {
+    if (node->layout == CHC_COL_NULLABLE && node->nullable.inner->layout == layout) {
         uint8_t b = 0;
 
         pgch_buf_append(&node->nullable.null_map, &b, 1);
         node = node->nullable.inner;
     }
-    if (node->kind != PGCH__ARRAY) {
-        pgch_error(ERRCODE_FDW_ERROR, "array_begin: column is not Array");
+    if (node->layout != layout) {
+        pgch_errorf(
+            ERRCODE_DATATYPE_MISMATCH, "%s value into %s", what, pgch__col_desc(w, col)
+        );
     }
+    pgch__cursor_step(w);
     if (w->cursor_len == w->cursor_cap) {
         w->cursor_cap = w->cursor_cap ? w->cursor_cap * 2 : 4;
-        w->cursor = w->cursor ? repalloc(w->cursor, w->cursor_cap * sizeof(pgch__node*))
-                              : palloc(w->cursor_cap * sizeof(pgch__node*));
+        w->cursor = w->cursor ? repalloc(w->cursor, w->cursor_cap * sizeof(pgch__frame))
+                              : palloc(w->cursor_cap * sizeof(pgch__frame));
     }
     if (w->cursor_len == 0) {
         w->cursor_col = col;
     }
-    w->cursor[w->cursor_len++] = node;
+    w->cursor[w->cursor_len].node  = node;
+    w->cursor[w->cursor_len].child = 0;
+    w->cursor_len++;
     MemoryContextSwitchTo(old);
+}
+
+static pgch__frame*
+pgch__cursor_pop(pgch_writer* w, chc_col_kind layout) {
+    pgch__frame* f;
+
+    if (w->cursor_len == 0) {
+        return NULL;
+    }
+    f = &w->cursor[w->cursor_len - 1];
+    if (f->node->layout != layout) {
+        pgch_error(ERRCODE_FDW_ERROR, "mismatched Array and Tuple nesting");
+    }
+    w->cursor_len--;
+    return f;
+}
+
+void
+pgch_array_begin(pgch_writer* w, size_t col) {
+    pgch__cursor_push(w, col, CHC_COL_ARRAY);
 }
 
 void
 pgch_array_end(pgch_writer* w) {
-    if (w->cursor_len == 0) {
+    pgch__frame* f = pgch__cursor_pop(w, CHC_COL_ARRAY);
+    MemoryContext old;
+
+    if (!f) {
         return;
     }
-    pgch__node* a     = w->cursor[--w->cursor_len];
-    MemoryContext old = MemoryContextSwitchTo(w->cxt);
-
-    pgch__offs_push(&a->array.offs, pgch__node_rows(a->array.values));
+    old = MemoryContextSwitchTo(w->cxt);
+    pgch__offs_push(&f->node->array.offs, pgch__node_rows(f->node->array.values));
     MemoryContextSwitchTo(old);
 }
 
+void
+pgch_tuple_begin(pgch_writer* w, size_t col) {
+    pgch__cursor_push(w, col, CHC_COL_TUPLE);
+}
+
+void
+pgch_tuple_end(pgch_writer* w) {
+    pgch__frame* f = pgch__cursor_pop(w, CHC_COL_TUPLE);
+
+    if (f && f->child != f->node->tuple.arity) {
+        pgch_errorf(
+            ERRCODE_FDW_ERROR,
+            "Tuple took %zu of %zu values",
+            f->child,
+            f->node->tuple.arity
+        );
+    }
+}
+
 bool
-pgch_array_active(const pgch_writer* w) {
+pgch_nest_active(const pgch_writer* w) {
     return w && w->cursor_len > 0;
 }
 
@@ -932,17 +944,11 @@ pgch_column_kind(const pgch_writer* w, size_t col) {
 
     const pgch__node* node = pgch__cursor_node(w, col);
 
-    if (node->kind == PGCH__NULLABLE) {
+    if (node->layout == CHC_COL_NULLABLE) {
         node = node->nullable.inner;
     }
-    switch (node->kind) {
-    case PGCH__ARRAY:
-        return CHC_ARRAY;
-    case PGCH__LC:
-        return CHC_STRING;
-    default:
-        return chc_type_kind(node->type);
-    }
+    /* LowCardinality(String) takes the values a String column takes */
+    return node->layout == CHC_COL_LOW_CARDINALITY ? CHC_STRING : node->kind;
 }
 
 uint32_t
@@ -953,15 +959,15 @@ pgch_column_datetime64_scale(const pgch_writer* w, size_t col) {
     const pgch__node* node = pgch__cursor_node(w, col);
 
     for (;;) {
-        if (node->kind == PGCH__NULLABLE) {
+        if (node->layout == CHC_COL_NULLABLE) {
             node = node->nullable.inner;
-        } else if (node->kind == PGCH__ARRAY) {
+        } else if (node->layout == CHC_COL_ARRAY) {
             node = node->array.values;
         } else {
             break;
         }
     }
-    return node->kind == PGCH__FIXED ? node->fixed.dt64_scale : 0;
+    return node->layout == CHC_COL_FIXED ? node->fixed.dt64_scale : 0;
 }
 
 static void
@@ -971,29 +977,89 @@ pgch__append_null_array(pgch_writer* w, size_t col) {
     uint8_t b         = 1;
     bool nullable     = w->null_array == PGCH_NULL_ARRAY_EMPTY;
 
-    while (node->kind == PGCH__NULLABLE) {
+    pgch__cursor_step(w);
+    while (node->layout == CHC_COL_NULLABLE) {
         pgch_buf_append(&node->nullable.null_map, &b, 1);
         nullable = true;
         node     = node->nullable.inner;
     }
-    if (!nullable || node->kind != PGCH__ARRAY) {
-        const chc_type* t = w->cols[w->cursor_len ? w->cursor_col : col].t;
-        size_t tnlen;
-        const char* tname = chc_type_name(t, &tnlen);
-
-        pgch_errorf(
-            ERRCODE_NOT_NULL_VIOLATION,
-            "cannot append NULL to NOT NULL %.*s %s",
-            (int)tnlen,
-            tname ? tname : "?",
-            pgch__col_desc(w, col)
-        );
+    if (!nullable || node->layout != CHC_COL_ARRAY) {
+        pgch__null_violation(w, col);
     }
     pgch__offs_push(&node->array.offs, pgch__node_rows(node->array.values));
     MemoryContextSwitchTo(old);
 }
 
+/* Fill the Float64 leaves left to right, a nested Point taking two values */
+static const double*
+pgch__append_axes(
+    pgch_writer* w,
+    size_t col,
+    pgch__node* node,
+    const double* vals,
+    const double* end
+) {
+    for (size_t i = 0; i < node->tuple.arity; i++) {
+        pgch__node* child = node->tuple.children[i];
+
+        if (child->layout == CHC_COL_TUPLE) {
+            vals = pgch__append_axes(w, col, child, vals, end);
+            continue;
+        }
+        if (child->layout != CHC_COL_FIXED || child->fixed.elem_size != 8 ||
+            child->kind != CHC_FLOAT64 || vals == end) {
+            pgch_errorf(
+                ERRCODE_DATATYPE_MISMATCH, "coordinates into %s", pgch__col_desc(w, col)
+            );
+        }
+        pgch_buf_append(&child->fixed.data, vals++, 8);
+    }
+    return vals;
+}
+
+static void
+pgch__append_doubles(
+    pgch_writer* w,
+    size_t col,
+    const double* vals,
+    size_t n,
+    bool isnull
+) {
+    MemoryContext old = MemoryContextSwitchTo(w->cxt);
+    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
+
+    if (node->layout != CHC_COL_TUPLE ||
+        pgch__append_axes(w, col, node, vals, vals + n) != vals + n) {
+        pgch_errorf(
+            ERRCODE_DATATYPE_MISMATCH, "coordinates into %s", pgch__col_desc(w, col)
+        );
+    }
+    MemoryContextSwitchTo(old);
+}
+
 /* ---- Datum appends -------------------------------------------------- */
+
+/* Ring and LineString are Array(Point), each point a Tuple(Float64, Float64) */
+static void
+pgch__append_points(
+    pgch_writer* w,
+    size_t col,
+    const Point* pts,
+    int npts,
+    bool close
+) {
+    /* Repeat first point to carry closed, as a closed GeoJSON line */
+    int n = close && npts ? npts + 1 : npts;
+
+    pgch_array_begin(w, col);
+    for (int i = 0; i < n; i++) {
+        const Point* p = &pts[i == npts ? 0 : i];
+        double xy[2]   = { p->x, p->y };
+
+        pgch__append_doubles(w, 0, xy, lengthof(xy), false);
+    }
+    pgch_array_end(w);
+}
 
 static pgch_array*
 pgch__nest_array(
@@ -1165,6 +1231,13 @@ pgch__cast_value(
     return true;
 }
 
+/* Geo types above Ring and LineString take array values, as Array does */
+static inline bool
+pgch__kind_takes_array(chc_kind kind) {
+    return kind == CHC_ARRAY || kind == CHC_POLYGON || kind == CHC_MULTI_POLYGON ||
+           kind == CHC_MULTI_LINE_STRING;
+}
+
 static void
 pgch__append_one(
     pgch_writer* w,
@@ -1174,7 +1247,7 @@ pgch__append_one(
     Oid valtype,
     bool isnull
 ) {
-    if (kind == CHC_ARRAY) {
+    if (pgch__kind_takes_array(kind)) {
         if (isnull) {
             pgch__append_null_array(w, col);
             return;
@@ -1216,10 +1289,6 @@ pgch__append_one(
     case XID8OID: {
         int64_t v = 0;
 
-        if (!(kind == CHC_BOOL || (kind >= CHC_INT8 && kind <= CHC_INT64) ||
-              (kind >= CHC_UINT8 && kind <= CHC_UINT64))) {
-            goto type_mismatch;
-        }
         if (!isnull) {
             if (valtype == INT2OID) {
                 v = (int64_t)DatumGetInt16(val);
@@ -1230,32 +1299,51 @@ pgch__append_one(
                 v = DatumGetInt64(val);
             }
         }
-        pgch__append_int(w, col, v, isnull);
-        return;
+        /* Integer widths follow the column, since one Datum type feeds them all */
+        switch (kind) {
+        case CHC_INT8:
+        case CHC_UINT8:
+        case CHC_BOOL:
+            pgch__append_i8(w, col, v, isnull);
+            return;
+        case CHC_INT16:
+        case CHC_UINT16:
+            pgch__append_i16(w, col, v, isnull);
+            return;
+        case CHC_INT32:
+        case CHC_UINT32:
+            pgch__append_i32(w, col, v, isnull);
+            return;
+        case CHC_INT64:
+        case CHC_UINT64:
+            pgch__append_i64(w, col, v, isnull);
+            return;
+        default:
+            goto type_mismatch;
+        }
     }
     case BOOLOID:
         if (kind != CHC_BOOL && kind != CHC_UINT8) {
             goto type_mismatch;
         }
-        pgch__append_bool(w, col, DatumGetBool(val), isnull);
+        pgch__append_i8(w, col, DatumGetBool(val), isnull);
         return;
     case FLOAT4OID:
         if (kind != CHC_FLOAT32) {
             goto type_mismatch;
         }
-        pgch__append_float(w, col, DatumGetFloat4(val), isnull);
+        pgch__append_f32(w, col, DatumGetFloat4(val), isnull);
         return;
     case FLOAT8OID:
         if (kind != CHC_FLOAT64) {
             goto type_mismatch;
         }
-        pgch__append_double(w, col, DatumGetFloat8(val), isnull);
+        pgch__append_f64(w, col, DatumGetFloat8(val), isnull);
         return;
     case NUMERICOID: {
         char* s = NULL;
 
-        if (kind != CHC_DECIMAL32 && kind != CHC_DECIMAL64 && kind != CHC_DECIMAL128 &&
-            kind != CHC_DECIMAL256) {
+        if (kind < CHC_DECIMAL32 || kind > CHC_DECIMAL256) {
             goto type_mismatch;
         }
         if (!isnull) {
@@ -1300,30 +1388,29 @@ pgch__append_one(
         return;
     }
     case DATEOID: {
-        int64_t seconds = 0;
+        int64_t days = isnull ? 0 : (int64_t)DatumGetDateADT(val) + PGCH__DATE_OFFSET;
 
-        if (kind != CHC_DATE && kind != CHC_DATE32) {
+        if (kind == CHC_DATE) {
+            pgch__append_i16(w, col, days, isnull);
+        } else if (kind == CHC_DATE32) {
+            pgch__append_i32(w, col, days, isnull);
+        } else {
             goto type_mismatch;
         }
-        if (!isnull) {
-            seconds =
-                ((int64_t)DatumGetDateADT(val) + PGCH__DATE_OFFSET) * SECS_PER_DAY;
-        }
-        pgch__append_date_seconds(w, col, seconds, isnull);
         return;
     }
     case TIMEOID: {
         int64_t usec = isnull ? 0 : (int64_t)DatumGetTimeADT(val);
 
         switch (kind) {
+        /* ClickHouse Time supports signed values up to 999 hours */
         case CHC_TIME:
-            pgch__append_time_seconds(w, col, usec / USECS_PER_SEC, isnull);
+            pgch__append_i32(w, col, usec / USECS_PER_SEC, isnull);
             return;
         case CHC_TIME64: {
-            uint32_t scale = pgch_column_datetime64_scale(w, col);
-            int64 power    = pgch_pow10[scale];
+            int64 power = pgch_pow10[pgch_column_datetime64_scale(w, col)];
 
-            pgch__append_time64_raw(
+            pgch__append_i64(
                 w,
                 col,
                 (usec / USECS_PER_SEC) * power +
@@ -1355,7 +1442,7 @@ pgch__append_one(
             int64_t seconds =
                 isnull ? 0 : (int64_t)timestamptz_to_time_t(DatumGetTimestamp(val));
 
-            pgch__append_datetime_seconds(w, col, seconds, isnull);
+            pgch__append_i32(w, col, seconds, isnull);
         } break;
         case CHC_DATETIME64: {
             int64_t raw = 0;
@@ -1381,7 +1468,7 @@ pgch__append_one(
                     );
                 }
             }
-            pgch__append_datetime64_raw(w, col, raw, isnull);
+            pgch__append_i64(w, col, raw, isnull);
         } break;
         default:
             goto type_mismatch;
@@ -1393,7 +1480,7 @@ pgch__append_one(
         chc_kind item_kind;
         Oid child_valtype;
 
-        if (kind != CHC_ARRAY) {
+        if (!pgch__kind_takes_array(kind)) {
             goto type_mismatch;
         }
         if (isnull) {
@@ -1416,44 +1503,165 @@ pgch__append_one(
         return;
     }
     case UUIDOID: {
-        uint8_t bytes[16];
+        uint8_t wire[16] = {};
 
         if (kind != CHC_UUID) {
             goto type_mismatch;
         }
         if (!isnull) {
-            memcpy(bytes, DatumGetUUIDP(val)->data, 16);
-        } else {
-            memset(bytes, 0, 16);
+            /* ClickHouse stores both halves little-endian */
+            const uint8_t* bytes = DatumGetUUIDP(val)->data;
+            uint64_t hi, lo;
+
+            memcpy(&hi, bytes, 8);
+            memcpy(&lo, bytes + 8, 8);
+            hi = pg_ntoh64(hi);
+            lo = pg_ntoh64(lo);
+            memcpy(wire, &hi, 8);
+            memcpy(wire + 8, &lo, 8);
         }
-        pgch__append_uuid(w, col, bytes, isnull);
+        pgch__append_raw(w, col, wire, sizeof wire, isnull);
         return;
     }
+    case POINTOID: {
+        double axes[2] = {};
+
+        if (kind != CHC_POINT) {
+            goto type_mismatch;
+        }
+        if (!isnull) {
+            Point* point = DatumGetPointP(val);
+
+            axes[0] = point->x;
+            axes[1] = point->y;
+        }
+        pgch__append_doubles(w, col, axes, lengthof(axes), isnull);
+        return;
+    }
+    case LSEGOID: {
+        if (kind != CHC_LINE_STRING && kind != CHC_RING) {
+            goto type_mismatch;
+        }
+        if (isnull) {
+            pgch__append_null_array(w, col);
+            return;
+        }
+        pgch__append_points(w, col, DatumGetLsegP(val)->p, 2, false);
+        return;
+    }
+    case PATHOID: {
+        PATH* path;
+
+        if (kind != CHC_LINE_STRING && kind != CHC_RING) {
+            goto type_mismatch;
+        }
+        if (isnull) {
+            pgch__append_null_array(w, col);
+            return;
+        }
+        path = DatumGetPathP(val);
+        pgch__append_points(w, col, path->p, path->npts, path->closed);
+        if ((Pointer)path != DatumGetPointer(val)) {
+            pfree(path);
+        }
+        return;
+    }
+    case POLYGONOID: {
+        POLYGON* poly;
+
+        if (kind != CHC_RING && kind != CHC_LINE_STRING) {
+            goto type_mismatch;
+        }
+        if (isnull) {
+            pgch__append_null_array(w, col);
+            return;
+        }
+        poly = DatumGetPolygonP(val);
+        pgch__append_points(w, col, poly->p, poly->npts, false);
+        if ((Pointer)poly != DatumGetPointer(val)) {
+            pfree(poly);
+        }
+        return;
+    }
+    case BOXOID: {
+        double axes[4] = {};
+
+        if (kind != CHC_TUPLE) {
+            goto type_mismatch;
+        }
+        if (!isnull) {
+            BOX* box = DatumGetBoxP(val);
+
+            axes[0] = box->high.x;
+            axes[1] = box->high.y;
+            axes[2] = box->low.x;
+            axes[3] = box->low.y;
+        }
+        pgch__append_doubles(w, col, axes, lengthof(axes), isnull);
+        return;
+    }
+    case CIRCLEOID: {
+        double axes[3] = {};
+
+        if (kind != CHC_TUPLE) {
+            goto type_mismatch;
+        }
+        if (!isnull) {
+            CIRCLE* circle = DatumGetCircleP(val);
+
+            axes[0] = circle->center.x;
+            axes[1] = circle->center.y;
+            axes[2] = circle->radius;
+        }
+        pgch__append_doubles(w, col, axes, lengthof(axes), isnull);
+        return;
+    }
+    case LINEOID: {
+        double axes[3] = {};
+
+        if (kind != CHC_TUPLE) {
+            goto type_mismatch;
+        }
+        if (!isnull) {
+            LINE* line = DatumGetLineP(val);
+
+            axes[0] = line->A;
+            axes[1] = line->B;
+            axes[2] = line->C;
+        }
+        pgch__append_doubles(w, col, axes, lengthof(axes), isnull);
+        return;
+    }
+    /* ClickHouse stores IPv4 in host order and IPv6 in network order */
     case INETOID: {
         const uint8_t* addr = NULL;
-        size_t addrlen      = 0;
 
         if (kind != CHC_IPV4 && kind != CHC_IPV6) {
             goto type_mismatch;
         }
         if (!isnull) {
             inet* ipa    = DatumGetInetPP(val);
-            int fam      = ip_family(ipa);
-            int expected = (kind == CHC_IPV4) ? PGSQL_AF_INET : PGSQL_AF_INET6;
+            int expected = kind == CHC_IPV4 ? PGSQL_AF_INET : PGSQL_AF_INET6;
 
-            if (fam != expected) {
+            if (ip_family(ipa) != expected) {
                 pgch_errorf(
                     ERRCODE_DATATYPE_MISMATCH,
                     "inet family mismatch for %s",
                     pgch__col_desc(w, col)
                 );
             }
-            addr    = ip_addr(ipa);
-            addrlen = ip_addrsize(ipa);
-        } else {
-            addrlen = (kind == CHC_IPV4) ? 4 : 16;
+            addr = ip_addr(ipa);
         }
-        pgch__append_inet(w, col, addr, addrlen, isnull);
+        if (kind == CHC_IPV4) {
+            uint32_t be = 0;
+
+            if (addr) {
+                memcpy(&be, addr, 4);
+            }
+            pgch__append_i32(w, col, pg_ntoh32(be), isnull);
+        } else {
+            pgch__append_raw(w, col, addr, 16, isnull);
+        }
         return;
     }
     case JSONOID:
@@ -1677,28 +1885,36 @@ pgch__col_node(chc_column v) {
 
 static chc_column*
 pgch__finalize_node(pgch__node* n) {
-    switch (n->kind) {
-    case PGCH__FIXED:
+    switch (n->layout) {
+    case CHC_COL_FIXED:
         return pgch__col_node(
             chc_build_fixed(n->fixed.data.data, n->fixed.elem_size, pgch__node_rows(n))
         );
-    case PGCH__STRING:
+    case CHC_COL_STRING:
         return pgch__col_node(chc_build_string(
             pgch__offs_data(&n->str.offs),
             n->str.data.data,
             pgch__offs_len(&n->str.offs)
         ));
-    case PGCH__NULLABLE:
+    case CHC_COL_NULLABLE:
         return pgch__col_node(chc_build_nullable(
             n->nullable.null_map.data, pgch__finalize_node(n->nullable.inner)
         ));
-    case PGCH__ARRAY:
+    case CHC_COL_ARRAY:
         return pgch__col_node(chc_build_array(
             pgch__offs_data(&n->array.offs),
             pgch__offs_len(&n->array.offs),
             pgch__finalize_node(n->array.values)
         ));
-    case PGCH__LC: {
+    case CHC_COL_TUPLE: {
+        chc_column** children = palloc(n->tuple.arity * sizeof(*children));
+
+        for (size_t i = 0; i < n->tuple.arity; i++) {
+            children[i] = pgch__finalize_node(n->tuple.children[i]);
+        }
+        return pgch__col_node(chc_build_tuple(children, n->tuple.arity));
+    }
+    case CHC_COL_LOW_CARDINALITY: {
         size_t dict_n, n_rows;
         int key_size;
         uint64_t* lc_offs;
@@ -1712,50 +1928,69 @@ pgch__finalize_node(pgch__node* n) {
 
         return pgch__col_node(chc_build_lc(key_size, lc_keys, n_rows, dict));
     }
+    case CHC_COL_NOTHING:
+        break;
     }
     pg_unreachable();
 }
 
 static size_t
 pgch__node_bytes(const pgch__node* n) {
-    switch (n->kind) {
-    case PGCH__FIXED:
+    switch (n->layout) {
+    case CHC_COL_FIXED:
         return n->fixed.data.len;
-    case PGCH__STRING:
+    case CHC_COL_STRING:
         return n->str.data.len + n->str.offs.len;
-    case PGCH__NULLABLE:
+    case CHC_COL_NULLABLE:
         return n->nullable.null_map.len + pgch__node_bytes(n->nullable.inner);
-    case PGCH__ARRAY:
+    case CHC_COL_ARRAY:
         return n->array.offs.len + pgch__node_bytes(n->array.values);
-    case PGCH__LC:
+    case CHC_COL_TUPLE: {
+        size_t total = 0;
+
+        for (size_t i = 0; i < n->tuple.arity; i++) {
+            total += pgch__node_bytes(n->tuple.children[i]);
+        }
+        return total;
+    }
+    case CHC_COL_LOW_CARDINALITY:
         return n->lc.data.len + n->lc.offs.len + n->lc.null_map.len;
+    case CHC_COL_NOTHING:
+        break;
     }
     pg_unreachable();
 }
 
 static void
 pgch__reset_node(pgch__node* n) {
-    switch (n->kind) {
-    case PGCH__FIXED:
+    switch (n->layout) {
+    case CHC_COL_FIXED:
         pgch_buf_reset(&n->fixed.data);
         return;
-    case PGCH__STRING:
+    case CHC_COL_STRING:
         pgch_buf_reset(&n->str.data);
         pgch_buf_reset(&n->str.offs);
         return;
-    case PGCH__NULLABLE:
+    case CHC_COL_NULLABLE:
         pgch_buf_reset(&n->nullable.null_map);
         pgch__reset_node(n->nullable.inner);
         return;
-    case PGCH__ARRAY:
+    case CHC_COL_ARRAY:
         pgch_buf_reset(&n->array.offs);
         pgch__reset_node(n->array.values);
         return;
-    case PGCH__LC:
+    case CHC_COL_TUPLE:
+        for (size_t i = 0; i < n->tuple.arity; i++) {
+            pgch__reset_node(n->tuple.children[i]);
+        }
+        return;
+    case CHC_COL_LOW_CARDINALITY:
         pgch_buf_reset(&n->lc.data);
         pgch_buf_reset(&n->lc.offs);
         pgch_buf_reset(&n->lc.null_map);
         return;
+    case CHC_COL_NOTHING:
+        break;
     }
     pg_unreachable();
 }

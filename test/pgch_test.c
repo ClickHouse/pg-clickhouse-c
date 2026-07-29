@@ -138,6 +138,90 @@ pgch_encode_rows(PG_FUNCTION_ARGS) {
     PG_RETURN_BYTEA_P(encode_rows(PG_GETARG_TEXT_PP(0), vals, nulls, nvals, elemtype));
 }
 
+PG_FUNCTION_INFO_V1(pgch_encode_pairs);
+
+/*
+ * Encode one row of key & value pairs through the nesting cursor
+ * Fill fields per pair, so counts other than two exercise Tuple arity
+ * Wrap each value in its own Tuple when nest is set
+ */
+Datum
+pgch_encode_pairs(PG_FUNCTION_ARGS) {
+    chc_type* t    = parse_ch_type(PG_GETARG_TEXT_PP(0));
+    pgch_col col   = { .name = "c", .name_len = 1, .type = t };
+    pgch_writer* w = pgch_writer_new(CurrentMemoryContext, &col, 1);
+    int fields     = PG_GETARG_INT32(3);
+    bool nest      = PG_GETARG_BOOL(4);
+    Datum* keys;
+    bool* keynulls;
+    int nkeys;
+    Datum* vals;
+    bool* valnulls;
+    int nvals;
+    pgch_buf buf = {};
+    chc_io io;
+    chc_err err = {};
+
+    deconstruct_array(
+        PG_GETARG_ARRAYTYPE_P(1),
+        TEXTOID,
+        -1,
+        false,
+        TYPALIGN_INT,
+        &keys,
+        &keynulls,
+        &nkeys
+    );
+    deconstruct_array(
+        PG_GETARG_ARRAYTYPE_P(2),
+        INT8OID,
+        8,
+        FLOAT8PASSBYVAL,
+        TYPALIGN_DOUBLE,
+        &vals,
+        &valnulls,
+        &nvals
+    );
+    if (nkeys != nvals) {
+        elog(ERROR, "key and value counts differ");
+    }
+
+    pgch_array_begin(w, 0);
+    for (int i = 0; i < nkeys; i++) {
+        pgch_tuple_begin(w, 0);
+        for (int f = 0; f < fields; f++) {
+            if (f % 2 == 0) {
+                pgch_append_datum(w, 0, keys[i], TEXTOID, keynulls[i]);
+            } else {
+                if (nest) {
+                    pgch_tuple_begin(w, 0);
+                }
+                pgch_append_datum(w, 0, vals[i], INT8OID, valnulls[i]);
+                if (nest) {
+                    pgch_tuple_end(w);
+                }
+            }
+        }
+        pgch_tuple_end(w);
+    }
+    pgch_array_end(w);
+
+    if (pgch_nest_active(w)) {
+        elog(ERROR, "nesting left open");
+    }
+    if (pgch_writer_rows(w) != 1) {
+        elog(ERROR, "writer buffered %zu rows, expected 1", pgch_writer_rows(w));
+    }
+
+    pgch_buf_io(&buf, &io);
+    if (chc_block_write(&io, pgch_writer_build(w), &pgch_block_opts_local, &err) !=
+        CHC_OK) {
+        pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
+    }
+    pgch_writer_free(w);
+    PG_RETURN_BYTEA_P(bytea_from_buf(&buf));
+}
+
 /* I/O-free clickhouse-c input reports CHC_WOULD_BLOCK after submitted bytes */
 typedef struct {
     chc_in* in;

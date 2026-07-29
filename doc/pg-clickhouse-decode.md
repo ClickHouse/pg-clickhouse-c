@@ -27,6 +27,11 @@ Set incoming `*valtype` to request optional mappings:
 Returned variable-length values are allocated with `palloc`. Unsupported types
 raise `ERRCODE_FDW_INVALID_DATA_TYPE`.
 
+Geo types decode to geometric Datums: `Point` to `point`, `Ring` to `polygon`,
+`LineString` to `path`, closed when its first point repeats, and `Polygon`,
+`MultiLineString` and `MultiPolygon` to `pgch_array` over those. An empty ring
+or line decodes as NULL, PostgreSQL having no pointless polygon or path.
+
 Most consumers should use `pgch_reader` instead of calling
 `pgch_read_value` directly.
 
@@ -186,6 +191,10 @@ Conversion supports:
 - `pgch_array` to PostgreSQL arrays, nested arrays must share dimensions
   because PostgreSQL arrays are rectangular
 - `pgch_tuple` to PostgreSQL records and named composite types
+- `pgch_tuple` of coordinates to `box`, `circle` and `line`, and a decoded
+  `path` or `polygon` of two points to `lseg`, none of which PostgreSQL casts
+- `Map` as an array of two-field composites, so a target composite array with
+  matching key and value types receives it
 - ClickHouse `String` values through PostgreSQL target input function
 - Explicit PostgreSQL casts between scalar types
 - Per-element conversion when source and target array element types differ

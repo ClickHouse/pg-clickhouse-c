@@ -46,8 +46,9 @@ until `pgch_writer_free`. Writer owns a child memory context under `parent`;
 freeing writer or deleting parent releases writer state.
 
 `pgch_writer_new` raises `ERRCODE_FDW_INVALID_DATA_TYPE` when any ClickHouse
-type cannot be encoded. Supported composite output is `Array`; `Tuple`, `Map`,
-`Int128`, `Int256`, and unsupported `LowCardinality` forms are rejected.
+type cannot be encoded. Supported composite output is `Array`, `Tuple`, `Map`,
+and the geometric types built over them; `Int128`, `Int256`, and unsupported
+`LowCardinality` forms are rejected.
 
 ## Append PostgreSQL Datums
 
@@ -58,7 +59,8 @@ void pgch_append_slot(pgch_writer *w, TupleTableSlot *slot);
 ```
 
 Call `pgch_append_datum` once for every column in every row. Column order
-within row does not matter. `valtype` must describe `val`.
+within row does not matter. `valtype` must describe `val`. This is the only
+value-append entry point; per-type conversion lives inside writer.
 
 For PostgreSQL arrays, pass actual array OID. To pass `pgch_array`, use
 `ANYARRAYOID`. Writer accepts compatible integer widths and PostgreSQL
@@ -68,6 +70,10 @@ conversion raises `ERRCODE_DATATYPE_MISMATCH`.
 
 `bytea` values map to ClickHouse `String` and `FixedString` without text
 conversion. `json` and `jsonb` map to `JSON`, `Object`, or `String`.
+`FixedString` pads short values with NUL and truncates long values. `Enum` takes
+text matching a declared name. `numeric` scales to destination `Decimal`, and
+values exceeding its width raise instead of wrapping. `inet` family must match
+`IPv4` or `IPv6`.
 
 NULL requires nullable destination. NULL passed to non-nullable destination
 raises `ERRCODE_NOT_NULL_VIOLATION`, subject to array policy below.
@@ -112,12 +118,14 @@ ClickHouse cannot represent nullable `Array` value. Set
 NaN and Infinity reach the destination unchanged, so `Float32` and `Float64`
 take them and `Decimal` raises.
 
-## Append arrays manually
+## Append arrays and tuples manually
 
 ```c
 void pgch_array_begin(pgch_writer *w, size_t col);
 void pgch_array_end(pgch_writer *w);
-bool pgch_array_active(const pgch_writer *w);
+void pgch_tuple_begin(pgch_writer *w, size_t col);
+void pgch_tuple_end(pgch_writer *w);
+bool pgch_nest_active(const pgch_writer *w);
 
 chc_kind pgch_column_kind(const pgch_writer *w, size_t col);
 uint32_t pgch_column_datetime64_scale(const pgch_writer *w, size_t col);
@@ -132,15 +140,36 @@ for (size_t i = 0; i < count; i++)
 pgch_array_end(writer);
 ```
 
-Use `pgch_column_datetime64_scale` with `pgch_pow10` when scaling source
-values.
+Open tuple, append one value per field left to right, then close tuple.
+`pgch_tuple_end` raises unless every field took a value:
 
-While array context is active, append functions ignore `col` and target
-current element column. Nest begin/end calls for nested arrays.
-`pgch_column_kind` returns current element kind while array is open and
-returns `CHC_STRING` for `LowCardinality(String)`.
+```c
+pgch_tuple_begin(writer, col);
+pgch_append_datum(writer, 0, name, TEXTOID, false);
+pgch_append_datum(writer, 0, Int64GetDatum(count), INT8OID, false);
+pgch_tuple_end(writer);
+```
 
-Close every array context before building block.
+Nest both calls freely. `Map(K, V)` writes as `Array(Tuple(K, V))`:
+
+```c
+pgch_array_begin(writer, col);
+for (size_t i = 0; i < npairs; i++) {
+    pgch_tuple_begin(writer, 0);
+    pgch_append_datum(writer, 0, keys[i], TEXTOID, false);
+    pgch_append_datum(writer, 0, Int64GetDatum(vals[i]), INT8OID, false);
+    pgch_tuple_end(writer);
+}
+pgch_array_end(writer);
+```
+
+While either context is active, `pgch_append_datum` ignores `col` and targets
+current array element or tuple field. `pgch_column_kind` returns that target's
+kind and returns `CHC_STRING` for `LowCardinality(String)`.
+`pgch_column_datetime64_scale` returns `DateTime64` or `Time64` scale, zero for
+other types; use it with `pgch_pow10` to see what precision a value keeps.
+
+Close every context before building block.
 
 ## Inspect and write buffered rows
 

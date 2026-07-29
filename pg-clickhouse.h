@@ -130,7 +130,12 @@ pgch_structure_from_tupdesc(TupleDesc desc, const pgch_type_opts* opts);
 
 /* ---- server settings ------------------------------------------------ */
 
-/* Apply to ClickHouse queries that return Native data for this library */
+/*
+ * Apply to ClickHouse queries that return Native data for this library
+ * Only what the wire format needs; a nullable Tuple, which the geometric types
+ * map to, additionally needs allow_experimental_nullable_tuple_type from the
+ * query builder
+ */
 #define PGCH_NATIVE_SETTINGS                                                           \
     "output_format_native_encode_types_in_binary_format=0,"                            \
     "output_format_native_write_json_as_string=1"
@@ -287,6 +292,9 @@ const Oid pgch_kind_oids[CHC_KIND_COUNT] = {
     [CHC_UUID]         = UUIDOID,
     [CHC_IPV4]         = INETOID,
     [CHC_IPV6]         = INETOID,
+    [CHC_POINT]        = POINTOID,
+    [CHC_RING]         = POLYGONOID,
+    [CHC_LINE_STRING]  = PATHOID,
 };
 
 const int64_t pgch_pow10[10] = {
@@ -315,6 +323,12 @@ pgch__datum_oid(const chc_type* type, const char* what) {
     case CHC_LOW_CARDINALITY:
         return pgch__datum_oid(chc_type_child(type, 0), what);
     case CHC_ARRAY:
+    /* Geo types above Ring and LineString nest Array layers over them */
+    case CHC_POLYGON:
+    case CHC_MULTI_POLYGON:
+    case CHC_MULTI_LINE_STRING:
+    /* Map is Array(Tuple(K, V)), so it reads as an array of pairs */
+    case CHC_MAP:
         return ANYARRAYOID;
     case CHC_TUPLE:
         return RECORDOID;
@@ -347,6 +361,14 @@ pgch_native_oid_for(const chc_type* type, const char* what) {
     case CHC_NULLABLE:
     case CHC_LOW_CARDINALITY:
         return pgch_native_oid_for(chc_type_child(type, 0), what);
+    /* PostgreSQL has no multi-geometry types, so their rings become arrays */
+    case CHC_POLYGON:
+    case CHC_MULTI_POLYGON:
+        return POLYGONARRAYOID;
+    case CHC_MULTI_LINE_STRING:
+        return PATHARRAYOID;
+    case CHC_MAP:
+        return RECORDARRAYOID;
     case CHC_ARRAY: {
         /* PostgreSQL uses one array type for every nesting depth */
         const chc_type* leaf = type;
@@ -355,7 +377,11 @@ pgch_native_oid_for(const chc_type* type, const char* what) {
         while (chc_type_kind(leaf) == CHC_ARRAY) {
             leaf = chc_type_child(leaf, 0);
         }
-        array_type = get_array_type(pgch_native_oid_for(leaf, what));
+        array_type = pgch_native_oid_for(leaf, what);
+        /* Map and the multi-geometry types already name an array type */
+        if (!type_is_array(array_type)) {
+            array_type = get_array_type(array_type);
+        }
         if (!OidIsValid(array_type)) {
             pgch_errorf(
                 ERRCODE_FDW_INVALID_DATA_TYPE,
@@ -451,14 +477,32 @@ pgch__ch_scalar(Oid typid, int32 typmod, const pgch_type_opts* opts) {
     }
     case UUIDOID:
         return "UUID";
+    case POINTOID:
+        /* ClickHouse Point is Tuple(Float64, Float64), same as PostgreSQL */
+        return "Point";
+    case LSEGOID:
+        /* ClickHouse has no two-point line type, so a LineString of two */
+        return "LineString";
+    case PATHOID:
+        /* A closed path repeats its first point, as a closed GeoJSON line */
+        return "LineString";
+    case POLYGONOID:
+        /* Ring is a point list closed implicitly, as PostgreSQL polygon is */
+        return "Ring";
+    case BOXOID:
+        /* PostgreSQL sorts the corners, so high and low, not first and second */
+        return "Tuple(high Point, low Point)";
+    case CIRCLEOID:
+        return "Tuple(center Point, radius Float64)";
+    case LINEOID:
+        /* PostgreSQL line is the equation Ax + By + C = 0 */
+        return "Tuple(a Float64, b Float64, c Float64)";
     case DATEOID:
         /* ClickHouse Date cannot represent dates before 1970 */
         return "Date32";
     case TIMEOID:
         return "Time64(6)";
     case TIMESTAMPOID:
-        /* Native stores DateTime64 as an integer without session timezone */
-        return "DateTime64(6)";
     case TIMESTAMPTZOID:
         return "DateTime64(6, 'UTC')";
     case JSONOID:
@@ -503,8 +547,13 @@ pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* op
         }
         base = "String";
     }
-    /* ClickHouse rejects Nullable(JSON), JSON already represents null */
-    if (notnull || strcmp(base, "JSON") == 0) {
+    /*
+     * ClickHouse rejects Nullable(JSON) since JSON already represents null,
+     * and Nullable over an Array, which Ring and LineString are. An empty
+     * ring or line stands in for NULL, as an empty array does
+     */
+    if (notnull || strcmp(base, "JSON") == 0 || strcmp(base, "Ring") == 0 ||
+        strcmp(base, "LineString") == 0) {
         return pstrdup(base);
     }
     return psprintf("Nullable(%s)", base);

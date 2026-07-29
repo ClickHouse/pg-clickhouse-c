@@ -37,18 +37,23 @@ SELECT pgch_decode_as(pgch_block('Tuple(Int32, Int32)', 1, '\x2a0000002a000000':
                       NULL::twofields);
 \set VERBOSITY default
 
+-- Reject Tuple field counts other than the column's arity
+SELECT pgch_encode_pairs('Map(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[], 1);
+SELECT pgch_encode_pairs('Map(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[], 3);
+SELECT pgch_encode_pairs('Tuple(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[]);
+SELECT pgch_encode_pairs('Map(String)', ARRAY['a'], ARRAY[1]::bigint[]);
+
 -- Reject types without PostgreSQL mapping
 SELECT pgch_pgtype('Int128');
-SELECT pgch_pgtype('Map(String, Int32)');
 SELECT pgch_pgtype('Nonsense');
 
 -- Reject unsupported types before reading rows, including nested types
-SELECT pgch_decode(pgch_block('Map(String, Int32)', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('Tuple()', 0, ''::bytea));
+SELECT pgch_decode(pgch_block('Map(String)', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('Array(Nothing)', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('LowCardinality(Int32)', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('Array(Int128)', 1, '\x0000000000000000'::bytea));
-SELECT pgch_decode(pgch_block('Tuple(Int32, Map(String, Int32))', 0, ''::bytea));
+SELECT pgch_decode(pgch_block('Tuple(Int32, Map(String, Int128))', 0, ''::bytea));
 -- Identify unnamed columns by position
 SELECT pgch_decode('\x01000006'::bytea || convert_to('Int128', 'UTF8'));
 
