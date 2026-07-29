@@ -43,17 +43,8 @@ typedef enum pgch_null_array {
     PGCH_NULL_ARRAY_EMPTY,
 } pgch_null_array;
 
-/* Choose how writer handles NaN and Infinity */
-typedef enum pgch_nonfinite {
-    PGCH_NONFINITE_KEEP = 0,
-    PGCH_NONFINITE_NULL,
-    PGCH_NONFINITE_ZERO,
-} pgch_nonfinite;
-
 extern void
 pgch_writer_set_null_array(pgch_writer* w, pgch_null_array policy);
-extern void
-pgch_writer_set_nonfinite(pgch_writer* w, pgch_nonfinite policy);
 
 /*
  * Append PostgreSQL value to column
@@ -76,58 +67,6 @@ pgch_append_slot(pgch_writer* w, TupleTableSlot* slot);
  */
 extern Datum
 pgch_array_from_pg(Datum arr, Oid elemtype, int16 typlen, bool typbyval, char typalign);
-
-/* ---- typed appends -------------------------------------------------- */
-
-/*
- * Append typed C values
- * Set isnull for NULL, destination must accept NULL
- * Open array context makes each append target current element column
- */
-extern void
-pgch_append_int(pgch_writer* w, size_t col, int64_t val, bool isnull);
-extern void
-pgch_append_uint(pgch_writer* w, size_t col, uint64_t val, bool isnull);
-extern void
-pgch_append_bool(pgch_writer* w, size_t col, bool val, bool isnull);
-extern void
-pgch_append_double(pgch_writer* w, size_t col, double val, bool isnull);
-extern void
-pgch_append_float(pgch_writer* w, size_t col, float val, bool isnull);
-extern void
-pgch_append_bytes(pgch_writer* w, size_t col, const void* p, size_t n, bool isnull);
-
-/* Append decimal text in `[-]digits[.frac]` form */
-extern void
-pgch_append_decimal(pgch_writer* w, size_t col, const char* digits, bool isnull);
-
-extern void
-pgch_append_uuid(pgch_writer* w, size_t col, const uint8_t bytes[16], bool isnull);
-
-/* Append 4-byte IPv4 or 16-byte IPv6 address in network order */
-extern void
-pgch_append_inet(
-    pgch_writer* w,
-    size_t col,
-    const uint8_t* addr_be,
-    size_t addrlen,
-    bool isnull
-);
-
-/*
- * Pass Date and DateTime as Unix seconds, Time as seconds since midnight
- * Pass DateTime64 and Time64 as integers scaled to column precision
- */
-extern void
-pgch_append_date_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull);
-extern void
-pgch_append_datetime_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull);
-extern void
-pgch_append_datetime64_raw(pgch_writer* w, size_t col, int64_t raw, bool isnull);
-extern void
-pgch_append_time_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull);
-extern void
-pgch_append_time64_raw(pgch_writer* w, size_t col, int64_t raw, bool isnull);
 
 /*
  * Open array element context
@@ -178,7 +117,6 @@ pgch_writer_flush(pgch_writer* w, pgch_buf* out, const chc_block_opts* opts);
 
 #ifdef PGCH_IMPLEMENTATION
 
-#include <math.h>
 #include <string.h>
 #include <sys/socket.h> /* PostgreSQL inet macros require AF_INET */
 
@@ -297,7 +235,6 @@ struct pgch_writer {
     pgch__col* cols;
 
     pgch_null_array null_array;
-    pgch_nonfinite nonfinite;
 
     chc_block_builder bb;
 
@@ -424,11 +361,6 @@ pgch_writer_free(pgch_writer* w) {
 void
 pgch_writer_set_null_array(pgch_writer* w, pgch_null_array policy) {
     w->null_array = policy;
-}
-
-void
-pgch_writer_set_nonfinite(pgch_writer* w, pgch_nonfinite policy) {
-    w->nonfinite = policy;
 }
 
 static inline pgch__node*
@@ -619,8 +551,8 @@ pgch__append_int_kind(pgch__node* node, int64_t val) {
     }
 }
 
-void
-pgch_append_int(pgch_writer* w, size_t col, int64_t val, bool isnull) {
+static void
+pgch__append_int(pgch_writer* w, size_t col, int64_t val, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
 
@@ -632,26 +564,16 @@ pgch_append_int(pgch_writer* w, size_t col, int64_t val, bool isnull) {
     MemoryContextSwitchTo(old);
 }
 
-void
-pgch_append_uint(pgch_writer* w, size_t col, uint64_t val, bool isnull) {
-    pgch_append_int(w, col, (int64_t)val, isnull);
+static void
+pgch__append_bool(pgch_writer* w, size_t col, bool val, bool isnull) {
+    pgch__append_int(w, col, val, isnull);
 }
 
-void
-pgch_append_bool(pgch_writer* w, size_t col, bool val, bool isnull) {
-    pgch_append_int(w, col, val, isnull);
-}
-
-void
-pgch_append_double(pgch_writer* w, size_t col, double val, bool isnull) {
+static void
+pgch__append_double(pgch_writer* w, size_t col, double val, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node;
+    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
 
-    if (!isnull && !isfinite(val) && w->nonfinite != PGCH_NONFINITE_KEEP) {
-        isnull = w->nonfinite == PGCH_NONFINITE_NULL;
-        val    = 0;
-    }
-    node = pgch__resolve_leaf(w, col, isnull);
     if (isnull) {
         pgch_buf_append_zero(pgch__fixed_data(node), 8);
     } else {
@@ -660,16 +582,11 @@ pgch_append_double(pgch_writer* w, size_t col, double val, bool isnull) {
     MemoryContextSwitchTo(old);
 }
 
-void
-pgch_append_float(pgch_writer* w, size_t col, float val, bool isnull) {
+static void
+pgch__append_float(pgch_writer* w, size_t col, float val, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node;
+    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
 
-    if (!isnull && !isfinite(val) && w->nonfinite != PGCH_NONFINITE_KEEP) {
-        isnull = w->nonfinite == PGCH_NONFINITE_NULL;
-        val    = 0;
-    }
-    node = pgch__resolve_leaf(w, col, isnull);
     if (isnull) {
         pgch_buf_append_zero(pgch__fixed_data(node), 4);
     } else {
@@ -743,8 +660,8 @@ pgch__append_bytes_fixed(pgch__node* node, const void* p, size_t n, bool isnull)
     pgch_error(ERRCODE_DATATYPE_MISMATCH, "bytes into non-text column");
 }
 
-void
-pgch_append_bytes(pgch_writer* w, size_t col, const void* p, size_t n, bool isnull) {
+static void
+pgch__append_bytes(pgch_writer* w, size_t col, const void* p, size_t n, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
 
@@ -773,37 +690,11 @@ pgch_append_bytes(pgch_writer* w, size_t col, const void* p, size_t n, bool isnu
     MemoryContextSwitchTo(old);
 }
 
-/* PostgreSQL added numeric Infinity in version 14 */
-static inline bool
-pgch__numeric_nonfinite(Numeric num) {
-#if PG_VERSION_NUM >= 140000
-    return numeric_is_nan(num) || numeric_is_inf(num);
-#else
-    return numeric_is_nan(num);
-#endif
-}
-
-/* PostgreSQL numeric text renders non-finite values as words */
-static bool
-pgch__finite_decimal(const char* s) {
-    if (*s == '-' || *s == '+') {
-        s++;
-    }
-    return *s >= '0' && *s <= '9';
-}
-
-void
-pgch_append_decimal(pgch_writer* w, size_t col, const char* digits, bool isnull) {
+static void
+pgch__append_decimal(pgch_writer* w, size_t col, const char* digits, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__node* node;
+    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
     size_t width;
-
-    if (!isnull && digits && w->nonfinite != PGCH_NONFINITE_KEEP &&
-        !pgch__finite_decimal(digits)) {
-        isnull = w->nonfinite == PGCH_NONFINITE_NULL;
-        digits = NULL;
-    }
-    node = pgch__resolve_leaf(w, col, isnull);
 
     switch (chc_type_kind(node->type)) {
     case CHC_DECIMAL32:
@@ -832,8 +723,8 @@ pgch_append_decimal(pgch_writer* w, size_t col, const char* digits, bool isnull)
     MemoryContextSwitchTo(old);
 }
 
-void
-pgch_append_uuid(pgch_writer* w, size_t col, const uint8_t bytes[16], bool isnull) {
+static void
+pgch__append_uuid(pgch_writer* w, size_t col, const uint8_t bytes[16], bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
     uint8_t wire[16]  = {};
@@ -853,8 +744,8 @@ pgch_append_uuid(pgch_writer* w, size_t col, const uint8_t bytes[16], bool isnul
 }
 
 /* ClickHouse stores IPv4 in host order and IPv6 in network order */
-void
-pgch_append_inet(
+static void
+pgch__append_inet(
     pgch_writer* w,
     size_t col,
     const uint8_t* addr_be,
@@ -891,8 +782,8 @@ pgch_append_inet(
     pgch_error(ERRCODE_DATATYPE_MISMATCH, "cannot insert inet into non-inet column");
 }
 
-void
-pgch_append_date_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull) {
+static void
+pgch__append_date_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
     chc_kind k        = chc_type_kind(node->type);
@@ -911,8 +802,13 @@ pgch_append_date_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnul
     MemoryContextSwitchTo(old);
 }
 
-void
-pgch_append_datetime_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull) {
+static void
+pgch__append_datetime_seconds(
+    pgch_writer* w,
+    size_t col,
+    int64_t seconds,
+    bool isnull
+) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
     uint32_t v        = isnull ? 0 : (uint32_t)seconds;
@@ -921,8 +817,8 @@ pgch_append_datetime_seconds(pgch_writer* w, size_t col, int64_t seconds, bool i
     MemoryContextSwitchTo(old);
 }
 
-void
-pgch_append_datetime64_raw(pgch_writer* w, size_t col, int64_t raw, bool isnull) {
+static void
+pgch__append_datetime64_raw(pgch_writer* w, size_t col, int64_t raw, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
     int64_t v         = isnull ? 0 : raw;
@@ -932,8 +828,8 @@ pgch_append_datetime64_raw(pgch_writer* w, size_t col, int64_t raw, bool isnull)
 }
 
 /* ClickHouse Time supports signed values up to 999 hours */
-void
-pgch_append_time_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull) {
+static void
+pgch__append_time_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
     int32_t v         = isnull ? 0 : (int32_t)seconds;
@@ -945,8 +841,8 @@ pgch_append_time_seconds(pgch_writer* w, size_t col, int64_t seconds, bool isnul
     MemoryContextSwitchTo(old);
 }
 
-void
-pgch_append_time64_raw(pgch_writer* w, size_t col, int64_t raw, bool isnull) {
+static void
+pgch__append_time64_raw(pgch_writer* w, size_t col, int64_t raw, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
     int64_t v         = isnull ? 0 : raw;
@@ -1334,26 +1230,26 @@ pgch__append_one(
                 v = DatumGetInt64(val);
             }
         }
-        pgch_append_int(w, col, v, isnull);
+        pgch__append_int(w, col, v, isnull);
         return;
     }
     case BOOLOID:
         if (kind != CHC_BOOL && kind != CHC_UINT8) {
             goto type_mismatch;
         }
-        pgch_append_bool(w, col, DatumGetBool(val), isnull);
+        pgch__append_bool(w, col, DatumGetBool(val), isnull);
         return;
     case FLOAT4OID:
         if (kind != CHC_FLOAT32) {
             goto type_mismatch;
         }
-        pgch_append_float(w, col, DatumGetFloat4(val), isnull);
+        pgch__append_float(w, col, DatumGetFloat4(val), isnull);
         return;
     case FLOAT8OID:
         if (kind != CHC_FLOAT64) {
             goto type_mismatch;
         }
-        pgch_append_double(w, col, DatumGetFloat8(val), isnull);
+        pgch__append_double(w, col, DatumGetFloat8(val), isnull);
         return;
     case NUMERICOID: {
         char* s = NULL;
@@ -1365,17 +1261,12 @@ pgch__append_one(
         if (!isnull) {
             Numeric num = DatumGetNumeric(val);
 
-            if (w->nonfinite != PGCH_NONFINITE_KEEP && pgch__numeric_nonfinite(num)) {
-                /* Leave digits NULL so nonfinite policy decides NULL or zero */
-                isnull = w->nonfinite == PGCH_NONFINITE_NULL;
-            } else {
-                s = numeric_normalize(num);
-            }
+            s = numeric_normalize(num);
             if ((Pointer)num != DatumGetPointer(val)) {
                 pfree(num);
             }
         }
-        pgch_append_decimal(w, col, s, isnull);
+        pgch__append_decimal(w, col, s, isnull);
         if (s) {
             pfree(s);
         }
@@ -1402,7 +1293,7 @@ pgch__append_one(
             p      = VARDATA_ANY(string);
             len    = VARSIZE_ANY_EXHDR(string);
         }
-        pgch_append_bytes(w, col, p, len, isnull);
+        pgch__append_bytes(w, col, p, len, isnull);
         if (string && (Pointer)string != DatumGetPointer(val)) {
             pfree(string);
         }
@@ -1418,7 +1309,7 @@ pgch__append_one(
             seconds =
                 ((int64_t)DatumGetDateADT(val) + PGCH__DATE_OFFSET) * SECS_PER_DAY;
         }
-        pgch_append_date_seconds(w, col, seconds, isnull);
+        pgch__append_date_seconds(w, col, seconds, isnull);
         return;
     }
     case TIMEOID: {
@@ -1426,13 +1317,13 @@ pgch__append_one(
 
         switch (kind) {
         case CHC_TIME:
-            pgch_append_time_seconds(w, col, usec / USECS_PER_SEC, isnull);
+            pgch__append_time_seconds(w, col, usec / USECS_PER_SEC, isnull);
             return;
         case CHC_TIME64: {
             uint32_t scale = pgch_column_datetime64_scale(w, col);
             int64 power    = pgch_pow10[scale];
 
-            pgch_append_time64_raw(
+            pgch__append_time64_raw(
                 w,
                 col,
                 (usec / USECS_PER_SEC) * power +
@@ -1464,7 +1355,7 @@ pgch__append_one(
             int64_t seconds =
                 isnull ? 0 : (int64_t)timestamptz_to_time_t(DatumGetTimestamp(val));
 
-            pgch_append_datetime_seconds(w, col, seconds, isnull);
+            pgch__append_datetime_seconds(w, col, seconds, isnull);
         } break;
         case CHC_DATETIME64: {
             int64_t raw = 0;
@@ -1490,7 +1381,7 @@ pgch__append_one(
                     );
                 }
             }
-            pgch_append_datetime64_raw(w, col, raw, isnull);
+            pgch__append_datetime64_raw(w, col, raw, isnull);
         } break;
         default:
             goto type_mismatch;
@@ -1535,7 +1426,7 @@ pgch__append_one(
         } else {
             memset(bytes, 0, 16);
         }
-        pgch_append_uuid(w, col, bytes, isnull);
+        pgch__append_uuid(w, col, bytes, isnull);
         return;
     }
     case INETOID: {
@@ -1562,7 +1453,7 @@ pgch__append_one(
         } else {
             addrlen = (kind == CHC_IPV4) ? 4 : 16;
         }
-        pgch_append_inet(w, col, addr, addrlen, isnull);
+        pgch__append_inet(w, col, addr, addrlen, isnull);
         return;
     }
     case JSONOID:
@@ -1593,7 +1484,7 @@ pgch__append_one(
                 }
             }
         }
-        pgch_append_bytes(w, col, p, len, isnull);
+        pgch__append_bytes(w, col, p, len, isnull);
         if (string && (Pointer)string != DatumGetPointer(val)) {
             pfree(string);
         }

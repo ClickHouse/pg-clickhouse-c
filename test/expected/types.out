@@ -244,25 +244,7 @@ SELECT unnest(pgch_table_roundtrip('copyshape', null_array_empty => true));
  2|NULL|NULL|NULL|NULL|NULL|NULL|{}|{}|NULL
 (2 rows)
 
--- Apply non-finite value policies
-CREATE TABLE nonfinite (f float8, n numeric(9,2));
-INSERT INTO nonfinite VALUES ('NaN', 1.5), ('Infinity', 'NaN'), (2.5, 3.25);
-SELECT unnest(pgch_table_roundtrip('nonfinite', nonfinite => 1)) AS as_null;
-  as_null  
------------
- NULL|1.50
- NULL|NULL
- 2.5|3.25
-(3 rows)
-
-SELECT unnest(pgch_table_roundtrip('nonfinite', nonfinite => 2)) AS as_zero;
- as_zero  
-----------
- 0|1.50
- 0|0.00
- 2.5|3.25
-(3 rows)
-
+-- Keep non-finite values, which Float columns take
 SELECT pgch_roundtrip('Float64', 'NaN'::float8) AS float_keeps_nan;
  float_keeps_nan 
 -----------------

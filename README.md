@@ -149,11 +149,7 @@ with its escaping.
 
 ## Integration
 
-PostgreSQL 13 and up. Both libraries are header-only. Exactly one TU defines `PGCH_IMPLEMENTATION`
-before including; every other TU includes for declarations only. That TU
-normally defines `CHC_IMPLEMENTATION` too, and must if it calls
-`pgch_in_alloc` (`sizeof(chc_in)` is visible only where clickhouse-c's
-implementation is compiled).
+PG13+. One TU defines `PGCH_IMPLEMENTATION` before including.
 
 clickhouse-c is vendored here at `clickhouse-c/`, pinned to a commit these
 headers compile against. It has no stable API, so take that pin rather than a
@@ -161,8 +157,8 @@ second checkout: clickhouse-c types are in this library's own signatures, and
 two copies on the include path means whichever lands first wins silently.
 
 ```make
-PGCH_DIR ?= vendor/pg-clickhouse-c
-CH_C_DIR ?= $(PGCH_DIR)/clickhouse-c
+PGCH_DIR = vendor/pg-clickhouse-c
+CH_C_DIR = $(PGCH_DIR)/clickhouse-c
 
 # Treat dependency headers as system headers
 PG_CPPFLAGS = -isystem $(CH_C_DIR) -isystem $(PGCH_DIR)
@@ -188,7 +184,7 @@ PG_CPPFLAGS += -DPGCH_MSG_PREFIX='"pg_chdb: "'
 |---|---|
 | [`pg-clickhouse.h`](doc/pg-clickhouse.md) | Errors, allocation, type mappings, query settings, intermediate representations, byte buffers |
 | [`pg-clickhouse-decode.h`](doc/pg-clickhouse-decode.md) | Block and chunk sources, row reader, target-type conversion |
-| [`pg-clickhouse-encode.h`](doc/pg-clickhouse-encode.md) | Writer lifecycle, Datum and typed appends, arrays, block output |
+| [`pg-clickhouse-encode.h`](doc/pg-clickhouse-encode.md) | Writer lifecycle, Datum appends, arrays, block output |
 
 Decode and encode each depend only on the core header; take one or both.
 
@@ -214,73 +210,13 @@ Decode and encode each depend only on the core header; take one or both.
 | `Array(T)` | `T[]`, one PG dimension per `Array` layer |
 | `Tuple(...)` | `record` |
 
-`UInt64` above `2^63 - 1` raises rather than wrapping; on PG 19 and later
-preset `reader.coltypes[i] = OID8OID` to take the whole unsigned range as
-`oid8`. `bytea` encodes into `String` and `FixedString`. Decoding `json`
-instead of `jsonb` keeps ClickHouse's text: preset
-`reader.coltypes[i] = JSONOID` after `pgch_reader_init`.
-
-A PG type with no arm of its own reaches a column through a cast, so `money`
-lands in `Decimal` and a domain lands wherever its base type does. Into a
-`String` column that cast is the type's own output function, which is how
-`interval`, `bit`, `macaddr`, the geo types and user enums get out; a `String`
-column decodes back through the target's input function. `pgch_ch_type_for`
-names the CH type to declare for a PG column, and
-`pgch_structure_from_tupdesc` does it for a whole descriptor. An array column
-declares `Array(Nullable(T))` even under `NOT NULL`, which constrains the array
-and not its elements, so loading one wants `pgch_writer_set_null_array`.
-
-Encoding accepts a real PG array or an already-built `pgch_array` for
-`Array(T)` columns. `Tuple` decodes but does not encode: there is no PG
-composite path in. `Int128`/`Int256`, `Map`, `Variant`, `Dynamic`, `Nested`
-and the geo types are unmapped in both directions.
-
-## Required ClickHouse settings
-
-Producing bytes this library can read needs, on the query:
-
-```
-output_format_native_encode_types_in_binary_format = 0
-```
-
-Without it the server writes binary type tags and `chc_block_read` fails with
-`CHC_ERR_TYPE`. `JSON` columns additionally need
-
-```
-output_format_native_write_json_as_string = 1
-```
-
-which exists from 24.10 and makes the server serialize `JSON` as `String`,
-the only `JSON` serialization either library handles. Both are
-`PGCH_NATIVE_SETTINGS`, so a query builder can splice the pair in rather than
-retype it and drift from the library it is compiled against.
-
 ## Testing
-
-`test/` is a PostgreSQL extension that round trips values through Native
-bytes in memory, with no server or chDB involved. It is also the compile
-check for the headers, since it is the TU that instantiates both
-implementations.
 
 ```sh
 make -C test                 # clones clickhouse-c/ if absent
 make -C test install         # needs write access to the PG install
 make -C test installcheck    # needs superuser
 ```
-
-## Non-goals
-
-* Transport. Sockets, TCP packets, chDB handles and compression stay with the
-  caller; see [`clickhouse-client.h`](https://github.com/ClickHouse/clickhouse-c/blob/main/doc/clickhouse-client.md)
-  for the wire loop.
-* Block framing policy. When to cut a block is the caller's call;
-  `pgch_writer_bytes` and `pgch_writer_rows` are there to decide it.
-* SQL generation. Deparsing, and where a `structure=` string goes in a query,
-  are the consumer's. The type names in it are not: they are whatever these
-  appenders accept, which is why `pgch_ch_type_for` and
-  `pgch_structure_from_tupdesc` live here.
-* Catalog integration. No FDW options, no matching a `TupleDesc` to a block by
-  column name, no relation lookups.
 
 [clickhouse-c]: https://github.com/ClickHouse/clickhouse-c
 [pg_clickhouse]: https://github.com/ClickHouse/pg_clickhouse

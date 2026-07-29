@@ -40,13 +40,11 @@ CREATE FUNCTION pgch_structure(rel regclass,
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 
 -- Round-trip relation through generated structure
--- Set nonfinite to 0 for keep, 1 for NULL, or 2 for zero
 CREATE FUNCTION pgch_table_roundtrip(rel regclass,
                                      json_as_json bool DEFAULT false,
                                      low_cardinality bool DEFAULT false,
                                      numeric_as_string bool DEFAULT false,
-                                     null_array_empty bool DEFAULT false,
-                                     nonfinite int DEFAULT 0)
+                                     null_array_empty bool DEFAULT false)
     RETURNS text[]
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 

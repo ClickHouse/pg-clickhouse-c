@@ -94,7 +94,7 @@ pgch_append_datum(writer, col, value, ANYARRAYOID, false);
 
 Return value is allocated in `CurrentMemoryContext`.
 
-## Policies
+## NULL arrays
 
 ```c
 typedef enum pgch_null_array {
@@ -102,86 +102,15 @@ typedef enum pgch_null_array {
     PGCH_NULL_ARRAY_EMPTY,
 } pgch_null_array;
 
-typedef enum pgch_nonfinite {
-    PGCH_NONFINITE_KEEP = 0,
-    PGCH_NONFINITE_NULL,
-    PGCH_NONFINITE_ZERO,
-} pgch_nonfinite;
-
 void pgch_writer_set_null_array(pgch_writer *w, pgch_null_array policy);
-void pgch_writer_set_nonfinite(pgch_writer *w, pgch_nonfinite policy);
 ```
 
 Default `PGCH_NULL_ARRAY_ERROR` rejects NULL PostgreSQL arrays because
 ClickHouse cannot represent nullable `Array` value. Set
 `PGCH_NULL_ARRAY_EMPTY` to write empty array instead.
 
-Default `PGCH_NONFINITE_KEEP` writes NaN and Infinity when destination supports
-them and raises otherwise. `PGCH_NONFINITE_NULL` replaces them with NULL;
-non-nullable destinations still raise. `PGCH_NONFINITE_ZERO` replaces them
-with zero.
-
-## Typed append API
-
-Use typed functions when values are not PostgreSQL Datums:
-
-```c
-void pgch_append_int(pgch_writer *w, size_t col,
-                     int64_t val, bool isnull);
-void pgch_append_uint(pgch_writer *w, size_t col,
-                      uint64_t val, bool isnull);
-void pgch_append_bool(pgch_writer *w, size_t col,
-                      bool val, bool isnull);
-void pgch_append_double(pgch_writer *w, size_t col,
-                        double val, bool isnull);
-void pgch_append_float(pgch_writer *w, size_t col,
-                       float val, bool isnull);
-void pgch_append_bytes(pgch_writer *w, size_t col,
-                       const void *p, size_t n, bool isnull);
-void pgch_append_decimal(pgch_writer *w, size_t col,
-                         const char *digits, bool isnull);
-void pgch_append_uuid(pgch_writer *w, size_t col,
-                      const uint8_t bytes[16], bool isnull);
-void pgch_append_inet(pgch_writer *w, size_t col,
-                      const uint8_t *addr_be, size_t addrlen, bool isnull);
-```
-
-`pgch_append_bytes` supports `String`, `FixedString`, `Enum`,
-`LowCardinality(String)`, and `JSON`. `FixedString` pads short values with
-NUL and truncates long values. Enum input must match declared name.
-
-`pgch_append_decimal` accepts `[-]digits[.frac]`; destination column supplies
-scale. PostgreSQL `numeric_out` output is suitable input. Values exceeding
-destination `Decimal` width raise instead of wrapping.
-
-`pgch_append_uuid` accepts PostgreSQL UUID byte order.
-
-`pgch_append_inet` accepts address bytes in network order: four bytes for IPv4
-and sixteen bytes for IPv6. Pass matching width for NULL values.
-
-Date and time append APIs use these units:
-
-```c
-void pgch_append_date_seconds(pgch_writer *w, size_t col,
-                              int64_t seconds, bool isnull);
-void pgch_append_datetime_seconds(pgch_writer *w, size_t col,
-                                  int64_t seconds, bool isnull);
-void pgch_append_datetime64_raw(pgch_writer *w, size_t col,
-                                int64_t raw, bool isnull);
-void pgch_append_time_seconds(pgch_writer *w, size_t col,
-                              int64_t seconds, bool isnull);
-void pgch_append_time64_raw(pgch_writer *w, size_t col,
-                            int64_t raw, bool isnull);
-
-uint32_t pgch_column_datetime64_scale(const pgch_writer *w, size_t col);
-```
-
-- Date and DateTime accept seconds since Unix epoch
-- Time accepts seconds since midnight
-- DateTime64 and Time64 accept already-scaled wire integers
-
-Use `pgch_column_datetime64_scale` with `pgch_pow10` when scaling source
-values.
+NaN and Infinity reach the destination unchanged, so `Float32` and `Float64`
+take them and `Decimal` raises.
 
 ## Append arrays manually
 
@@ -189,7 +118,9 @@ values.
 void pgch_array_begin(pgch_writer *w, size_t col);
 void pgch_array_end(pgch_writer *w);
 bool pgch_array_active(const pgch_writer *w);
+
 chc_kind pgch_column_kind(const pgch_writer *w, size_t col);
+uint32_t pgch_column_datetime64_scale(const pgch_writer *w, size_t col);
 ```
 
 Open array, append one value per element, then close array:
@@ -197,9 +128,12 @@ Open array, append one value per element, then close array:
 ```c
 pgch_array_begin(writer, col);
 for (size_t i = 0; i < count; i++)
-    pgch_append_int(writer, 0, values[i], nulls[i]);
+    pgch_append_datum(writer, 0, values[i], INT8OID, nulls[i]);
 pgch_array_end(writer);
 ```
+
+Use `pgch_column_datetime64_scale` with `pgch_pow10` when scaling source
+values.
 
 While array context is active, append functions ignore `col` and target
 current element column. Nest begin/end calls for nested arrays.

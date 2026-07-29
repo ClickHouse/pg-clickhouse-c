@@ -494,7 +494,6 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
     if (PG_GETARG_BOOL(4)) {
         pgch_writer_set_null_array(w, PGCH_NULL_ARRAY_EMPTY);
     }
-    pgch_writer_set_nonfinite(w, (pgch_nonfinite)PG_GETARG_INT32(5));
 
     scan = begin_scan(rel);
     slot = table_slot_create(rel, NULL);

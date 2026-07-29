@@ -120,11 +120,7 @@ ALTER TABLE copyshape DROP COLUMN mac;
 SELECT pgch_structure('copyshape');
 SELECT unnest(pgch_table_roundtrip('copyshape', null_array_empty => true));
 
--- Apply non-finite value policies
-CREATE TABLE nonfinite (f float8, n numeric(9,2));
-INSERT INTO nonfinite VALUES ('NaN', 1.5), ('Infinity', 'NaN'), (2.5, 3.25);
-SELECT unnest(pgch_table_roundtrip('nonfinite', nonfinite => 1)) AS as_null;
-SELECT unnest(pgch_table_roundtrip('nonfinite', nonfinite => 2)) AS as_zero;
+-- Keep non-finite values, which Float columns take
 SELECT pgch_roundtrip('Float64', 'NaN'::float8) AS float_keeps_nan;
 
 -- Return required Native query settings
