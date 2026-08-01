@@ -1847,6 +1847,19 @@ pgch__convert_bool(pgch_convert_state* state pg_attribute_unused(), Datum val) {
     return BoolGetDatum(DatumGetInt16(val));
 }
 
+/*
+ * DateTime is an instant while time carries no zone, so PostgreSQL casts one
+ * to the other through the session zone. Take the UTC time of day instead:
+ * a time goes out as an instant on the epoch day in UTC, and the value read
+ * back must not depend on the session the reader happens to sit in.
+ */
+static Datum
+pgch__convert_time(pgch_convert_state* state pg_attribute_unused(), Datum val) {
+    TimeADT t = DatumGetTimestampTz(val) % USECS_PER_DAY;
+
+    return TimeADTGetDatum(t < 0 ? t + USECS_PER_DAY : t);
+}
+
 Datum
 pgch_convert(void* state, Datum val) {
     return state ? ((pgch_convert_state*)state)->func(state, val) : val;
@@ -2031,6 +2044,8 @@ pgch__convert_init(const chc_type* ct, Datum val, Oid intype, Oid outtype) {
             state->func = pgch__convert_from_text;
         } else if (outtype == BOOLOID && intype == INT2OID) {
             state->func = pgch__convert_bool;
+        } else if (outtype == TIMEOID && intype == TIMESTAMPTZOID) {
+            state->func = pgch__convert_time;
         } else {
             Oid castfunc;
 
