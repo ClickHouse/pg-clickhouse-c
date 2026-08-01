@@ -68,6 +68,14 @@ SELECT pgch_roundtrip('Time', '12:34:56'::time),
        pgch_roundtrip('Time64(6)', '12:34:56.123456'::time),
        pgch_roundtrip('Time64(9)', '23:59:59.999999'::time);
 
+-- DateTime read as time keeps the UTC time of day, off the session zone
+SET TimeZone = 'America/Los_Angeles';
+SELECT pgch_decode_as(pgch_block('DateTime', 1, '\xde8c0000'), NULL::time),
+       pgch_decode_typed(pgch_block('DateTime', 1, '\xde8c0000'), NULL::time),
+       pgch_decode_typed(pgch_block('DateTime64(3)', 1, '\xab43260200000000'),
+                         NULL::time);
+SET TimeZone = 'UTC';
+
 SELECT pgch_roundtrip('UUID', '11111111-2222-3333-4444-555555555555'::uuid),
        pgch_roundtrip('IPv4', '192.168.1.1'::inet),
        pgch_roundtrip('IPv6', '2001:db8::1'::inet);
