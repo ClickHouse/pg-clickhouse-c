@@ -83,7 +83,7 @@ PG array or record once you know target type.
 
 ```c
 /* Build conversion state outside row context */
-void *cs = pgch_convert_init(r.values[i], r.coltypes[i], target_oid);
+void *cs = pgch_convert_init(r.values[i], r.coltypes[i], target_oid, target_typmod);
 
 /* Convert each row, NULL state passes Datum through */
 values[i] = pgch_convert(cs, r.values[i]);
