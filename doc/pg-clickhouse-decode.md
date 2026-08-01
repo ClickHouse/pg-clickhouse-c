@@ -95,8 +95,9 @@ blocks. `next_chunk` returns pointer and length. Keep bytes valid until next
 Ending between blocks is clean end. Ending inside block produces truncation
 error. Pass `NULL` options to use `pgch_block_opts_local`.
 
-Chunk source never sees decoded block, so it cannot inspect one. Reader
-validates columns; close transport when reader reports error.
+Blocks use memory context active when `pgch_reader_init_chunks` is called. Keep
+this context alive until reader is finished. Callers can safely use a per-row
+context while reading rows.
 
 Chunk source API is available when implementation translation unit defines
 both `PGCH_IMPLEMENTATION` and `CHC_IMPLEMENTATION`.
