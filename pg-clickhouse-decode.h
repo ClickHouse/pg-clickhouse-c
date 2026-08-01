@@ -99,7 +99,8 @@ pgch_reader_init_chunks(
 /*
  * Fill values and nulls with next row
  * Return false at end or when reader->error is set
- * Reject unsupported types and incompatible schema changes between blocks
+ * Reject unsupported types, incompatible schema changes between blocks, and
+ * columns failing chc_column_validate
  */
 extern bool
 pgch_reader_next(pgch_reader* r);
@@ -1234,7 +1235,7 @@ pgch__schema_error(pgch_reader* r, const char* msg) {
 }
 
 static bool
-pgch__check_schema(pgch_reader* r) {
+pgch__check_block(pgch_reader* r) {
     size_t ncols = chc_block_n_columns(r->cur);
 
     if (r->colshapes) {
@@ -1259,10 +1260,22 @@ pgch__check_schema(pgch_reader* r) {
 
     for (size_t i = 0; i < ncols; i++) {
         const char* msg = pgch__check_type(chc_block_column_type(r->cur, i));
+        chc_err err     = {};
 
         if (msg) {
             return pgch__schema_error(
                 r, psprintf("%s (%s)", msg, pgch__block_col_desc(r->cur, i))
+            );
+        }
+        /* chc_block_read leaves offsets and keys unchecked, decode trusts them */
+        if (chc_column_validate(chc_block_column(r->cur, i), &err) != CHC_OK) {
+            return pgch__schema_error(
+                r,
+                psprintf(
+                    "%s (%s)",
+                    err.msg[0] ? err.msg : "invalid column data",
+                    pgch__block_col_desc(r->cur, i)
+                )
             );
         }
     }
@@ -1285,7 +1298,7 @@ pgch__load_block(pgch_reader* r) {
         r->done = true;
         return false;
     }
-    if (!pgch__check_schema(r)) {
+    if (!pgch__check_block(r)) {
         chc_block_destroy(unconstify(chc_block*, r->cur), &pgch_alloc);
         r->cur  = NULL;
         r->done = true;

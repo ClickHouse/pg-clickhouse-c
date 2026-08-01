@@ -32,8 +32,9 @@ Geo types decode to geometric Datums: `Point` to `point`, `Ring` to `polygon`,
 `MultiLineString` and `MultiPolygon` to `pgch_array` over those. An empty ring
 or line decodes as NULL, PostgreSQL having no pointless polygon or path.
 
-Most consumers should use `pgch_reader` instead of calling
-`pgch_read_value` directly.
+Function trusts array offsets and LowCardinality keys, so pass columns that
+passed `chc_column_validate`. Most consumers should use `pgch_reader` instead of
+calling `pgch_read_value` directly.
 
 ## Supply decoded blocks
 
@@ -53,7 +54,12 @@ Return `NULL` for end of stream. On failure, return `NULL` and make `error`
 return message. `error` must be callable before first block, after every
 `next_block`, and at end.
 
-Validate each block before returning it:
+Reader runs `chc_column_validate` on every column of every block, so source
+need not repeat it. Violation sets `reader.error` and ends stream.
+
+Source still owns transport-specific recovery. Validate in source when invalid
+block must change transport state, for example when it makes connection unsafe
+to reuse:
 
 ```c
 for (size_t i = 0; i < chc_block_n_columns(block); i++) {
@@ -63,9 +69,6 @@ for (size_t i = 0; i < chc_block_n_columns(block); i++) {
         report_invalid_block(&err);
 }
 ```
-
-Source owns transport-specific recovery. For example, invalid block may make
-connection unsafe to reuse.
 
 ## Supply Native byte chunks
 
@@ -91,6 +94,9 @@ blocks. `next_chunk` returns pointer and length. Keep bytes valid until next
 
 Ending between blocks is clean end. Ending inside block produces truncation
 error. Pass `NULL` options to use `pgch_block_opts_local`.
+
+Chunk source never sees decoded block, so it cannot inspect one. Reader
+validates columns; close transport when reader reports error.
 
 Chunk source API is available when implementation translation unit defines
 both `PGCH_IMPLEMENTATION` and `CHC_IMPLEMENTATION`.
@@ -153,13 +159,13 @@ if (reader.error)
             errmsg("%s", reader.error));
 ```
 
-Reader rejects unsupported column types and schema changes that would alter
-returned Datum shape. Those failures set `reader.error`. Clean end leaves it
-`NULL`.
+Reader rejects unsupported column types, schema changes that would alter
+returned Datum shape, and columns failing `chc_column_validate`. Those failures
+set `reader.error`. Clean end leaves it `NULL`.
 
 Value conversion can still raise PostgreSQL errors, including invalid JSON or
 numeric text, `UInt64` outside selected target range, and payload that
-contradicts declared type. Validate blocks in source before reading rows.
+contradicts declared type.
 
 `pgch_reader_free` releases current block and clears `reader.error`. Save error
 pointer first when it must survive that call; storage remains valid until

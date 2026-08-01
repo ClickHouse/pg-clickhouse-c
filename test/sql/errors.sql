@@ -73,6 +73,11 @@ SELECT pgch_decode(pgch_block('Array(Array(Int32))', 1,
                               '\x02000000000000000300000000000000'::bytea ||
                               '\x010000000200000003000000'::bytea));
 
+-- Reject forged array offsets that would read past inner column
+SELECT pgch_decode(pgch_block('Array(Int32)', 2,
+                              '\x05000000000000000200000000000000'::bytea ||
+                              '\x0100000002000000'::bytea));
+
 -- Reject truncated streams and incompatible schema changes
 SELECT pgch_decode('\x0103'::bytea);
 SELECT pgch_decode(pgch_encode_rows('Int32', ARRAY[1]::int4[]) ||
