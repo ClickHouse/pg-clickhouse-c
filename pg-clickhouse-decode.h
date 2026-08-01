@@ -1374,6 +1374,7 @@ pgch__chunk_cancel(void* ud) {
     return c->src.cancelled(c->src.ud) ? 1 : 0;
 }
 
+/* Decode into init context, block outlives caller's per-row context */
 static const chc_block*
 pgch__chunk_next_block(void* ud) {
     pgch__chunks* c = (pgch__chunks*)ud;
@@ -1383,11 +1384,13 @@ pgch__chunk_next_block(void* ud) {
     if (c->error) {
         return NULL;
     }
+    MemoryContext old = MemoryContextSwitchTo(c->cxt);
     if (chc_block_read(c->in, &pgch_alloc, &c->opts, &b, &err) != CHC_OK) {
         c->error =
             MemoryContextStrdup(c->cxt, err.msg[0] ? err.msg : "block read failed");
-        return NULL;
+        b = NULL;
     }
+    MemoryContextSwitchTo(old);
     return b;
 }
 
