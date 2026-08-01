@@ -103,6 +103,11 @@ SELECT pgch_decode(pgch_block('Array(Array(Int32))', 1,
                               '\x02000000000000000300000000000000'::bytea ||
                               '\x010000000200000003000000'::bytea));
 ERROR:  pgch: nested arrays must have sub-arrays with matching dimensions
+-- Reject forged array offsets that would read past inner column
+SELECT pgch_decode(pgch_block('Array(Int32)', 2,
+                              '\x05000000000000000200000000000000'::bytea ||
+                              '\x0100000002000000'::bytea));
+ERROR:  decode: array offsets not monotonic at row 1: 2 < 5 (column "c")
 -- Reject truncated streams and incompatible schema changes
 SELECT pgch_decode('\x0103'::bytea);
 ERROR:  decode: ioless buffer drained
