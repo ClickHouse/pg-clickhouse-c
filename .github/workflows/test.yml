@@ -1,0 +1,55 @@
+name: test
+
+on:
+  push:
+    branches: [main, wip/**]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['13', '14', '15', '16', '17', '18']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: ./.github/actions/setup-pg
+        with:
+          version: ${{ matrix.pg }}
+
+      - name: Build and run regression tests
+        run: |
+          set -euo pipefail
+          make -C test
+          # sudo drops PG_CONFIG from env
+          sudo make -C test install PG_CONFIG="$PG_CONFIG"
+          make -C test installcheck
+
+      - name: Upload regression output on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: regression-pg${{ matrix.pg }}
+          path: |
+            test/regression.diffs
+            test/regression.out
+            test/results/
+          if-no-files-found: ignore
+
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned: .clang-format uses keys added after 19, and output drifts
+      # between releases
+      - run: |
+          pipx run clang-format==22.1.8 --dry-run --Werror \
+            pg-clickhouse*.h test/pgch_test.c

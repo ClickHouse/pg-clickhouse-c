@@ -1,0 +1,33 @@
+name: Start Postgres
+description: Install PostgreSQL from apt.postgresql.org and start a cluster
+
+inputs:
+  version:
+    description: Major PostgreSQL version to install
+    required: true
+  port:
+    description: Port for cluster
+    default: '55432'
+
+runs:
+  using: composite
+  steps:
+    - name: Install and start PostgreSQL ${{ inputs.version }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Script and repository key ship in pgdg postgresql-client-common, which
+        # the runner image installs while dropping its pgdg apt source.
+        # Installs postgresql-<v> and postgresql-server-dev-<v>
+        sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh \
+          -v ${{ inputs.version }} -i
+        # trust auth lets tests connect as postgres, superuser needed to load
+        # C module. Explicit port: runner image preinstalls a cluster on 5432
+        sudo pg_createcluster --start ${{ inputs.version }} ci \
+          -p ${{ inputs.port }} -- -A trust
+        echo /usr/lib/postgresql/${{ inputs.version }}/bin >> "$GITHUB_PATH"
+        {
+          echo 'PGPORT=${{ inputs.port }}'
+          echo 'PGUSER=postgres'
+          echo 'PG_CONFIG=/usr/lib/postgresql/${{ inputs.version }}/bin/pg_config'
+        } >> "$GITHUB_ENV"
