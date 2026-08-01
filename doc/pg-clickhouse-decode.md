@@ -184,10 +184,10 @@ conversion state across independently managed block streams.
 ## Convert into target PostgreSQL types
 
 ```c
-void *pgch_convert_init(Datum val, Oid intype, Oid outtype);
-void *pgch_convert_init_type(const chc_type *in, Oid outtype);
+void *pgch_convert_init(Datum val, Oid intype, Oid outtype, int32 outtypmod);
+void *pgch_convert_init_type(const chc_type *in, Oid outtype, int32 outtypmod);
 void *pgch_reader_convert_init(const pgch_reader *r,
-                               size_t col, Oid outtype);
+                               size_t col, Oid outtype, int32 outtypmod);
 
 Datum pgch_convert(void *state, Datum val);
 void  pgch_convert_free(void *state);
@@ -206,6 +206,12 @@ Conversion supports:
 - Explicit PostgreSQL casts between scalar types
 - Per-element conversion when source and target array element types differ
 
+Pass target `atttypmod`, or `-1` when the target carries none. Length and
+precision then apply as PostgreSQL applies them on assignment: `char(n)` pads,
+`varchar(n)` rejects overlong values, `numeric(p,s)` rounds and
+`timestamp(n)` truncates. A domain supplies its own typmod. An array column's
+typmod belongs to its elements, so pass it unchanged.
+
 Prefer `pgch_reader_convert_init` when reader and target tuple descriptor are
 available. It prepares conversion from schema before reading rows, including
 columns whose first or every value is NULL:
@@ -215,7 +221,8 @@ void **states = palloc0(reader.ncols * sizeof(*states));
 
 for (size_t i = 0; i < reader.ncols; i++)
     states[i] = pgch_reader_convert_init(&reader, i,
-                                         TupleDescAttr(desc, i)->atttypid);
+                                         TupleDescAttr(desc, i)->atttypid,
+                                         TupleDescAttr(desc, i)->atttypmod);
 ```
 
 `pgch_convert_init_type` provides same behavior for standalone ClickHouse
@@ -286,7 +293,8 @@ bool *nulls = palloc(reader.ncols * sizeof(*nulls));
 
 for (size_t i = 0; i < reader.ncols; i++)
     states[i] = pgch_reader_convert_init(&reader, i,
-                                         TupleDescAttr(desc, i)->atttypid);
+                                         TupleDescAttr(desc, i)->atttypid,
+                                         TupleDescAttr(desc, i)->atttypmod);
 
 while (pgch_reader_next(&reader)) {
     pgch_reader_fill(&reader, states, values, nulls);

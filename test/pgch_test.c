@@ -306,7 +306,7 @@ decode_reader(pgch_reader* r_, Oid outtype, bool from_type) {
         elog(ERROR, "expected 1 column, got %zu", pgch_reader_columns(&r));
     }
     if (OidIsValid(outtype) && from_type) {
-        convstate = pgch_reader_convert_init(&r, 0, outtype);
+        convstate = pgch_reader_convert_init(&r, 0, outtype, -1);
         converted = true;
     }
 
@@ -320,7 +320,7 @@ decode_reader(pgch_reader* r_, Oid outtype, bool from_type) {
                 CStringGetTextDatum(pgch_value_to_cstring(r.coltypes[0], r.values[0]));
         } else {
             if (!converted) {
-                convstate = pgch_convert_init(r.values[0], r.coltypes[0], outtype);
+                convstate = pgch_convert_init(r.values[0], r.coltypes[0], outtype, -1);
                 converted = true;
             }
             val = CStringGetTextDatum(
@@ -548,8 +548,9 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
     TableScanDesc scan;
     TupleTableSlot* slot;
     bytea* bytes;
-    Oid* targets  = palloc0(ncols * sizeof(Oid));
-    FmgrInfo* out = palloc0(ncols * sizeof(FmgrInfo));
+    Oid* targets   = palloc0(ncols * sizeof(Oid));
+    int32* typmods = palloc0(ncols * sizeof(int32));
+    FmgrInfo* out  = palloc0(ncols * sizeof(FmgrInfo));
     /* Fill by attribute, so dropped and generated attributes leave holes */
     int* dest     = palloc0(ncols * sizeof(int));
     Datum* values = palloc0(desc->natts * sizeof(Datum));
@@ -569,6 +570,7 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
             continue;
         }
         targets[j] = a->atttypid;
+        typmods[j] = a->atttypmod;
         dest[j]    = i;
         getTypeOutputInfo(a->atttypid, &outfunc, &varlena);
         fmgr_info(outfunc, &out[j]);
@@ -599,7 +601,7 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
 
     states = palloc0(ncols * sizeof(void*));
     for (size_t i = 0; i < ncols; i++) {
-        states[i] = pgch_reader_convert_init(&r, i, targets[i]);
+        states[i] = pgch_reader_convert_init(&r, i, targets[i], typmods[i]);
     }
 
     while (pgch_reader_next(&r)) {
