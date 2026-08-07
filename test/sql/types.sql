@@ -92,6 +92,16 @@ CREATE DOMAIN dints AS int4[];
 SELECT pgch_decode_as(pgch_encode('Array(Int32)', ARRAY[1, 2]::int4[]), NULL::dints),
        pgch_decode_as(pgch_encode('Array(Int64)', ARRAY[1, 2]::int8[]), NULL::dints);
 
+-- Render scalars into a string type through the output function
+SELECT pgch_decode_as(pgch_encode('Int8', 7::int2), NULL::text),
+       pgch_decode_as(pgch_encode('Float64', 1.5::float8), NULL::text),
+       pgch_decode_as(pgch_encode('DateTime', '2024-01-15 12:34:56+00'::timestamptz),
+                      NULL::text),
+       pgch_decode_as(pgch_encode('Nullable(Int32)', NULL::int4), NULL::text);
+
+-- Arrays hold no built value to render, so a string target stays rejected
+SELECT pgch_decode_as(pgch_encode('Array(Int64)', ARRAY[1, 2]::int8[]), NULL::text);
+
 -- Round-trip relation through generated structure and slot API
 CREATE TABLE copyshape (
     id      int          NOT NULL,

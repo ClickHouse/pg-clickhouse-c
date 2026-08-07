@@ -1522,8 +1522,9 @@ struct pgch_convert_state {
     Oid intype;
     Oid outtype;
     pgch__convert_fn func;
-    FmgrInfo flinfo;   /* Function used for cast, type input, or record output */
-    FmgrInfo tmflinfo; /* Function used to enforce target length or precision */
+    FmgrInfo flinfo;    /* Function used for cast, type input, or record output */
+    FmgrInfo tmflinfo;  /* Function used to enforce target length or precision */
+    FmgrInfo outflinfo; /* Value's output function when casting through text */
 
     TupleConversionMap* tupmap;
     TupleDesc indesc;
@@ -1857,6 +1858,17 @@ pgch__convert_from_text(pgch_convert_state* state, Datum val) {
     );
 }
 
+/* PostgreSQL casts to a string type by rendering through the output function */
+static Datum
+pgch__convert_to_text(pgch_convert_state* state, Datum val) {
+    char* str = OutputFunctionCall(&state->outflinfo, val);
+    Datum result =
+        InputFunctionCall(&state->flinfo, str, state->typioparam, state->typmod);
+
+    pfree(str);
+    return result;
+}
+
 /* ClickHouse UInt8 maps to smallint, convert requested boolean explicitly */
 static Datum
 pgch__convert_bool(pgch_convert_state* state pg_attribute_unused(), Datum val) {
@@ -2078,6 +2090,9 @@ pgch__convert_init(
             );
         }
     } else if (intype != outtype) {
+        /* Array and record values arrive unbuilt, with their converter set */
+        bool composite = state->func != NULL;
+
         if (!state->func) {
             state->func = pgch__convert_generic;
         }
@@ -2103,13 +2118,32 @@ pgch__convert_init(
             case COERCION_PATH_FUNC:
                 fmgr_info(castfunc, &state->flinfo);
                 break;
-            case COERCION_PATH_RELABELTYPE:
+            case COERCION_PATH_COERCEVIAIO: {
+                Oid typinput;
+                Oid typoutput;
+                bool varlena;
 
+                if (composite) {
+                    goto no_cast;
+                }
+                /* Domain supplies its own type modifier */
+                Oid baseTypeId = getBaseTypeAndTypmod(outtype, &state->typmod);
+                getTypeOutputInfo(intype, &typoutput, &varlena);
+                fmgr_info(typoutput, &state->outflinfo);
+                getTypeInputInfo(baseTypeId, &typinput, &state->typioparam);
+                fmgr_info(typinput, &state->flinfo);
+                state->func = pgch__convert_to_text;
+
+                /* Input function already applied the type modifier */
+                return state;
+            }
+            case COERCION_PATH_RELABELTYPE:
                 if (state->func == NULL) {
                     goto no_conversion;
                 }
                 break;
             default:
+            no_cast:
                 pgch_errorf(
                     ERRCODE_FDW_INVALID_DATA_TYPE,
                     "could not cast value from %s to %s",
