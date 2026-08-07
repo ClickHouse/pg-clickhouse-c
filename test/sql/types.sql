@@ -92,6 +92,16 @@ CREATE DOMAIN dints AS int4[];
 SELECT pgch_decode_as(pgch_encode('Array(Int32)', ARRAY[1, 2]::int4[]), NULL::dints),
        pgch_decode_as(pgch_encode('Array(Int64)', ARRAY[1, 2]::int8[]), NULL::dints);
 
+-- Enforce array type modifier on each element, as ArrayCoerceExpr does
+CREATE DOMAIN dnums AS numeric(4, 1)[];
+CREATE DOMAIN dchars AS bpchar(3)[];
+SELECT pgch_decode_as(pgch_encode('Array(Decimal(10, 4))',
+                                  ARRAY[1.2345, -6.789]::numeric[]), NULL::dnums),
+       pgch_decode_as(pgch_encode('Array(Nullable(Int64))',
+                                  ARRAY[12, NULL]::int8[]), NULL::dnums),
+       pgch_decode_as(pgch_encode('Array(String)',
+                                  ARRAY['ab', 'cd']::text[]), NULL::dchars);
+
 -- Render scalars into a string type through the output function
 SELECT pgch_decode_as(pgch_encode('Int8', 7::int2), NULL::text),
        pgch_decode_as(pgch_encode('Float64', 1.5::float8), NULL::text),
