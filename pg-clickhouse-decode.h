@@ -1953,9 +1953,10 @@ pgch__convert_init(
     if (intype == ANYARRAYOID) {
         pgch_array* slot     = ct ? NULL : (pgch_array*)DatumGetPointer(val);
         const chc_type* leaf = ct;
-        /* PostgreSQL array domains expose element type through base type */
-        Oid out_elem =
-            OidIsValid(outtype) ? get_element_type(getBaseType(outtype)) : InvalidOid;
+        /* Array domains expose element type and type modifier through base type */
+        Oid out_base = OidIsValid(outtype) ? getBaseTypeAndTypmod(outtype, &outtypmod)
+                                           : InvalidOid;
+        Oid out_elem = OidIsValid(out_base) ? get_element_type(out_base) : InvalidOid;
 
         if (ct) {
             int ndim;
@@ -1968,8 +1969,9 @@ pgch__convert_init(
         }
         state->func = pgch__convert_array;
 
-        /* PostgreSQL reports array casts separately from scalar element casts */
-        if (OidIsValid(out_elem) && out_elem != state->item_type) {
+        /* PostgreSQL reports array casts separately from scalar element casts,
+         * and its COERCION_PATH_ARRAYCOERCE applies a type modifier per element */
+        if (OidIsValid(out_elem) && (out_elem != state->item_type || outtypmod >= 0)) {
             Datum leafval  = (Datum)0;
             bool have_leaf = ct || pgch__array_leaf(slot, &leafval);
 
@@ -1981,8 +1983,10 @@ pgch__convert_init(
                     leaf, leafval, state->item_type, out_elem, outtypmod
                 );
             }
-            state->item_type = out_elem;
-            state->intype    = outtype;
+            if (out_elem != state->item_type) {
+                state->item_type = out_elem;
+                state->intype    = outtype;
+            }
         }
         get_typlenbyvalalign(
             state->item_type, &state->typlen, &state->typbyval, &state->typalign

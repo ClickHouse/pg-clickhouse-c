@@ -204,7 +204,8 @@ Conversion supports:
   matching key and value types receives it
 - ClickHouse `String` values through PostgreSQL target input function
 - Explicit PostgreSQL casts between scalar types
-- Per-element conversion when source and target array element types differ
+- Per-element conversion when source and target array element types differ, or
+  when the target array carries a type modifier
 
 Pass target `atttypmod`, or `-1` when the target carries none. Length and
 precision then apply as PostgreSQL applies them on assignment: `char(n)` pads,
