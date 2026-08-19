@@ -1,0 +1,217 @@
+-- Map ClickHouse declarations to PostgreSQL column descriptors
+SET TimeZone = 'UTC';
+-- Scalar mappings carry no modifier
+SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
+  FROM unnest(ARRAY[
+    'Int8', 'Int16', 'Int32', 'Int64',
+    'UInt8', 'UInt16', 'UInt32', 'UInt64',
+    'Bool', 'Float32', 'Float64',
+    'String', 'FixedString(5)', 'Enum8(''a'' = 1)', 'Enum16(''a'' = 1)',
+    'UUID', 'IPv4', 'IPv6', 'JSON', 'Object(''json'')',
+    'Date', 'Date32', 'DateTime', 'DateTime(''Europe/Berlin'')', 'Time'
+]) AS t, pgch_pgcolumn(t) AS c;
+          ch_type          |           type           | ndims | nullable | is_column 
+---------------------------+--------------------------+-------+----------+-----------
+ Int8                      | smallint                 |     0 | f        | t
+ Int16                     | smallint                 |     0 | f        | t
+ Int32                     | integer                  |     0 | f        | t
+ Int64                     | bigint                   |     0 | f        | t
+ UInt8                     | smallint                 |     0 | f        | t
+ UInt16                    | integer                  |     0 | f        | t
+ UInt32                    | bigint                   |     0 | f        | t
+ UInt64                    | bigint                   |     0 | f        | t
+ Bool                      | boolean                  |     0 | f        | t
+ Float32                   | real                     |     0 | f        | t
+ Float64                   | double precision         |     0 | f        | t
+ String                    | text                     |     0 | f        | t
+ FixedString(5)            | text                     |     0 | f        | t
+ Enum8('a' = 1)            | text                     |     0 | f        | t
+ Enum16('a' = 1)           | text                     |     0 | f        | t
+ UUID                      | uuid                     |     0 | f        | t
+ IPv4                      | inet                     |     0 | f        | t
+ IPv6                      | inet                     |     0 | f        | t
+ JSON                      | jsonb                    |     0 | f        | t
+ Object('json')            | jsonb                    |     0 | f        | t
+ Date                      | date                     |     0 | f        | t
+ Date32                    | date                     |     0 | f        | t
+ DateTime                  | timestamp with time zone |     0 | f        | t
+ DateTime('Europe/Berlin') | timestamp with time zone |     0 | f        | t
+ Time                      | time without time zone   |     0 | f        | t
+(25 rows)
+
+-- Nothing describes no column, so it maps to no type
+SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
+  FROM unnest(ARRAY['Nothing', 'Nullable(Nothing)']) AS t, pgch_pgcolumn(t) AS c;
+      ch_type      | type | ndims | nullable | is_column 
+-------------------+------+-------+----------+-----------
+ Nothing           |      |     0 | f        | f
+ Nullable(Nothing) |      |     0 | t        | f
+(2 rows)
+
+SELECT pgch_pgcolumn('Array(Nothing)');
+ERROR:  pgch: no PG array type for "Nothing"
+-- Geometric types map onto their PostgreSQL counterparts, multi-forms as arrays
+SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
+  FROM unnest(ARRAY[
+    'Point', 'Ring', 'LineString', 'Polygon', 'MultiPolygon', 'MultiLineString'
+]) AS t, pgch_pgcolumn(t) AS c;
+     ch_type     |   type    | ndims | nullable | is_column 
+-----------------+-----------+-------+----------+-----------
+ Point           | point     |     0 | f        | t
+ Ring            | polygon   |     0 | f        | t
+ LineString      | path      |     0 | f        | t
+ Polygon         | polygon[] |     1 | f        | t
+ MultiPolygon    | polygon[] |     2 | f        | t
+ MultiLineString | path[]    |     1 | f        | t
+(6 rows)
+
+-- Decimal keeps precision and scale, width defaults come from the declaration
+SELECT t AS ch_type, c.type
+  FROM unnest(ARRAY[
+    'Decimal', 'Decimal(9,2)', 'Decimal(76,20)',
+    'Decimal32(4)', 'Decimal64(6)', 'Decimal128(10)', 'Decimal256(30)'
+]) AS t, pgch_pgcolumn(t) AS c;
+    ch_type     |      type      
+----------------+----------------
+ Decimal        | numeric(38,0)
+ Decimal(9,2)   | numeric(9,2)
+ Decimal(76,20) | numeric(76,20)
+ Decimal32(4)   | numeric(9,4)
+ Decimal64(6)   | numeric(18,6)
+ Decimal128(10) | numeric(38,10)
+ Decimal256(30) | numeric(76,30)
+(7 rows)
+
+-- Fractional-second precision caps at the PostgreSQL maximum
+SELECT t AS ch_type, c.type, c.truncated
+  FROM unnest(ARRAY[
+    'DateTime64(0)', 'DateTime64(3)', 'DateTime64(6)', 'DateTime64(9)',
+    'DateTime64(3, ''Europe/Berlin'')',
+    'Time64(0)', 'Time64(3)', 'Time64(6)', 'Time64(9)'
+]) AS t, pgch_pgcolumn(t) AS c;
+            ch_type             |            type             | truncated 
+--------------------------------+-----------------------------+-----------
+ DateTime64(0)                  | timestamp(0) with time zone | f
+ DateTime64(3)                  | timestamp(3) with time zone | f
+ DateTime64(6)                  | timestamp(6) with time zone | f
+ DateTime64(9)                  | timestamp(6) with time zone | t
+ DateTime64(3, 'Europe/Berlin') | timestamp(3) with time zone | f
+ Time64(0)                      | time(0) without time zone   | f
+ Time64(3)                      | time(3) without time zone   | f
+ Time64(6)                      | time(6) without time zone   | f
+ Time64(9)                      | time(6) without time zone   | t
+(9 rows)
+
+-- Only an outer Nullable makes the column nullable
+SELECT t AS ch_type, c.type, c.nullable
+  FROM unnest(ARRAY[
+    'Nullable(String)', 'LowCardinality(String)',
+    'LowCardinality(Nullable(String))',
+    'Nullable(Decimal(12,6))', 'LowCardinality(Nullable(FixedString(4)))',
+    'Nullable(DateTime64(9))', 'Nullable(Array(Int32))',
+    'Array(Nullable(Int32))', 'Array(LowCardinality(Nullable(String)))'
+]) AS t, pgch_pgcolumn(t) AS c;
+                 ch_type                  |            type             | nullable 
+------------------------------------------+-----------------------------+----------
+ Nullable(String)                         | text                        | t
+ LowCardinality(String)                   | text                        | f
+ LowCardinality(Nullable(String))         | text                        | t
+ Nullable(Decimal(12,6))                  | numeric(12,6)               | t
+ LowCardinality(Nullable(FixedString(4))) | text                        | t
+ Nullable(DateTime64(9))                  | timestamp(6) with time zone | t
+ Nullable(Array(Int32))                   | integer[]                   | t
+ Array(Nullable(Int32))                   | integer[]                   | f
+ Array(LowCardinality(Nullable(String)))  | text[]                      | f
+(9 rows)
+
+-- One PostgreSQL array type serves every ClickHouse nesting depth, with typmod
+SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.truncated, c.is_column
+  FROM unnest(ARRAY[
+    'Array(Int32)', 'Array(Array(String))', 'Array(Array(Array(Int64)))',
+    'Array(Decimal(12,6))', 'Array(Array(Decimal(12,6)))',
+    'Array(Nullable(Decimal(9,4)))',
+    'Array(DateTime64(3))', 'Array(Nullable(DateTime64(9)))',
+    'Array(Time64(6))', 'Array(Nullable(Time64(9)))',
+    'Array(Point)', 'Array(Tuple(Int32, String))',
+    'Array(Polygon)', 'Array(MultiPolygon)', 'Array(Map(String, Int64))'
+]) AS t, pgch_pgcolumn(t) AS c;
+            ch_type             |             type              | ndims | nullable | truncated | is_column 
+--------------------------------+-------------------------------+-------+----------+-----------+-----------
+ Array(Int32)                   | integer[]                     |     1 | f        | f         | t
+ Array(Array(String))           | text[]                        |     2 | f        | f         | t
+ Array(Array(Array(Int64)))     | bigint[]                      |     3 | f        | f         | t
+ Array(Decimal(12,6))           | numeric(12,6)[]               |     1 | f        | f         | t
+ Array(Array(Decimal(12,6)))    | numeric(12,6)[]               |     2 | f        | f         | t
+ Array(Nullable(Decimal(9,4)))  | numeric(9,4)[]                |     1 | f        | f         | t
+ Array(DateTime64(3))           | timestamp(3) with time zone[] |     1 | f        | f         | t
+ Array(Nullable(DateTime64(9))) | timestamp(6) with time zone[] |     1 | f        | t         | t
+ Array(Time64(6))               | time(6) without time zone[]   |     1 | f        | f         | t
+ Array(Nullable(Time64(9)))     | time(6) without time zone[]   |     1 | f        | t         | t
+ Array(Point)                   | point[]                       |     1 | f        | f         | t
+ Array(Tuple(Int32, String))    | record[]                      |     1 | f        | f         | f
+ Array(Polygon)                 | polygon[]                     |     2 | f        | f         | t
+ Array(MultiPolygon)            | polygon[]                     |     3 | f        | f         | t
+ Array(Map(String, Int64))      | record[]                      |     2 | f        | f         | f
+(15 rows)
+
+-- Tuple and Map reach PostgreSQL pseudotypes no table column can hold
+SELECT t AS ch_type, c.type, c.ndims, c.is_column
+  FROM unnest(ARRAY[
+    'Tuple(Int32, String)', 'Tuple(a Int32, b String)',
+    'Map(String, Int64)', 'Map(String, Array(Decimal(12,6)))'
+]) AS t, pgch_pgcolumn(t) AS c;
+              ch_type              |   type   | ndims | is_column 
+-----------------------------------+----------+-------+-----------
+ Tuple(Int32, String)              | record   |     0 | f
+ Tuple(a Int32, b String)          | record   |     0 | f
+ Map(String, Int64)                | record[] |     1 | f
+ Map(String, Array(Decimal(12,6))) | record[] |     1 | f
+(4 rows)
+
+-- FixedString counts bytes, which varchar(N) cannot express, so it maps to text
+SELECT t AS ch_type, c.type, c.ndims
+  FROM unnest(ARRAY[
+    'FixedString(1)', 'FixedString(50)', 'Nullable(FixedString(50))',
+    'LowCardinality(FixedString(8))',
+    'Array(FixedString(3))', 'Array(Array(FixedString(3)))'
+]) AS t, pgch_pgcolumn(t) AS c;
+            ch_type             |  type  | ndims 
+--------------------------------+--------+-------
+ FixedString(1)                 | text   |     0
+ FixedString(50)                | text   |     0
+ Nullable(FixedString(50))      | text   |     0
+ LowCardinality(FixedString(8)) | text   |     0
+ Array(FixedString(3))          | text[] |     1
+ Array(Array(FixedString(3)))   | text[] |     2
+(6 rows)
+
+-- Types PostgreSQL cannot represent report the ClickHouse declaration
+SELECT pgch_pgcolumn('Int128');
+ERROR:  pgch: unsupported column type "Int128"
+SELECT pgch_pgcolumn('UInt256');
+ERROR:  pgch: unsupported column type "UInt256"
+SELECT pgch_pgcolumn('BFloat16');
+ERROR:  pgch: unsupported column type "BFloat16"
+SELECT pgch_pgcolumn('Dynamic');
+ERROR:  pgch: unsupported column type "Dynamic"
+SELECT pgch_pgcolumn('Variant(Int32, String)');
+ERROR:  pgch: unsupported column type "Variant(Int32, String)"
+SELECT pgch_pgcolumn('QBit(Float32, 16)');
+ERROR:  pgch: unsupported column type "QBit(Float32, 16)"
+SELECT pgch_pgcolumn('IntervalDay');
+ERROR:  pgch: unsupported column type "IntervalDay"
+SELECT pgch_pgcolumn('Array(Int128)');
+ERROR:  pgch: unsupported column type "Int128"
+SELECT pgch_pgcolumn('AggregateFunction(sum, Int64)');
+ERROR:  pgch: unknown type: sum
+-- Malformed declarations report the clickhouse-c parse error
+SELECT pgch_pgcolumn('Nonsense');
+ERROR:  pgch: unknown type: Nonsense
+SELECT pgch_pgcolumn('Int32junk');
+ERROR:  pgch: unknown type: Int32junk
+SELECT pgch_pgcolumn('Array(Int32');
+ERROR:  pgch: expected ',' or ')'
+SELECT pgch_pgcolumn('Decimal(9');
+ERROR:  pgch: Decimal: expected ','
+SELECT pgch_pgcolumn('');
+ERROR:  pgch: expected type name

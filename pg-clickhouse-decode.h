@@ -1445,7 +1445,7 @@ pgch_reader_init_chunks(
                         .check_cancel = src->cancelled ? pgch__chunk_cancel : NULL };
     c->in   = pgch_in_alloc();
     if (chc_in_init(c->in, &c->io, &pgch_alloc, 0, &err) != CHC_OK) {
-        pgch_raise(&err, ERRCODE_FDW_ERROR, "reader init: ");
+        pgch_raise(&err, ERRCODE_FDW_ERROR, "reader init: ", NULL);
     }
 
     bsrc.ud         = c;

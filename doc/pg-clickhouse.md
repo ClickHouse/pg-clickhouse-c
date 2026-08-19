@@ -25,7 +25,7 @@ Include `pg-clickhouse.h` normally in all other translation units. Define
 #define pgch_errorf(sqlstate, fmt, ...)
 
 pg_noreturn void pgch_raise(const chc_err *err, int sqlstate,
-                            const char *what);
+                            const char *what, const char *where);
 ```
 
 Define `PGCH_MSG_PREFIX` as a string literal in build flags to identify errors
@@ -37,11 +37,12 @@ PG_CPPFLAGS += -DPGCH_MSG_PREFIX='"pg_chdb: "'
 
 Keep this definition consistent across every translation unit. `pgch_error`
 and `pgch_errorf` raise PostgreSQL `ERROR`. `pgch_raise` raises `ERROR` with
-requested SQLSTATE, optional `what` text, and clickhouse-c error message.
+requested SQLSTATE, optional `what` text, clickhouse-c error message, and
+optional `where` context in parentheses.
 
 ```c
 if (chc_block_write(&io, block, &opts, &err) != CHC_OK)
-    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
+    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
 ```
 
 ## Allocation
@@ -102,6 +103,31 @@ either nullable wrapper was present.
 
 `pgch_pow10` contains powers from `10^0` through `10^9` for scaling `DateTime64`
 and `Time64` values.
+
+## ClickHouse to PostgreSQL columns
+
+```c
+typedef struct pgch_pg_type {
+    Oid   typid;
+    int32 typmod;
+    int   ndims;
+    bool  nullable;
+    bool  truncated;
+} pgch_pg_type;
+
+pgch_pg_type pgch_pg_type_for(const chc_type *type, const char *what);
+bool         pgch_pg_type_is_column(pgch_pg_type type);
+```
+
+Use these functions to build PostgreSQL columns from ClickHouse schemas.
+`pgch_pg_type_for` accepts a type parsed by `chc_type_parse`. Pass `what` to
+include context in errors.
+
+Call `pgch_pg_type_is_column` before using result in a table definition. Choose
+a fallback when it returns false.
+
+`truncated` reports a `DateTime64` or `Time64` beyond microseconds, which
+PostgreSQL rounds off.
 
 ## PostgreSQL to ClickHouse types
 
@@ -255,7 +281,7 @@ chc_io io;
 
 pgch_buf_io(&out, &io);
 if (chc_block_write(&io, block, &opts, &err) != CHC_OK)
-    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
+    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
 
 send_native(out.data, out.len);
 pgch_buf_reset(&out);

@@ -26,6 +26,12 @@ CREATE FUNCTION pgch_decode_typed(data bytea, target anyelement) RETURNS text[]
 CREATE FUNCTION pgch_pgtype(ch_type text) RETURNS text
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 
+-- Describe PostgreSQL column mapped from ClickHouse declaration
+CREATE FUNCTION pgch_pgcolumn(ch_type text, OUT type text, OUT ndims int,
+                              OUT nullable bool, OUT truncated bool,
+                              OUT is_column bool)
+    AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
+
 CREATE FUNCTION pgch_native_settings() RETURNS text
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 

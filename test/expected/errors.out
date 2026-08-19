@@ -61,7 +61,7 @@ ERROR:  pgch: Map wants key and value
 SELECT pgch_pgtype('Int128');
 ERROR:  pgch: unsupported column type "Int128"
 SELECT pgch_pgtype('Nonsense');
-ERROR:  pgch: type parse: unknown type: Nonsense
+ERROR:  pgch: unknown type: Nonsense
 -- Reject unsupported types before reading rows, including nested types
 SELECT pgch_decode(pgch_block('Tuple()', 0, ''::bytea));
 ERROR:  decode: returned tuple is empty (column "c")
@@ -113,6 +113,11 @@ SELECT pgch_decode_as(pgch_encode('Int32', -1::int4), NULL::epos);
 ERROR:  value for domain epos violates check constraint "epos_check"
 SELECT pgch_decode_as(pgch_encode('String', '-1'::text), NULL::epos);
 ERROR:  value for domain epos violates check constraint "epos_check"
+-- Reject values wider than a FixedString, which ClickHouse also rejects
+SELECT pgch_roundtrip('FixedString(4)', 'abcde'::text);
+ERROR:  pgch: value of 5 bytes too long for FixedString(4)
+SELECT pgch_roundtrip('Array(FixedString(2))', ARRAY['ab', 'cde']::text[]);
+ERROR:  pgch: value of 3 bytes too long for FixedString(2)
 -- Reject nested arrays PostgreSQL cannot represent, [[1,2],[3]]
 SELECT pgch_decode(pgch_block('Array(Array(Int32))', 1,
                               '\x0200000000000000'::bytea ||

@@ -30,7 +30,7 @@ chc_type *type;
 chc_err err = {};
 
 if (chc_type_parse("Array(Int32)", 12, &pgch_alloc, &type, &err) != CHC_OK)
-    pgch_raise(&err, ERRCODE_INVALID_PARAMETER_VALUE, "type parse: ");
+    pgch_raise(&err, ERRCODE_INVALID_PARAMETER_VALUE, NULL, "column \"items\"");
 
 pgch_col col = {
     .name = "items",
@@ -70,10 +70,11 @@ conversion raises `ERRCODE_DATATYPE_MISMATCH`.
 
 `bytea` values map to ClickHouse `String` and `FixedString` without text
 conversion. `json` and `jsonb` map to `JSON`, `Object`, or `String`.
-`FixedString` pads short values with NUL and truncates long values. `Enum` takes
-text matching a declared name. `numeric` scales to destination `Decimal`, and
-values exceeding its width raise instead of wrapping. `inet` family must match
-`IPv4` or `IPv6`.
+`FixedString` pads short values with NUL and raises
+`ERRCODE_STRING_DATA_RIGHT_TRUNCATION` on longer ones, as ClickHouse rejects
+them too. `Enum` takes text matching a declared name. `numeric` scales to
+destination `Decimal`, and values exceeding its width raise instead of
+wrapping. `inet` family must match `IPv4` or `IPv6`.
 
 NULL requires nullable destination. NULL passed to non-nullable destination
 raises `ERRCODE_NOT_NULL_VIOLATION`, subject to array policy below.
@@ -195,7 +196,7 @@ while retaining capacity.
 const chc_block_builder *block = pgch_writer_build(writer);
 
 if (chc_block_write(&io, block, &opts, &err) != CHC_OK)
-    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
+    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
 
 pgch_writer_reset(writer);
 ```

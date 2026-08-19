@@ -45,9 +45,12 @@ extern "C" {
 #define pgch_errorf(sqlstate, fmt, ...)                                                \
     ereport(ERROR, errcode(sqlstate), errmsg(PGCH_MSG_PREFIX fmt, __VA_ARGS__))
 
-/* Raise ERROR with `what` inserted before clickhouse-c error message */
+/*
+ * Raise ERROR with `what` before clickhouse-c error message and `where`
+ * parenthesized after it, both optional
+ */
 pg_noreturn extern void
-pgch_raise(const chc_err* err, int sqlstate, const char* what);
+pgch_raise(const chc_err* err, int sqlstate, const char* what, const char* where);
 
 /* ---- allocator ------------------------------------------------------ */
 
@@ -96,6 +99,25 @@ pgch_native_oid_for(const chc_type* type, const char* what);
 /* Remove Nullable and LowCardinality wrappers, report detected nullability */
 extern const chc_type*
 pgch_unwrap(const chc_type* type, bool* out_nullable);
+
+/* ---- CH type -> PG column ------------------------------------------- */
+
+/* PostgreSQL column metadata for a ClickHouse type */
+typedef struct pgch_pg_type {
+    Oid typid;
+    int32 typmod;
+    int ndims;
+    bool nullable;
+    bool truncated;
+} pgch_pg_type;
+
+/* Map a parsed ClickHouse type to PostgreSQL column metadata */
+extern pgch_pg_type
+pgch_pg_type_for(const chc_type* type, const char* what);
+
+/* Check whether metadata can define a table column */
+extern bool
+pgch_pg_type_is_column(pgch_pg_type type);
 
 /* ---- PG type -> CH type name ---------------------------------------- */
 
@@ -197,6 +219,7 @@ pgch_buf_io(pgch_buf* b, chc_io* out_io);
 #include "datatype/timestamp.h"
 #include "lib/stringinfo.h"
 #include "port/pg_bswap.h"
+#include "utils/date.h"
 #include "utils/lsyscache.h"
 
 /* ClickHouse uses Unix epoch, PostgreSQL uses 2000-01-01 */
@@ -216,12 +239,19 @@ pgch_buf_io(pgch_buf* b, chc_io* out_io);
 
 /* ---- errors --------------------------------------------------------- */
 
+static const char*
+pgch__where(const char* what) {
+    return what ? psprintf(" (%s)", what) : "";
+}
+
 void
-pgch_raise(const chc_err* err, int sqlstate, const char* what) {
+pgch_raise(const chc_err* err, int sqlstate, const char* what, const char* where) {
     const char* m = (err && err->msg[0]) ? err->msg : "unknown error";
 
     ereport(
-        ERROR, errcode(sqlstate), errmsg(PGCH_MSG_PREFIX "%s%s", what ? what : "", m)
+        ERROR,
+        errcode(sqlstate),
+        errmsg(PGCH_MSG_PREFIX "%s%s%s", what ? what : "", m, pgch__where(where))
     );
 }
 
@@ -311,11 +341,6 @@ const Oid pgch_kind_oids[CHC_KIND_COUNT] = {
 const int64_t pgch_pow10[10] = {
     1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000,
 };
-
-static const char*
-pgch__where(const char* what) {
-    return what ? psprintf(" (%s)", what) : "";
-}
 
 static Oid
 pgch__datum_oid(const chc_type* type, const char* what) {
@@ -433,6 +458,57 @@ pgch_unwrap(const chc_type* type, bool* out_nullable) {
         *out_nullable = nullable;
     }
     return type;
+}
+
+pgch_pg_type
+pgch_pg_type_for(const chc_type* type, const char* what) {
+    pgch_pg_type out = {
+        .typmod = -1,
+        .typid  = pgch_native_oid_for(type, what),
+    };
+    const chc_type* leaf = pgch_unwrap(type, &out.nullable);
+    /* PostgreSQL keeps the element modifier on an array column, so reach the leaf */
+    while (chc_type_kind(leaf) == CHC_ARRAY) {
+        out.ndims++;
+        leaf = pgch_unwrap(chc_type_child(leaf, 0), NULL);
+    }
+
+    switch (chc_type_kind(leaf)) {
+    case CHC_DECIMAL32:
+    case CHC_DECIMAL64:
+    case CHC_DECIMAL128:
+    case CHC_DECIMAL256:
+        out.typmod = (int32)(((chc_type_decimal_precision(leaf) << 16) |
+                              chc_type_decimal_scale(leaf)) +
+                             VARHDRSZ);
+        break;
+    case CHC_DATETIME64:
+        out.typmod    = Min(chc_type_datetime64_scale(leaf), MAX_TIMESTAMP_PRECISION);
+        out.truncated = out.typmod < chc_type_datetime64_scale(leaf);
+        break;
+    case CHC_TIME64:
+        out.typmod    = Min(chc_type_datetime64_scale(leaf), MAX_TIME_PRECISION);
+        out.truncated = out.typmod < chc_type_datetime64_scale(leaf);
+        break;
+    /* Map and the multi-geometry types name a PostgreSQL array of their own */
+    case CHC_MAP:
+    case CHC_POLYGON:
+    case CHC_MULTI_LINE_STRING:
+        out.ndims++;
+        break;
+    /* MultiPolygon holds rings one layer deeper, both reaching polygon */
+    case CHC_MULTI_POLYGON:
+        out.ndims += 2;
+        break;
+    default:
+        break;
+    }
+    return out;
+}
+
+bool
+pgch_pg_type_is_column(pgch_pg_type type) {
+    return OidIsValid(type.typid) && get_typtype(type.typid) != TYPTYPE_PSEUDO;
 }
 
 /* ---- PG type -> CH type name ---------------------------------------- */

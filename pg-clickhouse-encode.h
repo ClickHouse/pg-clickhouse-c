@@ -723,14 +723,19 @@ pgch__append_bytes_fixed(pgch__node* node, const void* p, size_t n, bool isnull)
             pgch_buf_append_zero(data, width);
             return;
         }
-        size_t take = n < width ? n : width;
-
-        if (take) {
-            pgch_buf_append(data, p, take);
+        /* ClickHouse rejects over-long values instead of truncating them */
+        if (n > width) {
+            pgch_errorf(
+                ERRCODE_STRING_DATA_RIGHT_TRUNCATION,
+                "value of %zu bytes too long for FixedString(%zu)",
+                n,
+                width
+            );
         }
-        if (take < width) {
-            pgch_buf_append_zero(data, width - take);
+        if (n) {
+            pgch_buf_append(data, p, n);
         }
+        pgch_buf_append_zero(data, width - n);
         return;
     }
     if (k == CHC_ENUM8 || k == CHC_ENUM16) {
@@ -2077,7 +2082,7 @@ pgch_writer_flush(pgch_writer* w, pgch_buf* out, const chc_block_opts* opts) {
         opts = &pgch_block_opts_local;
     }
     if (chc_block_write(&io, bb, opts, &err) != CHC_OK) {
-        pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
+        pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
     }
     pgch_writer_reset(w);
 }

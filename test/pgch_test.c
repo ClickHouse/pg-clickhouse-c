@@ -32,13 +32,13 @@
 PG_MODULE_MAGIC;
 
 static chc_type*
-parse_ch_type(text* name) {
+parse_ch_type(text* name, const char* where) {
     char* s = text_to_cstring(name);
     chc_type* t;
     chc_err err = {};
 
     if (chc_type_parse(s, strlen(s), &pgch_alloc, &t, &err) != CHC_OK) {
-        pgch_raise(&err, ERRCODE_INVALID_PARAMETER_VALUE, "type parse: ");
+        pgch_raise(&err, ERRCODE_INVALID_PARAMETER_VALUE, NULL, where);
     }
     return t;
 }
@@ -54,7 +54,7 @@ bytea_from_buf(const pgch_buf* buf) {
 
 static bytea*
 encode_rows(text* chtype, Datum* vals, bool* nulls, int nrows, Oid valtype) {
-    chc_type* t    = parse_ch_type(chtype);
+    chc_type* t    = parse_ch_type(chtype, "column c");
     pgch_col col   = { .name = "c", .name_len = 1, .type = t };
     pgch_writer* w = pgch_writer_new(CurrentMemoryContext, &col, 1);
     const chc_block_builder* bb;
@@ -76,7 +76,7 @@ encode_rows(text* chtype, Datum* vals, bool* nulls, int nrows, Oid valtype) {
     bb = pgch_writer_build(w);
     pgch_buf_io(&buf, &io);
     if (chc_block_write(&io, bb, &pgch_block_opts_local, &err) != CHC_OK) {
-        pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
+        pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
     }
 
     out = bytea_from_buf(&buf);
@@ -147,7 +147,7 @@ PG_FUNCTION_INFO_V1(pgch_encode_pairs);
  */
 Datum
 pgch_encode_pairs(PG_FUNCTION_ARGS) {
-    chc_type* t    = parse_ch_type(PG_GETARG_TEXT_PP(0));
+    chc_type* t    = parse_ch_type(PG_GETARG_TEXT_PP(0), "column c");
     pgch_col col   = { .name = "c", .name_len = 1, .type = t };
     pgch_writer* w = pgch_writer_new(CurrentMemoryContext, &col, 1);
     int fields     = PG_GETARG_INT32(3);
@@ -216,7 +216,7 @@ pgch_encode_pairs(PG_FUNCTION_ARGS) {
     pgch_buf_io(&buf, &io);
     if (chc_block_write(&io, pgch_writer_build(w), &pgch_block_opts_local, &err) !=
         CHC_OK) {
-        pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
+        pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
     }
     pgch_writer_free(w);
     PG_RETURN_BYTEA_P(bytea_from_buf(&buf));
@@ -272,7 +272,7 @@ reader_from_bytea(pgch_reader* r, bytes_source* src, bytea* data) {
     }
     if (chc_in_submit(src->in, VARDATA_ANY(data), VARSIZE_ANY_EXHDR(data), &err) !=
         CHC_OK) {
-        pgch_raise(&err, ERRCODE_FDW_ERROR, "submit: ");
+        pgch_raise(&err, ERRCODE_FDW_ERROR, "submit: ", NULL);
     }
 
     bsrc.ud         = src;
@@ -441,9 +441,36 @@ PG_FUNCTION_INFO_V1(pgch_pgtype);
 /* Return PostgreSQL type for ClickHouse declaration */
 Datum
 pgch_pgtype(PG_FUNCTION_ARGS) {
-    chc_type* t = parse_ch_type(PG_GETARG_TEXT_PP(0));
+    chc_type* t = parse_ch_type(PG_GETARG_TEXT_PP(0), NULL);
 
     PG_RETURN_TEXT_P(cstring_to_text(format_type_be(pgch_native_oid(t))));
+}
+
+PG_FUNCTION_INFO_V1(pgch_pgcolumn);
+
+/* Return PostgreSQL column descriptor for ClickHouse declaration */
+Datum
+pgch_pgcolumn(PG_FUNCTION_ARGS) {
+    chc_type* t       = parse_ch_type(PG_GETARG_TEXT_PP(0), NULL);
+    pgch_pg_type type = pgch_pg_type_for(t, NULL);
+    TupleDesc desc    = NULL;
+    Datum values[5]   = {};
+    bool nulls[5]     = {};
+
+    if (get_call_result_type(fcinfo, NULL, &desc) != TYPEFUNC_COMPOSITE) {
+        elog(ERROR, "expected composite result type");
+    }
+    if (OidIsValid(type.typid)) {
+        values[0] =
+            CStringGetTextDatum(format_type_with_typemod(type.typid, type.typmod));
+    } else {
+        nulls[0] = true;
+    }
+    values[1] = Int32GetDatum(type.ndims);
+    values[2] = BoolGetDatum(type.nullable);
+    values[3] = BoolGetDatum(type.truncated);
+    values[4] = BoolGetDatum(pgch_pg_type_is_column(type));
+    PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(desc, values, nulls)));
 }
 
 PG_FUNCTION_INFO_V1(pgch_native_settings);
@@ -515,7 +542,12 @@ writer_for_tupdesc(TupleDesc desc, const pgch_type_opts* opts, size_t* out_ncols
         }
         chtype = pgch_ch_type_for(a->atttypid, a->atttypmod, a->attnotnull, opts);
         if (chc_type_parse(chtype, strlen(chtype), &pgch_alloc, &t, &err) != CHC_OK) {
-            pgch_raise(&err, ERRCODE_INVALID_PARAMETER_VALUE, "type parse: ");
+            pgch_raise(
+                &err,
+                ERRCODE_INVALID_PARAMETER_VALUE,
+                NULL,
+                psprintf("column \"%s\"", NameStr(a->attname))
+            );
         }
         cols[n].name     = NameStr(a->attname);
         cols[n].name_len = strlen(NameStr(a->attname));

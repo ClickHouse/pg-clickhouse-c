@@ -27,7 +27,7 @@ Encode PG values into one Native block:
 chc_type *t;
 chc_err err = {};
 if (chc_type_parse("Array(Int32)", 12, &pgch_alloc, &t, &err) != CHC_OK)
-    pgch_raise(&err, ERRCODE_INVALID_PARAMETER_VALUE, "type parse: ");
+    pgch_raise(&err, ERRCODE_INVALID_PARAMETER_VALUE, NULL, "column \"tags\"");
 
 pgch_col col   = { .name = "tags", .name_len = 4, .type = t };
 pgch_writer *w = pgch_writer_new(CurrentMemoryContext, &col, 1);
@@ -42,7 +42,7 @@ pgch_buf_io(&out, &io);
 
 chc_block_opts opts = {};   /* Use local framing for chDB and clickhouse-local */
 if (chc_block_write(&io, pgch_writer_build(w), &opts, &err) != CHC_OK)
-    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
+    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
 
 pgch_writer_reset(w);       /* out now contains serialized block */
 ```
@@ -92,6 +92,9 @@ values[i] = pgch_convert(cs, r.values[i]);
 A complete working consumer, wired to nothing but memory, lives in
 [test/pgch_test.c](test/pgch_test.c).
 
+Use `pgch_pg_type_for` to build PostgreSQL column metadata from a type parsed
+with `chc_type_parse`.
+
 ## Wiring to chDB
 
 chDB streams Native bytes in both directions, so the seams are
@@ -114,7 +117,7 @@ pgch_buf buf = {};
 chc_io io;
 pgch_buf_io(&buf, &io);
 if (chc_block_write(&io, pgch_writer_build(w), &opts, &err) != CHC_OK)
-    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ");
+    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
 if (chdb_stream_append(stream, (char *) buf.data, buf.len) != CHDBSuccess)
     ereport(ERROR, ...);
 pgch_writer_reset(w);

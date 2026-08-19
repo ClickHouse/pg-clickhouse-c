@@ -80,6 +80,10 @@ CREATE DOMAIN epos AS int4 CHECK (VALUE > 0);
 SELECT pgch_decode_as(pgch_encode('Int32', -1::int4), NULL::epos);
 SELECT pgch_decode_as(pgch_encode('String', '-1'::text), NULL::epos);
 
+-- Reject values wider than a FixedString, which ClickHouse also rejects
+SELECT pgch_roundtrip('FixedString(4)', 'abcde'::text);
+SELECT pgch_roundtrip('Array(FixedString(2))', ARRAY['ab', 'cde']::text[]);
+
 -- Reject nested arrays PostgreSQL cannot represent, [[1,2],[3]]
 SELECT pgch_decode(pgch_block('Array(Array(Int32))', 1,
                               '\x0200000000000000'::bytea ||
