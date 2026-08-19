@@ -92,6 +92,14 @@ CREATE DOMAIN dints AS int4[];
 SELECT pgch_decode_as(pgch_encode('Array(Int32)', ARRAY[1, 2]::int4[]), NULL::dints),
        pgch_decode_as(pgch_encode('Array(Int64)', ARRAY[1, 2]::int8[]), NULL::dints);
 
+-- Apply target domain constraints after conversion
+CREATE DOMAIN dpos AS int4 CHECK (VALUE > 0);
+CREATE DOMAIN dposints AS int4[] CHECK (VALUE[1] > 0);
+SELECT pgch_decode_as(pgch_encode('Int32', 2::int4), NULL::dpos),
+       pgch_decode_as(pgch_encode('Int64', 3::int8), NULL::dpos),
+       pgch_decode_as(pgch_encode('String', '4'::text), NULL::dpos),
+       pgch_decode_as(pgch_encode('Array(Int32)', ARRAY[5, 6]::int4[]), NULL::dposints);
+
 -- Enforce array type modifier on each element, as ArrayCoerceExpr does
 CREATE DOMAIN dnums AS numeric(4, 1)[];
 CREATE DOMAIN dchars AS bpchar(3)[];

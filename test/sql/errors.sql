@@ -67,6 +67,19 @@ SELECT pgch_decode(pgch_block('UInt64', 1, '\xffffffffffffffff'::bytea));
 -- Reject DateTime64 outside timestamp range
 SELECT pgch_decode(pgch_block('DateTime64(0)', 1, '\x0000000000000080'::bytea));
 
+-- Reject Date32 values outside PostgreSQL date range
+SELECT pgch_decode(pgch_block('Date32', 1, '\x60dad9ff'::bytea));
+SELECT pgch_decode(pgch_block('Date32', 1, '\x00000080'::bytea));
+
+-- Reject Time and Time64 values greater than one day
+SELECT pgch_decode(pgch_block('Time', 1, '\xb0df3600'::bytea));
+SELECT pgch_decode(pgch_block('Time64(0)', 1, '\xb0df360000000000'::bytea));
+
+-- Reject values that violate target domain constraints
+CREATE DOMAIN epos AS int4 CHECK (VALUE > 0);
+SELECT pgch_decode_as(pgch_encode('Int32', -1::int4), NULL::epos);
+SELECT pgch_decode_as(pgch_encode('String', '-1'::text), NULL::epos);
+
 -- Reject nested arrays PostgreSQL cannot represent, [[1,2],[3]]
 SELECT pgch_decode(pgch_block('Array(Array(Int32))', 1,
                               '\x0200000000000000'::bytea ||

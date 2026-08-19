@@ -212,21 +212,30 @@ pgch__rd_bool(const bool* p, uint64_t row) {
     return (bool)p[row];
 }
 
-#define PGCH__RD_FIXED(suffix, T)                                                      \
+/*
+ * Generate fixed-width scalar readers. For example, i16 invocation below
+ * defines pgch__rd_i16(), which reads two bytes at row offset, converts them
+ * from little-endian to host order, and returns int16_t
+ */
+#define PGCH__RD_FIXED(suffix, T, U, LE)                                               \
     static inline T pgch__rd_##suffix(const uint8_t* p, uint64_t row) {                \
         T v;                                                                           \
-        memcpy(&v, p + row * sizeof(T), sizeof(T));                                    \
+        U u;                                                                           \
+                                                                                       \
+        memcpy(&u, p + row * sizeof(T), sizeof u);                                     \
+        u = LE(u);                                                                     \
+        memcpy(&v, &u, sizeof v);                                                      \
         return v;                                                                      \
     }
 
-PGCH__RD_FIXED(i16, int16_t)
-PGCH__RD_FIXED(u16, uint16_t)
-PGCH__RD_FIXED(i32, int32_t)
-PGCH__RD_FIXED(u32, uint32_t)
-PGCH__RD_FIXED(i64, int64_t)
-PGCH__RD_FIXED(f32, float)
-PGCH__RD_FIXED(f64, double)
-PGCH__RD_FIXED(u64, uint64_t)
+PGCH__RD_FIXED(i16, int16_t, uint16_t, PGCH__LE16)
+PGCH__RD_FIXED(u16, uint16_t, uint16_t, PGCH__LE16)
+PGCH__RD_FIXED(i32, int32_t, uint32_t, PGCH__LE32)
+PGCH__RD_FIXED(u32, uint32_t, uint32_t, PGCH__LE32)
+PGCH__RD_FIXED(i64, int64_t, uint64_t, PGCH__LE64)
+PGCH__RD_FIXED(f32, float, uint32_t, PGCH__LE32)
+PGCH__RD_FIXED(f64, double, uint64_t, PGCH__LE64)
+PGCH__RD_FIXED(u64, uint64_t, uint64_t, PGCH__LE64)
 
 static inline void
 pgch__slice_str(
@@ -263,7 +272,9 @@ pgch__format_decimal(
     if (width == 0 || width > 32 || width % 4 != 0 || scale >= sizeof(buf)) {
         return -1;
     }
-    memcpy(mag, bytes, width);
+    for (size_t i = 0; i < nwords; i++) {
+        mag[i] = pgch__rd_u32(bytes, i);
+    }
     if (mag[nwords - 1] & 0x80000000u) {
         neg = true;
         for (size_t i = 0; i < nwords; i++) {
@@ -380,8 +391,8 @@ pgch__read_uuid(const chc_column* col, uint64_t row) {
 
     memcpy(&a, p, 8);
     memcpy(&b, p + 8, 8);
-    a = pg_hton64(a);
-    b = pg_hton64(b);
+    a = pg_bswap64(a);
+    b = pg_bswap64(b);
     memcpy(u->data, &a, 8);
     memcpy(u->data + 8, &b, 8);
     return UUIDPGetDatum(u);
@@ -406,8 +417,8 @@ static int
 pgch__read_axes(
     const chc_column* col,
     uint64_t row,
-    const double** xs,
-    const double** ys
+    const uint8_t** xs,
+    const uint8_t** ys
 ) {
     const uint64_t* offs  = chc_column_array_offsets(col);
     uint64_t start        = row == 0 ? 0 : offs[row - 1];
@@ -418,18 +429,18 @@ pgch__read_axes(
     if (npts > (INT_MAX - offsetof(POLYGON, p)) / sizeof(Point)) {
         pgch_error(ERRCODE_PROGRAM_LIMIT_EXCEEDED, "too many points requested");
     }
-    *xs = (const double*)chc_column_fixed_data(chc_column_tuple_child(pts, 0), NULL) +
-          start;
-    *ys = (const double*)chc_column_fixed_data(chc_column_tuple_child(pts, 1), NULL) +
-          start;
+    *xs = (const uint8_t*)chc_column_fixed_data(chc_column_tuple_child(pts, 0), NULL) +
+          start * sizeof(double);
+    *ys = (const uint8_t*)chc_column_fixed_data(chc_column_tuple_child(pts, 1), NULL) +
+          start * sizeof(double);
     return (int)npts;
 }
 
 static void
-pgch__fill_points(Point* out, const double* xs, const double* ys, int npts) {
+pgch__fill_points(Point* out, const uint8_t* xs, const uint8_t* ys, int npts) {
     for (int i = 0; i < npts; i++) {
-        out[i].x = xs[i];
-        out[i].y = ys[i];
+        out[i].x = pgch__rd_f64(xs, i);
+        out[i].y = pgch__rd_f64(ys, i);
     }
 }
 
@@ -462,7 +473,7 @@ pgch__bound_box(POLYGON* poly) {
 /* A Ring is closed by definition, as a PostgreSQL polygon is */
 static Datum
 pgch__read_polygon(const chc_column* col, uint64_t row, bool* is_null) {
-    const double *xs, *ys;
+    const uint8_t *xs, *ys;
     int npts = pgch__read_axes(col, row, &xs, &ys);
     size_t size;
     POLYGON* poly;
@@ -484,10 +495,11 @@ pgch__read_polygon(const chc_column* col, uint64_t row, bool* is_null) {
 /* A LineString repeating its first point is the closed path that wrote it */
 static Datum
 pgch__read_path(const chc_column* col, uint64_t row, bool* is_null) {
-    const double *xs, *ys;
-    int npts = pgch__read_axes(col, row, &xs, &ys);
-    bool closed =
-        npts > 1 && float8_eq(xs[0], xs[npts - 1]) && float8_eq(ys[0], ys[npts - 1]);
+    const uint8_t *xs, *ys;
+    int npts    = pgch__read_axes(col, row, &xs, &ys);
+    bool closed = npts > 1 &&
+                  float8_eq(pgch__rd_f64(xs, 0), pgch__rd_f64(xs, npts - 1)) &&
+                  float8_eq(pgch__rd_f64(ys, 0), pgch__rd_f64(ys, npts - 1));
     size_t size;
     PATH* path;
 
@@ -510,10 +522,9 @@ pgch__read_path(const chc_column* col, uint64_t row, bool* is_null) {
 static Datum
 pgch__read_ipv4(const chc_column* col, uint64_t row) {
     inet* res = (inet*)palloc0(sizeof(inet));
-    uint32_t addr;
+    uint32_t addr =
+        pg_hton32(pgch__rd_u32((const uint8_t*)chc_column_fixed_data(col, NULL), row));
 
-    memcpy(&addr, (const uint8_t*)chc_column_fixed_data(col, NULL) + row * 4, 4);
-    addr           = pg_hton32(addr);
     ip_family(res) = PGSQL_AF_INET;
     ip_bits(res)   = 32;
     memcpy(ip_addr(res), &addr, 4);
@@ -544,10 +555,7 @@ pgch__read_enum(const chc_column* col, const chc_type* type, uint64_t row) {
     if (es == 1) {
         v = (int8_t)p[row];
     } else {
-        int16_t t;
-
-        memcpy(&t, p + row * 2, 2);
-        v = t;
+        v = pgch__rd_i16(p, row);
     }
 
     size_t n = chc_type_enum_count(type);
@@ -930,26 +938,28 @@ pgch_read_value(
         *is_null = true;
         return (Datum)0;
     case CHC_UINT8:
-        return (Datum)pgch__rd_u8(
-            (const uint8_t*)chc_column_fixed_data(col, NULL), row
+        return Int16GetDatum(
+            pgch__rd_u8((const uint8_t*)chc_column_fixed_data(col, NULL), row)
         );
     case CHC_BOOL:
-        return (Datum)pgch__rd_bool((const bool*)chc_column_fixed_data(col, NULL), row);
+        return BoolGetDatum(
+            pgch__rd_bool((const bool*)chc_column_fixed_data(col, NULL), row)
+        );
     case CHC_INT8:
-        return (Datum)pgch__rd_i8(
-            (const uint8_t*)chc_column_fixed_data(col, NULL), row
+        return Int16GetDatum(
+            pgch__rd_i8((const uint8_t*)chc_column_fixed_data(col, NULL), row)
         );
     case CHC_INT16:
-        return (Datum)pgch__rd_i16(
-            (const uint8_t*)chc_column_fixed_data(col, NULL), row
+        return Int16GetDatum(
+            pgch__rd_i16((const uint8_t*)chc_column_fixed_data(col, NULL), row)
         );
     case CHC_UINT16:
-        return (Datum)pgch__rd_u16(
-            (const uint8_t*)chc_column_fixed_data(col, NULL), row
+        return Int32GetDatum(
+            pgch__rd_u16((const uint8_t*)chc_column_fixed_data(col, NULL), row)
         );
     case CHC_INT32:
-        return (Datum)pgch__rd_i32(
-            (const uint8_t*)chc_column_fixed_data(col, NULL), row
+        return Int32GetDatum(
+            pgch__rd_i32((const uint8_t*)chc_column_fixed_data(col, NULL), row)
         );
     case CHC_UINT32:
         return Int64GetDatum(
@@ -1011,12 +1021,18 @@ pgch_read_value(
                 pgch__rd_u16((const uint8_t*)chc_column_fixed_data(col, NULL), row) -
             PGCH__DATE_OFFSET
         );
-    case CHC_DATE32:
-        return DateADTGetDatum(
-            (DateADT)
-                pgch__rd_i32((const uint8_t*)chc_column_fixed_data(col, NULL), row) -
-            PGCH__DATE_OFFSET
-        );
+    case CHC_DATE32: {
+        int32 days =
+            pgch__rd_i32((const uint8_t*)chc_column_fixed_data(col, NULL), row);
+        DateADT d;
+
+        if (pg_sub_s32_overflow(days, PGCH__DATE_OFFSET, &d) || !IS_VALID_DATE(d)) {
+            pgch_error(
+                ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, "Date32 value out of range"
+            );
+        }
+        return DateADTGetDatum(d);
+    }
     case CHC_DATETIME: {
         uint32_t secs =
             pgch__rd_u32((const uint8_t*)chc_column_fixed_data(col, NULL), row);
@@ -1049,8 +1065,13 @@ pgch_read_value(
     }
     case CHC_TIME: {
         const uint8_t* p = (const uint8_t*)chc_column_fixed_data(col, NULL);
+        TimeADT t        = (TimeADT)pgch__rd_i32(p, row) * USECS_PER_SEC;
 
-        return TimeADTGetDatum((TimeADT)pgch__rd_i32(p, row) * USECS_PER_SEC);
+        /* ClickHouse Time allows up to 999 hours, PostgreSQL time allows one day */
+        if (t < 0 || t > USECS_PER_DAY) {
+            pgch_error(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, "Time value out of range");
+        }
+        return TimeADTGetDatum(t);
     }
     case CHC_TIME64: {
         int64 raw = pgch__rd_i64((const uint8_t*)chc_column_fixed_data(col, NULL), row);
@@ -1065,7 +1086,8 @@ pgch_read_value(
         TimeADT t;
 
         if (pg_mul_s64_overflow(raw / power, USECS_PER_SEC, &t) ||
-            pg_add_s64_overflow(t, (raw % power) * USECS_PER_SEC / power, &t)) {
+            pg_add_s64_overflow(t, (raw % power) * USECS_PER_SEC / power, &t) ||
+            t < 0 || t > USECS_PER_DAY) {
             pgch_error(
                 ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, "Time64 value out of range"
             );
@@ -1531,6 +1553,9 @@ struct pgch_convert_state {
     TupleDesc outdesc;
     pgch_convert_state** field_states;
 
+    void* domain_extra;        /* Cache for target domain checks */
+    pgch_convert_state* inner; /* Converts values to domain's base type */
+
     Oid item_type;
     pgch_convert_state* elem_state;
     int16 typlen;
@@ -1888,6 +1913,21 @@ pgch__convert_time(pgch_convert_state* state pg_attribute_unused(), Datum val) {
     return TimeADTGetDatum(t < 0 ? t + USECS_PER_DAY : t);
 }
 
+/*
+ * PostgreSQL cast lookup unwraps domains to their base types. Check domain
+ * constraints here because no cast function will do so
+ */
+static Datum
+pgch__convert_domain(pgch_convert_state* state, Datum val) {
+    if (state->inner) {
+        val = state->inner->func(state->inner, val);
+    }
+    domain_check(
+        val, false, state->outtype, &state->domain_extra, GetMemoryChunkContext(state)
+    );
+    return val;
+}
+
 Datum
 pgch_convert(void* state, Datum val) {
     return state ? ((pgch_convert_state*)state)->func(state, val) : val;
@@ -1932,11 +1972,24 @@ pgch__convert_init(
     Oid outtype,
     int32 outtypmod
 ) {
-    if (intype == TEXTOID && outtype == BYTEAOID) {
-        return NULL;
-    }
     /* ClickHouse Nothing and Void values are always NULL */
     if (!OidIsValid(intype)) {
+        return NULL;
+    }
+    if (OidIsValid(outtype)) {
+        int32 basetypmod = outtypmod;
+        Oid base         = getBaseTypeAndTypmod(outtype, &basetypmod);
+
+        if (base != outtype) {
+            pgch_convert_state* dom = palloc0(sizeof(pgch_convert_state));
+
+            dom->outtype = outtype;
+            dom->func    = pgch__convert_domain;
+            dom->inner   = pgch__convert_init(ct, val, intype, base, basetypmod);
+            return dom;
+        }
+    }
+    if (intype == TEXTOID && outtype == BYTEAOID) {
         return NULL;
     }
 

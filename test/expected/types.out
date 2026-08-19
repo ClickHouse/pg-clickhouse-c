@@ -208,6 +208,18 @@ SELECT pgch_decode_as(pgch_encode('Array(Int32)', ARRAY[1, 2]::int4[]), NULL::di
  {"{1,2}"}      | {"{1,2}"}
 (1 row)
 
+-- Apply target domain constraints after conversion
+CREATE DOMAIN dpos AS int4 CHECK (VALUE > 0);
+CREATE DOMAIN dposints AS int4[] CHECK (VALUE[1] > 0);
+SELECT pgch_decode_as(pgch_encode('Int32', 2::int4), NULL::dpos),
+       pgch_decode_as(pgch_encode('Int64', 3::int8), NULL::dpos),
+       pgch_decode_as(pgch_encode('String', '4'::text), NULL::dpos),
+       pgch_decode_as(pgch_encode('Array(Int32)', ARRAY[5, 6]::int4[]), NULL::dposints);
+ pgch_decode_as | pgch_decode_as | pgch_decode_as | pgch_decode_as 
+----------------+----------------+----------------+----------------
+ {2}            | {3}            | {4}            | {"{5,6}"}
+(1 row)
+
 -- Enforce array type modifier on each element, as ArrayCoerceExpr does
 CREATE DOMAIN dnums AS numeric(4, 1)[];
 CREATE DOMAIN dchars AS bpchar(3)[];

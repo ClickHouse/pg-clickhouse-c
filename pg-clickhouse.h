@@ -196,10 +196,23 @@ pgch_buf_io(pgch_buf* b, chc_io* out_io);
 #include "catalog/pg_type_d.h"
 #include "datatype/timestamp.h"
 #include "lib/stringinfo.h"
+#include "port/pg_bswap.h"
 #include "utils/lsyscache.h"
 
 /* ClickHouse uses Unix epoch, PostgreSQL uses 2000-01-01 */
 #define PGCH__DATE_OFFSET (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE)
+
+/* Convert fixed-width values between host and ClickHouse byte order */
+#define PGCH__LE8(v) (v)
+#ifdef WORDS_BIGENDIAN
+#define PGCH__LE16(v) pg_bswap16(v)
+#define PGCH__LE32(v) pg_bswap32(v)
+#define PGCH__LE64(v) pg_bswap64(v)
+#else
+#define PGCH__LE16(v) (v)
+#define PGCH__LE32(v) (v)
+#define PGCH__LE64(v) (v)
+#endif
 
 /* ---- errors --------------------------------------------------------- */
 
@@ -216,7 +229,7 @@ pgch_raise(const chc_err* err, int sqlstate, const char* what) {
 
 static void*
 pgch__alloc(void* ud pg_attribute_unused(), size_t n) {
-    return MemoryContextAllocExtended(CurrentMemoryContext, n, MCXT_ALLOC_HUGE);
+    return MemoryContextAllocHuge(CurrentMemoryContext, n);
 }
 
 static void*
@@ -227,9 +240,7 @@ pgch__realloc(
     size_t new_bytes
 ) {
     if (!p) {
-        return MemoryContextAllocExtended(
-            CurrentMemoryContext, new_bytes, MCXT_ALLOC_HUGE
-        );
+        return MemoryContextAllocHuge(CurrentMemoryContext, new_bytes);
     }
     return repalloc_huge(p, new_bytes);
 }
@@ -621,11 +632,9 @@ pgch_buf_reserve(pgch_buf* b, size_t need) {
     while (ncap < need) {
         ncap = ncap > SIZE_MAX / 2 ? need : ncap * 2;
     }
-    b->data =
-        b->data
-            ? repalloc_huge(b->data, ncap)
-            : MemoryContextAllocExtended(CurrentMemoryContext, ncap, MCXT_ALLOC_HUGE);
-    b->cap = ncap;
+    b->data = b->data ? repalloc_huge(b->data, ncap)
+                      : MemoryContextAllocHuge(CurrentMemoryContext, ncap);
+    b->cap  = ncap;
 }
 
 void
@@ -650,9 +659,13 @@ pgch_buf_reset(pgch_buf* b) {
 }
 
 static int
-pgch__buf_write(void* ud, const void* buf, size_t len, chc_err* err) {
+pgch__buf_write(
+    void* ud,
+    const void* buf,
+    size_t len,
+    chc_err* err pg_attribute_unused()
+) {
     pgch_buf_append((pgch_buf*)ud, buf, len);
-    (void)err;
     return CHC_OK;
 }
 

@@ -358,11 +358,15 @@ typedef struct {
 } chunk_feed;
 
 static bool
-feed_next_chunk(void* ud, const void** p, size_t* n, char** error) {
+feed_next_chunk(
+    void* ud,
+    const void** p,
+    size_t* n,
+    char** error pg_attribute_unused()
+) {
     chunk_feed* f = (chunk_feed*)ud;
     size_t take   = Min(f->chunk, f->len - f->pos);
 
-    (void)error;
     *p = f->data + f->pos;
     *n = take;
     f->pos += take;

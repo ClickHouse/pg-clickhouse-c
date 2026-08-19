@@ -661,30 +661,41 @@ pgch__decimal_to_bytes(const char* s, uint32_t scale, size_t width, uint8_t* out
         }
     }
 
-    memcpy(out, mag, width);
+    for (size_t b = 0; b < nwords; b++) {
+        uint32_t word = PGCH__LE32(mag[b]);
+
+        memcpy(out + b * sizeof word, &word, sizeof word);
+    }
 }
 
 /* ---- little-endian fixed-width writes, one per width ---------------- */
 
-/* Kinds sharing a width share a writer, callers picking it by column kind */
-#define PGCH__APPEND_SCALAR(suffix, T, ARG)                                            \
+/*
+ * Generate fixed-width scalar writers. For example, i16 invocation below
+ * defines pgch__append_i16(), which narrows int64_t argument to int16_t, writes
+ * zero for NULL, converts bits to little-endian order, and appends two bytes
+ */
+#define PGCH__APPEND_SCALAR(suffix, T, ARG, U, LE)                                     \
     static void pgch__append_##suffix(                                                 \
         pgch_writer* w, size_t col, ARG val, bool isnull                               \
     ) {                                                                                \
         MemoryContext old = MemoryContextSwitchTo(w->cxt);                             \
         pgch__node* node  = pgch__resolve_leaf(w, col, isnull);                        \
         T v               = isnull ? 0 : (T)val;                                       \
+        U u;                                                                           \
                                                                                        \
-        pgch_buf_append(pgch__fixed_data(node), &v, sizeof v);                         \
+        memcpy(&u, &v, sizeof u);                                                      \
+        u = LE(u);                                                                     \
+        pgch_buf_append(pgch__fixed_data(node), &u, sizeof u);                         \
         MemoryContextSwitchTo(old);                                                    \
     }
 
-PGCH__APPEND_SCALAR(i8, int8_t, int64_t)
-PGCH__APPEND_SCALAR(i16, int16_t, int64_t)
-PGCH__APPEND_SCALAR(i32, int32_t, int64_t)
-PGCH__APPEND_SCALAR(i64, int64_t, int64_t)
-PGCH__APPEND_SCALAR(f32, float, double)
-PGCH__APPEND_SCALAR(f64, double, double)
+PGCH__APPEND_SCALAR(i8, int8_t, int64_t, uint8_t, PGCH__LE8)
+PGCH__APPEND_SCALAR(i16, int16_t, int64_t, uint16_t, PGCH__LE16)
+PGCH__APPEND_SCALAR(i32, int32_t, int64_t, uint32_t, PGCH__LE32)
+PGCH__APPEND_SCALAR(i64, int64_t, int64_t, uint64_t, PGCH__LE64)
+PGCH__APPEND_SCALAR(f32, float, double, uint32_t, PGCH__LE32)
+PGCH__APPEND_SCALAR(f64, double, double, uint64_t, PGCH__LE64)
 
 /* Fixed-width leaf takes n bytes as given, NULL rows taking zeros */
 static void
@@ -756,7 +767,7 @@ pgch__append_bytes_fixed(pgch__node* node, const void* p, size_t n, bool isnull)
 
             pgch_buf_append(data, &v, 1);
         } else {
-            int16_t v = (int16_t)val;
+            uint16_t v = PGCH__LE16((uint16_t)(int16_t)val);
 
             pgch_buf_append(data, &v, 2);
         }
@@ -1012,7 +1023,11 @@ pgch__append_axes(
                 ERRCODE_DATATYPE_MISMATCH, "coordinates into %s", pgch__col_desc(w, col)
             );
         }
-        pgch_buf_append(&child->fixed.data, vals++, 8);
+        uint64_t bits;
+
+        memcpy(&bits, vals++, sizeof bits);
+        bits = PGCH__LE64(bits);
+        pgch_buf_append(&child->fixed.data, &bits, sizeof bits);
     }
     return vals;
 }
@@ -1509,14 +1524,14 @@ pgch__append_one(
             goto type_mismatch;
         }
         if (!isnull) {
-            /* ClickHouse stores both halves little-endian */
+            /* PostgreSQL and ClickHouse use opposite byte order for each UUID half */
             const uint8_t* bytes = DatumGetUUIDP(val)->data;
             uint64_t hi, lo;
 
             memcpy(&hi, bytes, 8);
             memcpy(&lo, bytes + 8, 8);
-            hi = pg_ntoh64(hi);
-            lo = pg_ntoh64(lo);
+            hi = pg_bswap64(hi);
+            lo = pg_bswap64(lo);
             memcpy(wire, &hi, 8);
             memcpy(wire + 8, &lo, 8);
         }
@@ -1855,8 +1870,7 @@ pgch__build_lc_dict(
         pgch_lcd_iterator it;
         pgch_lcd_entry* e;
 
-        dict_data =
-            MemoryContextAllocExtended(CurrentMemoryContext, data_len, MCXT_ALLOC_HUGE);
+        dict_data = MemoryContextAllocHuge(CurrentMemoryContext, data_len);
         pgch_lcd_start_iterate(ht, &it);
         while ((e = pgch_lcd_iterate(ht, &it)) != NULL) {
             uint64_t s = e->idx == 0 ? 0 : dict_offs[e->idx - 1];

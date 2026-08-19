@@ -97,6 +97,22 @@ ERROR:  pgch: value 18446744073709551615 is out of range of bigint
 -- Reject DateTime64 outside timestamp range
 SELECT pgch_decode(pgch_block('DateTime64(0)', 1, '\x0000000000000080'::bytea));
 ERROR:  pgch: DateTime64 value out of range
+-- Reject Date32 values outside PostgreSQL date range
+SELECT pgch_decode(pgch_block('Date32', 1, '\x60dad9ff'::bytea));
+ERROR:  pgch: Date32 value out of range
+SELECT pgch_decode(pgch_block('Date32', 1, '\x00000080'::bytea));
+ERROR:  pgch: Date32 value out of range
+-- Reject Time and Time64 values greater than one day
+SELECT pgch_decode(pgch_block('Time', 1, '\xb0df3600'::bytea));
+ERROR:  pgch: Time value out of range
+SELECT pgch_decode(pgch_block('Time64(0)', 1, '\xb0df360000000000'::bytea));
+ERROR:  pgch: Time64 value out of range
+-- Reject values that violate target domain constraints
+CREATE DOMAIN epos AS int4 CHECK (VALUE > 0);
+SELECT pgch_decode_as(pgch_encode('Int32', -1::int4), NULL::epos);
+ERROR:  value for domain epos violates check constraint "epos_check"
+SELECT pgch_decode_as(pgch_encode('String', '-1'::text), NULL::epos);
+ERROR:  value for domain epos violates check constraint "epos_check"
 -- Reject nested arrays PostgreSQL cannot represent, [[1,2],[3]]
 SELECT pgch_decode(pgch_block('Array(Array(Int32))', 1,
                               '\x0200000000000000'::bytea ||

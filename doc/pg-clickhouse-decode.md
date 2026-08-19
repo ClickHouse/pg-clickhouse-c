@@ -213,6 +213,11 @@ precision then apply as PostgreSQL applies them on assignment: `char(n)` pads,
 `timestamp(n)` truncates. A domain supplies its own typmod. An array column's
 typmod belongs to its elements, so pass it unchanged.
 
+When the target is a domain, conversion first produces the domain's base type,
+then checks the domain constraints. The same applies to elements in an array of
+domains. NULL rows are not converted, so callers must enforce a domain's NOT
+NULL constraint
+
 Prefer `pgch_reader_convert_init` when reader and target tuple descriptor are
 available. It prepares conversion from schema before reading rows, including
 columns whose first or every value is NULL:
