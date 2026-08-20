@@ -2,7 +2,7 @@ EXTENSION    = pgch_test
 DATA         = pgch_test--1.0.sql
 MODULE_big   = pgch_test
 OBJS         = pgch_test.o
-REGRESS      = roundtrip types pgtype errors
+REGRESS      = roundtrip types pgtype errors type_table
 REGRESS_OPTS = --inputdir=. --load-extension=$(EXTENSION)
 PG_CONFIG   ?= pg_config
 

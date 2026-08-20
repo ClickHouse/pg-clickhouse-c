@@ -193,25 +193,54 @@ Decode and encode each depend only on the core header; take one or both.
 
 ## Type mapping
 
-| ClickHouse | PostgreSQL |
-|---|---|
-| `Int8`, `Int16`, `UInt8` | `smallint` |
-| `Int32`, `UInt16` | `integer` |
-| `Int64`, `UInt32`, `UInt64` | `bigint` |
-| `Bool` | `boolean` |
-| `Float32` / `Float64` | `real` / `double precision` |
-| `Decimal32/64/128/256` | `numeric` |
-| `String`, `FixedString(N)`, `Enum8`, `Enum16` | `text` |
-| `JSON`, `Object` | `jsonb` (or `json`, see below) |
-| `Date`, `Date32` | `date` |
-| `DateTime`, `DateTime64(P)` | `timestamptz` |
-| `Time`, `Time64(P)` | `time` |
-| `UUID` | `uuid` |
-| `IPv4`, `IPv6` | `inet` |
-| `Nullable(T)` | `T`, nullable |
-| `LowCardinality(T)` | `T` |
-| `Array(T)` | `T[]`, one PG dimension per `Array` layer |
-| `Tuple(...)` | `record` |
+`pgch_pg_type_for` maps a parsed ClickHouse type onto a PostgreSQL column. Every
+name the parser resolves reaches this table or the omitted list `test/sql/type_table.sql`.
+
+<!-- TYPE-TABLE-BEGIN -->
+|    ClickHouse     |         PostgreSQL          |              Notes               |
+|-------------------|-----------------------------|----------------------------------|
+| Array(T)          | T[]                         | One PG array type per depth      |
+| Bool              | boolean                     |                                  |
+| Date              | date                        |                                  |
+| Date32            | date                        |                                  |
+| DateTime          | timestamp with time zone    |                                  |
+| DateTime64(P)     | timestamp(P) with time zone | P over 6 caps at 6               |
+| Decimal(P,S)      | numeric(P,S)                |                                  |
+| Decimal32(S)      | numeric(9,S)                |                                  |
+| Decimal64(S)      | numeric(18,S)               |                                  |
+| Decimal128(S)     | numeric(38,S)               |                                  |
+| Decimal256(S)     | numeric(76,S)               |                                  |
+| Enum8             | text                        |                                  |
+| Enum16            | text                        |                                  |
+| FixedString(N)    | text                        | N counts CH bytes, PG characters |
+| Float32           | real                        |                                  |
+| Float64           | double precision            |                                  |
+| IPv4              | inet                        |                                  |
+| IPv6              | inet                        |                                  |
+| Int8              | smallint                    |                                  |
+| Int16             | smallint                    |                                  |
+| Int32             | integer                     |                                  |
+| Int64             | bigint                      |                                  |
+| JSON              | jsonb                       | Also reads into json             |
+| LineString        | path                        |                                  |
+| LowCardinality(T) | T                           |                                  |
+| Map(K,V)          | record[]                    | One record per pair              |
+| MultiLineString   | path[]                      |                                  |
+| MultiPolygon      | polygon[][]                 |                                  |
+| Nullable(T)       | T                           | Sets nullable on the column      |
+| Point             | point                       |                                  |
+| Polygon           | polygon[]                   |                                  |
+| Ring              | polygon                     |                                  |
+| String            | text                        | Also reads into bytea            |
+| Time              | time without time zone      |                                  |
+| Time64(P)         | time(P) without time zone   | P over 6 caps at 6               |
+| Tuple(...)        | record                      | Pseudo type, no column takes it  |
+| UInt8             | smallint                    |                                  |
+| UInt16            | integer                     |                                  |
+| UInt32            | bigint                      |                                  |
+| UInt64            | bigint                      | Errors on values > BIGINT max    |
+| UUID              | uuid                        |                                  |
+<!-- TYPE-TABLE-END -->
 
 ## Testing
 

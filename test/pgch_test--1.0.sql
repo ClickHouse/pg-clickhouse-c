@@ -32,6 +32,20 @@ CREATE FUNCTION pgch_pgcolumn(ch_type text, OUT type text, OUT ndims int,
                               OUT is_column bool)
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 
+-- ClickHouse to PostgreSQL type table of README
+CREATE FUNCTION pgch_type_table() RETURNS text[]
+    AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
+
+-- Declarations the type table leaves out, with the reason
+CREATE FUNCTION pgch_type_omitted() RETURNS text[]
+    AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
+
+-- Split tab separated rows into columns for psql to lay out
+CREATE FUNCTION pgch_rows(lines text[]) RETURNS SETOF text[]
+    LANGUAGE sql IMMUTABLE STRICT AS $$
+    SELECT string_to_array(line, E'\t')
+        FROM unnest(lines) WITH ORDINALITY u(line, ord) ORDER BY ord $$;
+
 CREATE FUNCTION pgch_native_settings() RETURNS text
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 

@@ -47,9 +47,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      # Pinned: .clang-format uses keys added after 19, and output drifts
-      # between releases
       - run: |
           pipx run clang-format==22.1.8 --dry-run --Werror \
             pg-clickhouse*.h test/pgch_test.c
+
+  readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Type table of README is current
+        run: |
+          ./gen_type_table.awk README.md
+          git diff --exit-code -- README.md

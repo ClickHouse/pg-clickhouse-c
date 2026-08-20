@@ -7,10 +7,12 @@
 
 #include "postgres.h"
 
+#include <ctype.h>
 #include <string.h>
 
 #include "access/table.h"
 #include "access/tableam.h"
+#include "access/xact.h"
 #include "catalog/pg_type_d.h"
 #include "executor/executor.h"
 #include "fmgr.h"
@@ -20,6 +22,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
+#include "utils/resowner.h"
 #include "utils/snapmgr.h"
 
 #define CHC_IMPLEMENTATION
@@ -32,8 +35,7 @@
 PG_MODULE_MAGIC;
 
 static chc_type*
-parse_ch_type(text* name, const char* where) {
-    char* s = text_to_cstring(name);
+parse_ch_type_cstr(const char* s, const char* where) {
     chc_type* t;
     chc_err err = {};
 
@@ -41,6 +43,11 @@ parse_ch_type(text* name, const char* where) {
         pgch_raise(&err, ERRCODE_INVALID_PARAMETER_VALUE, NULL, where);
     }
     return t;
+}
+
+static chc_type*
+parse_ch_type(text* name, const char* where) {
+    return parse_ch_type_cstr(text_to_cstring(name), where);
 }
 
 static bytea*
@@ -284,8 +291,7 @@ reader_from_bytea(pgch_reader* r, bytes_source* src, bytea* data) {
 
 /* Decode first column as text, optionally prepare conversion from column type */
 static Datum
-decode_reader(pgch_reader* r_, Oid outtype, bool from_type) {
-    pgch_reader r        = *r_;
+decode_reader(pgch_reader* r, Oid outtype, bool from_type) {
     ArrayBuildState* out = initArrayResult(TEXTOID, CurrentMemoryContext, false);
     void* convstate      = NULL;
     bool converted       = false;
@@ -299,43 +305,45 @@ decode_reader(pgch_reader* r_, Oid outtype, bool from_type) {
         fmgr_info(outfuncid, &outfn);
     }
 
-    if (r.error) {
-        elog(ERROR, "decode: %s", r.error);
+    if (r->error) {
+        elog(ERROR, "decode: %s", r->error);
     }
-    if (pgch_reader_columns(&r) != 1) {
-        elog(ERROR, "expected 1 column, got %zu", pgch_reader_columns(&r));
+    if (pgch_reader_columns(r) != 1) {
+        elog(ERROR, "expected 1 column, got %zu", pgch_reader_columns(r));
     }
     if (OidIsValid(outtype) && from_type) {
-        convstate = pgch_reader_convert_init(&r, 0, outtype, -1);
+        convstate = pgch_reader_convert_init(r, 0, outtype, -1);
         converted = true;
     }
 
-    while (pgch_reader_next(&r)) {
-        bool isnull = r.nulls[0];
+    while (pgch_reader_next(r)) {
+        bool isnull = r->nulls[0];
         Datum val   = (Datum)0;
 
         if (isnull) {
         } else if (!OidIsValid(outtype)) {
-            val =
-                CStringGetTextDatum(pgch_value_to_cstring(r.coltypes[0], r.values[0]));
+            val = CStringGetTextDatum(
+                pgch_value_to_cstring(r->coltypes[0], r->values[0])
+            );
         } else {
             if (!converted) {
-                convstate = pgch_convert_init(r.values[0], r.coltypes[0], outtype, -1);
+                convstate =
+                    pgch_convert_init(r->values[0], r->coltypes[0], outtype, -1);
                 converted = true;
             }
             val = CStringGetTextDatum(
-                OutputFunctionCall(&outfn, pgch_convert(convstate, r.values[0]))
+                OutputFunctionCall(&outfn, pgch_convert(convstate, r->values[0]))
             );
         }
         accumArrayResult(out, val, isnull, TEXTOID, CurrentMemoryContext);
     }
-    if (r.error) {
-        elog(ERROR, "decode: %s", r.error);
+    if (r->error) {
+        elog(ERROR, "decode: %s", r->error);
     }
     if (convstate) {
         pgch_convert_free(convstate);
     }
-    pgch_reader_free(&r);
+    pgch_reader_free(r);
 
     return makeArrayResult(out, CurrentMemoryContext);
 }
@@ -471,6 +479,237 @@ pgch_pgcolumn(PG_FUNCTION_ARGS) {
     values[3] = BoolGetDatum(type.truncated);
     values[4] = BoolGetDatum(pgch_pg_type_is_column(type));
     PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(desc, values, nulls)));
+}
+
+/* ---- documented type table ------------------------------------------ */
+typedef struct type_doc {
+    const char* name;
+    const char* params;
+    const char* args;
+    const char* column;
+    const char* note;
+    const char* omit; /* Reason a mapped type is omitted */
+} type_doc;
+
+static const type_doc type_docs[] = {
+    { "AggregateFunction", NULL, "sum, Int64" },
+    { "Array", "T", "Int32", "T[]", "One PG array type per depth" },
+    { "DateTime64", "P", "3", "timestamp(P) with time zone", "P over 6 caps at 6" },
+    { "Decimal", "P,S", "9,4", "numeric(P,S)" },
+    { "Decimal32", "S", "4", "numeric(9,S)" },
+    { "Decimal64", "S", "4", "numeric(18,S)" },
+    { "Decimal128", "S", "4", "numeric(38,S)" },
+    { "Decimal256", "S", "4", "numeric(76,S)" },
+    { "Enum8", NULL, "'a' = 1" },
+    { "Enum16", NULL, "'a' = 1" },
+    { "FixedString", "N", "5", NULL, "N counts CH bytes, PG characters" },
+    { "JSON", NULL, NULL, NULL, "Also reads into json" },
+    { "LowCardinality", "T", "String", "T" },
+    { "Map", "K,V", "String, Int64", NULL, "One record per pair" },
+    { "Nested", NULL, "a Int32" },
+    { "Nullable", "T", "Int32", "T", "Sets nullable on the column" },
+    { "Object",
+     NULL, "'json'",
+     NULL, NULL,
+     "serializes as a materialized Tuple, unlike JSON" },
+    { "QBit", NULL, "BFloat16, 16" },
+    { "SimpleAggregateFunction", NULL, "sum, Int64" },
+    { "String", NULL, NULL, NULL, "Also reads into bytea" },
+    { "Time64", "P", "3", "time(P) without time zone", "P over 6 caps at 6" },
+    { "Tuple", "...", "Int32, String", NULL, "Pseudo type, no column takes it" },
+    { "UInt64", NULL, NULL, NULL, "Errors on values > BIGINT max" },
+    { "Variant", NULL, "Int32, String" },
+};
+
+typedef struct type_scan {
+    char** rows;
+    int nrows;
+    char** omitted;
+    int nomitted;
+} type_scan;
+
+static const type_doc*
+find_type_doc(const char* name) {
+    for (unsigned i = 0; i < lengthof(type_docs); i++) {
+        if (strcmp(type_docs[i].name, name) == 0) {
+            return &type_docs[i];
+        }
+    }
+    return NULL;
+}
+
+static char*
+type_decl(const char* name, const char* args) {
+    return args ? psprintf("%s(%s)", name, args) : pstrdup(name);
+}
+
+/* Format mapped column, including pseudo types */
+static char*
+column_cell(const chc_type* t) {
+    pgch_pg_type type = pgch_pg_type_for(t, NULL);
+    StringInfoData out;
+
+    if (!OidIsValid(type.typid)) {
+        return NULL;
+    }
+    initStringInfo(&out);
+    appendStringInfoString(&out, format_type_with_typemod(type.typid, type.typmod));
+    for (int i = 1; i < type.ndims; i++) {
+        appendStringInfoString(&out, "[]");
+    }
+    return out.data;
+}
+
+/* Turn parse and mapping errors into omission reasons */
+static char*
+probe_column(const char* decl, const char** reason) {
+    MemoryContext outer = CurrentMemoryContext;
+    ResourceOwner owner = CurrentResourceOwner;
+    char* volatile cell;
+
+    *reason = "pgch: no PostgreSQL type";
+    BeginInternalSubTransaction(NULL);
+    MemoryContextSwitchTo(outer);
+    PG_TRY();
+    {
+        cell = column_cell(parse_ch_type_cstr(decl, NULL));
+        ReleaseCurrentSubTransaction();
+    }
+    PG_CATCH();
+    {
+        ErrorData* edata;
+
+        cell = NULL;
+        MemoryContextSwitchTo(outer);
+        edata   = CopyErrorData();
+        *reason = pstrdup(edata->message);
+        FreeErrorData(edata);
+        FlushErrorState();
+        RollbackAndReleaseCurrentSubTransaction();
+    }
+    PG_END_TRY();
+    MemoryContextSwitchTo(outer);
+    CurrentResourceOwner = owner;
+    return cell;
+}
+
+/* Probe type or record why it is omitted */
+static void
+scan_type(type_scan* s, const char* name) {
+    const type_doc* doc = find_type_doc(name);
+    const char* params  = doc ? doc->params : NULL;
+    char* decl          = type_decl(name, doc ? doc->args : NULL);
+    const char* reason;
+    const char* cell = probe_column(decl, &reason);
+
+    if (!cell) {
+        s->omitted[s->nomitted++] = psprintf("%s\t%s", decl, reason);
+        return;
+    }
+    if (doc && doc->omit) {
+        s->omitted[s->nomitted++] = psprintf("%s\t%s", decl, doc->omit);
+        return;
+    }
+    if (doc && doc->column) {
+        cell = doc->column;
+    }
+    s->rows[s->nrows++] = psprintf(
+        "%s\t%s\t%s",
+        params ? psprintf("%s(%s)", name, params) : name,
+        cell,
+        doc && doc->note ? doc->note : ""
+    );
+}
+
+static size_t
+letters(const char* s) {
+    size_t n = 0;
+
+    while (isalpha((unsigned char)s[n])) {
+        n++;
+    }
+    return n;
+}
+
+/* Order lines by leading name, reading a numeric suffix as a number */
+static int
+cmp_type_row(const void* a, const void* b) {
+    const char* x = *(const char* const*)a;
+    const char* y = *(const char* const*)b;
+    size_t nx     = letters(x);
+    size_t ny     = letters(y);
+    int cmp       = strncmp(x, y, Min(nx, ny));
+
+    if (cmp) {
+        return cmp;
+    }
+    if (nx != ny) {
+        return nx < ny ? -1 : 1;
+    }
+    return atoi(x + nx) - atoi(y + ny);
+}
+
+/* Probe every type name the parser resolves */
+static type_scan
+scan_types(void) {
+    int cap     = CHC__NAME_TABLE_M + lengthof(type_docs);
+    type_scan s = {
+        .rows    = palloc0(cap * sizeof(char*)),
+        .omitted = palloc0(cap * sizeof(char*)),
+    };
+
+    for (unsigned i = 0; i < CHC__NAME_TABLE_M; i++) {
+        if (chc__name_table[i].name) {
+            scan_type(&s, chc__name_table[i].name);
+        }
+    }
+    for (unsigned i = 0; i < lengthof(type_docs); i++) {
+        const char* name = type_docs[i].name;
+
+        if (chc__name_to_kind(name, strlen(name)) == CHC_VOID) {
+            scan_type(&s, name);
+        }
+    }
+    qsort(s.rows, s.nrows, sizeof(char*), cmp_type_row);
+    qsort(s.omitted, s.nomitted, sizeof(char*), cmp_type_row);
+    return s;
+}
+
+static void
+add_line(ArrayBuildState* out, const char* line) {
+    accumArrayResult(
+        out, CStringGetTextDatum(line), false, TEXTOID, CurrentMemoryContext
+    );
+}
+
+static Datum
+lines_array(char** lines, int n) {
+    ArrayBuildState* out = initArrayResult(TEXTOID, CurrentMemoryContext, false);
+
+    for (int i = 0; i < n; i++) {
+        add_line(out, lines[i]);
+    }
+    return makeArrayResult(out, CurrentMemoryContext);
+}
+
+PG_FUNCTION_INFO_V1(pgch_type_table);
+
+/* Return the type table rows, tab separated for psql to lay out */
+Datum
+pgch_type_table(PG_FUNCTION_ARGS pg_attribute_unused()) {
+    type_scan s = scan_types();
+
+    PG_RETURN_DATUM(lines_array(s.rows, s.nrows));
+}
+
+PG_FUNCTION_INFO_V1(pgch_type_omitted);
+
+/* Return the declarations the type table leaves out, tab separated */
+Datum
+pgch_type_omitted(PG_FUNCTION_ARGS pg_attribute_unused()) {
+    type_scan s = scan_types();
+
+    PG_RETURN_DATUM(lines_array(s.omitted, s.nomitted));
 }
 
 PG_FUNCTION_INFO_V1(pgch_native_settings);
@@ -656,9 +895,7 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
             );
         }
 
-        accumArrayResult(
-            rows, CStringGetTextDatum(row.data), false, TEXTOID, CurrentMemoryContext
-        );
+        add_line(rows, row.data);
     }
     if (r.error) {
         elog(ERROR, "decode: %s", r.error);

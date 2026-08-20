@@ -1,0 +1,95 @@
+-- Build the ClickHouse to PostgreSQL type table of README
+-- gen_type_table.awk splices the marked block of this test's expected
+-- output into README, so the table needs no database to regenerate
+--
+-- Probe every type name the parser resolves
+-- New types reach the table or omitted list automatically
+--
+-- psql aligned output with border 2 pads the columns markdown wants
+\pset border 2
+\pset footer off
+SELECT r[1] AS "Omitted", r[2] AS "Reason" FROM pgch_rows(pgch_type_omitted()) t(r);
++-------------------------------------+--------------------------------------------------------+
+|               Omitted               |                         Reason                         |
++-------------------------------------+--------------------------------------------------------+
+| AggregateFunction(sum, Int64)       | pgch: unknown type: sum                                |
+| BFloat16                            | pgch: unsupported column type "BFloat16"               |
+| Dynamic                             | pgch: unsupported column type "Dynamic"                |
+| Int128                              | pgch: unsupported column type "Int128"                 |
+| Int256                              | pgch: unsupported column type "Int256"                 |
+| IntervalDay                         | pgch: unsupported column type "IntervalDay"            |
+| IntervalHour                        | pgch: unsupported column type "IntervalHour"           |
+| IntervalMicrosecond                 | pgch: unsupported column type "IntervalMicrosecond"    |
+| IntervalMillisecond                 | pgch: unsupported column type "IntervalMillisecond"    |
+| IntervalMinute                      | pgch: unsupported column type "IntervalMinute"         |
+| IntervalMonth                       | pgch: unsupported column type "IntervalMonth"          |
+| IntervalNanosecond                  | pgch: unsupported column type "IntervalNanosecond"     |
+| IntervalQuarter                     | pgch: unsupported column type "IntervalQuarter"        |
+| IntervalSecond                      | pgch: unsupported column type "IntervalSecond"         |
+| IntervalWeek                        | pgch: unsupported column type "IntervalWeek"           |
+| IntervalYear                        | pgch: unsupported column type "IntervalYear"           |
+| Nested(a Int32)                     | pgch: unknown type: a                                  |
+| Nothing                             | pgch: no PostgreSQL type                               |
+| Object('json')                      | serializes as a materialized Tuple, unlike JSON        |
+| QBit(BFloat16, 16)                  | pgch: unsupported column type "QBit(BFloat16, 16)"     |
+| SimpleAggregateFunction(sum, Int64) | pgch: unknown type: sum                                |
+| UInt128                             | pgch: unsupported column type "UInt128"                |
+| UInt256                             | pgch: unsupported column type "UInt256"                |
+| Variant(Int32, String)              | pgch: unsupported column type "Variant(Int32, String)" |
+| Void                                | pgch: no PostgreSQL type                               |
++-------------------------------------+--------------------------------------------------------+
+
+\echo TYPE-TABLE-BEGIN
+TYPE-TABLE-BEGIN
+SELECT r[1] AS "ClickHouse", r[2] AS "PostgreSQL", r[3] AS "Notes"
+    FROM pgch_rows(pgch_type_table()) t(r);
++-------------------+-----------------------------+----------------------------------+
+|    ClickHouse     |         PostgreSQL          |              Notes               |
++-------------------+-----------------------------+----------------------------------+
+| Array(T)          | T[]                         | One PG array type per depth      |
+| Bool              | boolean                     |                                  |
+| Date              | date                        |                                  |
+| Date32            | date                        |                                  |
+| DateTime          | timestamp with time zone    |                                  |
+| DateTime64(P)     | timestamp(P) with time zone | P over 6 caps at 6               |
+| Decimal(P,S)      | numeric(P,S)                |                                  |
+| Decimal32(S)      | numeric(9,S)                |                                  |
+| Decimal64(S)      | numeric(18,S)               |                                  |
+| Decimal128(S)     | numeric(38,S)               |                                  |
+| Decimal256(S)     | numeric(76,S)               |                                  |
+| Enum8             | text                        |                                  |
+| Enum16            | text                        |                                  |
+| FixedString(N)    | text                        | N counts CH bytes, PG characters |
+| Float32           | real                        |                                  |
+| Float64           | double precision            |                                  |
+| IPv4              | inet                        |                                  |
+| IPv6              | inet                        |                                  |
+| Int8              | smallint                    |                                  |
+| Int16             | smallint                    |                                  |
+| Int32             | integer                     |                                  |
+| Int64             | bigint                      |                                  |
+| JSON              | jsonb                       | Also reads into json             |
+| LineString        | path                        |                                  |
+| LowCardinality(T) | T                           |                                  |
+| Map(K,V)          | record[]                    | One record per pair              |
+| MultiLineString   | path[]                      |                                  |
+| MultiPolygon      | polygon[][]                 |                                  |
+| Nullable(T)       | T                           | Sets nullable on the column      |
+| Point             | point                       |                                  |
+| Polygon           | polygon[]                   |                                  |
+| Ring              | polygon                     |                                  |
+| String            | text                        | Also reads into bytea            |
+| Time              | time without time zone      |                                  |
+| Time64(P)         | time(P) without time zone   | P over 6 caps at 6               |
+| Tuple(...)        | record                      | Pseudo type, no column takes it  |
+| UInt8             | smallint                    |                                  |
+| UInt16            | integer                     |                                  |
+| UInt32            | bigint                      |                                  |
+| UInt64            | bigint                      | Errors on values > BIGINT max    |
+| UUID              | uuid                        |                                  |
++-------------------+-----------------------------+----------------------------------+
+
+\echo TYPE-TABLE-END
+TYPE-TABLE-END
+\pset border 1
+\pset footer on
