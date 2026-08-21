@@ -48,6 +48,12 @@ SELECT pgch_decode_as(pgch_block('Tuple(Int32, Int32)', 1, '\x2a0000002a000000':
                       NULL::twofields);
 ERROR:  could not map tuple to returned type
 \set VERBOSITY default
+-- Reject Tuple fields the array's element type cannot take
+SELECT pgch_decode_as(pgch_block('Tuple(Int32, String)', 1,
+                                 '\x2a000000'::bytea || '\x02' ||
+                                 convert_to('hi', 'UTF8')),
+                      NULL::bigint[]);
+ERROR:  invalid input syntax for type bigint: "hi"
 -- Reject Tuple field counts other than the column's arity
 SELECT pgch_encode_pairs('Map(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[], 1);
 ERROR:  pgch: Tuple took 1 of 2 values
@@ -113,6 +119,10 @@ SELECT pgch_decode_as(pgch_encode('Int32', -1::int4), NULL::epos);
 ERROR:  value for domain epos violates check constraint "epos_check"
 SELECT pgch_decode_as(pgch_encode('String', '-1'::text), NULL::epos);
 ERROR:  value for domain epos violates check constraint "epos_check"
+-- Reject array elements wider than the target type modifier
+SELECT pgch_decode_as(pgch_encode('Array(String)',
+                                  ARRAY['abc']::text[]), NULL::varchar(2)[]);
+ERROR:  value too long for type character varying(2)
 -- Reject values wider than a FixedString, which ClickHouse also rejects
 SELECT pgch_roundtrip('FixedString(4)', 'abcde'::text);
 ERROR:  pgch: value of 5 bytes too long for FixedString(4)

@@ -234,6 +234,18 @@ SELECT pgch_decode_as(pgch_encode('Array(Decimal(10, 4))',
  {"{1.2,-6.8}"} | {"{12.0,NULL}"} | {"{\"ab \",\"cd \"}"}
 (1 row)
 
+-- Take the type modifier from the call site, as arguments carry none
+SELECT pgch_decode_as(pgch_encode('Array(Decimal(10, 4))',
+                                  ARRAY[1.2345, -6.789]::numeric[]),
+                      NULL::numeric(4,1)[]),
+       pgch_decode_typed(pgch_encode('Array(String)',
+                                     ARRAY['ab', 'cd']::text[]), NULL::bpchar(3)[]),
+       pgch_decode_as(pgch_encode('String', 'abc'::text), NULL::varchar(4));
+ pgch_decode_as |   pgch_decode_typed   | pgch_decode_as 
+----------------+-----------------------+----------------
+ {"{1.2,-6.8}"} | {"{\"ab \",\"cd \"}"} | {abc}
+(1 row)
+
 -- Render scalars into a string type through the output function
 SELECT pgch_decode_as(pgch_encode('Int8', 7::int2), NULL::text),
        pgch_decode_as(pgch_encode('Float64', 1.5::float8), NULL::text),

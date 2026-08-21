@@ -36,6 +36,11 @@ SELECT pgch_decode_as(pgch_block('Tuple(Int32)', 1, '\x2a000000'::bytea),
 SELECT pgch_decode_as(pgch_block('Tuple(Int32, Int32)', 1, '\x2a0000002a000000'::bytea),
                       NULL::twofields);
 \set VERBOSITY default
+-- Reject Tuple fields the array's element type cannot take
+SELECT pgch_decode_as(pgch_block('Tuple(Int32, String)', 1,
+                                 '\x2a000000'::bytea || '\x02' ||
+                                 convert_to('hi', 'UTF8')),
+                      NULL::bigint[]);
 
 -- Reject Tuple field counts other than the column's arity
 SELECT pgch_encode_pairs('Map(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[], 1);
@@ -79,6 +84,10 @@ SELECT pgch_decode(pgch_block('Time64(0)', 1, '\xb0df360000000000'::bytea));
 CREATE DOMAIN epos AS int4 CHECK (VALUE > 0);
 SELECT pgch_decode_as(pgch_encode('Int32', -1::int4), NULL::epos);
 SELECT pgch_decode_as(pgch_encode('String', '-1'::text), NULL::epos);
+
+-- Reject array elements wider than the target type modifier
+SELECT pgch_decode_as(pgch_encode('Array(String)',
+                                  ARRAY['abc']::text[]), NULL::varchar(2)[]);
 
 -- Reject values wider than a FixedString, which ClickHouse also rejects
 SELECT pgch_roundtrip('FixedString(4)', 'abcde'::text);
