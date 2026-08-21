@@ -48,6 +48,7 @@ pgch_writer_set_null_array(pgch_writer* w, pgch_null_array policy);
  * Append PostgreSQL value to column
  * Pass value OID in valtype, or ANYARRAYOID for pgch_array
  * Append exactly one value to every column in each row
+ * Map uses an array of key-value pairs, Tuple uses an array of fields
  */
 extern void
 pgch_append_datum(pgch_writer* w, size_t col, Datum val, Oid valtype, bool isnull);
@@ -1185,6 +1186,12 @@ pgch_array_from_pg(
     return PointerGetDatum(out);
 }
 
+/* Return true while appending a Tuple field */
+static inline bool
+pgch__in_tuple(const pgch_writer* w) {
+    return w->cursor_len && w->cursor[w->cursor_len - 1].node->layout == CHC_COL_TUPLE;
+}
+
 static bool
 pgch__cast_value(
     pgch_writer* w,
@@ -1218,8 +1225,9 @@ pgch__cast_value(
             Oid outfunc, infunc;
             bool varlena;
 
-            /* PostgreSQL also offers I/O coercion from text to non-text types */
-            if (to != TEXTOID) {
+            /* Convert text array items with each Tuple field's input function
+             * Array items share one PostgreSQL type, but Tuple fields can differ */
+            if (to != TEXTOID && !(from == TEXTOID && pgch__in_tuple(w))) {
                 cast->from = InvalidOid;
                 return false;
             }
@@ -1251,11 +1259,14 @@ pgch__cast_value(
     return true;
 }
 
-/* Geo types above Ring and LineString take array values, as Array does */
+/*
+ * Arrays, Maps, Polygons, and multi-geometries use PostgreSQL arrays
+ * Maps contain key-value Tuples
+ */
 static inline bool
 pgch__kind_takes_array(chc_kind kind) {
-    return kind == CHC_ARRAY || kind == CHC_POLYGON || kind == CHC_MULTI_POLYGON ||
-           kind == CHC_MULTI_LINE_STRING;
+    return kind == CHC_ARRAY || kind == CHC_MAP || kind == CHC_POLYGON ||
+           kind == CHC_MULTI_POLYGON || kind == CHC_MULTI_LINE_STRING;
 }
 
 static void
@@ -1267,35 +1278,35 @@ pgch__append_one(
     Oid valtype,
     bool isnull
 ) {
-    if (pgch__kind_takes_array(kind)) {
-        if (isnull) {
-            pgch__append_null_array(w, col);
-            return;
-        }
-        if (valtype != ANYARRAYOID) {
-            pgch__node* node  = pgch__cursor_node(w, col);
-            pgch__arrmeta* am = node->arrmeta;
-            ArrayMetaState* ms;
+    if (pgch__kind_takes_array(kind) && isnull) {
+        pgch__append_null_array(w, col);
+        return;
+    }
+    /* Read Tuple fields from array items, including key-value pairs in Maps */
+    if ((pgch__kind_takes_array(kind) || kind == CHC_TUPLE) && !isnull &&
+        valtype != ANYARRAYOID) {
+        pgch__node* node  = pgch__cursor_node(w, col);
+        pgch__arrmeta* am = node->arrmeta;
+        ArrayMetaState* ms;
 
-            if (!am) {
-                am = node->arrmeta = MemoryContextAllocZero(w->cxt, sizeof(*am));
-            }
-            ms = &am->meta;
-            if (am->valtype != valtype) {
-                am->valtype      = valtype;
-                ms->element_type = get_element_type(valtype);
-                if (OidIsValid(ms->element_type)) {
-                    get_typlenbyvalalign(
-                        ms->element_type, &ms->typlen, &ms->typbyval, &ms->typalign
-                    );
-                }
-            }
+        if (!am) {
+            am = node->arrmeta = MemoryContextAllocZero(w->cxt, sizeof(*am));
+        }
+        ms = &am->meta;
+        if (am->valtype != valtype) {
+            am->valtype      = valtype;
+            ms->element_type = get_element_type(valtype);
             if (OidIsValid(ms->element_type)) {
-                val = pgch_array_from_pg(
-                    val, ms->element_type, ms->typlen, ms->typbyval, ms->typalign
+                get_typlenbyvalalign(
+                    ms->element_type, &ms->typlen, &ms->typbyval, &ms->typalign
                 );
-                valtype = ANYARRAYOID;
             }
+        }
+        if (OidIsValid(ms->element_type)) {
+            val = pgch_array_from_pg(
+                val, ms->element_type, ms->typlen, ms->typbyval, ms->typalign
+            );
+            valtype = ANYARRAYOID;
         }
     }
 
@@ -1500,19 +1511,41 @@ pgch__append_one(
         chc_kind item_kind;
         Oid child_valtype;
 
-        if (!pgch__kind_takes_array(kind)) {
+        if (kind != CHC_TUPLE && !pgch__kind_takes_array(kind)) {
             goto type_mismatch;
         }
         if (isnull) {
+            /* Tuple values cannot be NULL, empty Array or Map represents NULL input */
+            if (kind == CHC_TUPLE) {
+                pgch__null_violation(w, col);
+            }
             pgch__append_null_array(w, col);
             return;
         }
 
-        arr = (pgch_array*)DatumGetPointer(val);
+        arr           = (pgch_array*)DatumGetPointer(val);
+        child_valtype = (arr->ndim > 1) ? ANYARRAYOID : arr->item_type;
+
+        /* Read Tuple fields, including key-value pairs in Maps */
+        if (kind == CHC_TUPLE) {
+            pgch_tuple_begin(w, col);
+            for (size_t i = 0; i < arr->len; i++) {
+                pgch__append_one(
+                    w,
+                    0,
+                    pgch_column_kind(w, 0),
+                    arr->datums[i],
+                    child_valtype,
+                    arr->nulls[i]
+                );
+            }
+            pgch_tuple_end(w);
+            return;
+        }
+
         pgch_array_begin(w, col);
 
-        item_kind     = pgch_column_kind(w, col);
-        child_valtype = (arr->ndim > 1) ? ANYARRAYOID : arr->item_type;
+        item_kind = pgch_column_kind(w, col);
         for (size_t i = 0; i < arr->len; i++) {
             pgch__append_one(
                 w, 0, item_kind, arr->datums[i], child_valtype, arr->nulls[i]
@@ -1733,7 +1766,8 @@ type_mismatch: {
     if (!OidIsValid(node->target)) {
         node->target = pgch_native_oid_for(node->type, pgch__col_desc(w, col));
     }
-    if (node->target != valtype) {
+    /* Map entry arrays have no PostgreSQL type to convert */
+    if (OidIsValid(node->target) && node->target != valtype) {
         if (isnull) {
             pgch__append_one(w, col, kind, val, node->target, isnull);
             return;

@@ -68,6 +68,11 @@ explicit casts into destination PostgreSQL mapping. ClickHouse String-like
 destinations also accept source type output representation. Missing
 conversion raises `ERRCODE_DATATYPE_MISMATCH`.
 
+A `Map` takes an array of pairs, each pair an array of key and value, so a
+two-dimensional `text[]` fills one. A `Tuple` takes one array of its fields.
+One array carries one element type while fields take their own, so a text
+item parses through the field type's input function.
+
 `bytea` values map to ClickHouse `String` and `FixedString` without text
 conversion. `json` and `jsonb` map to `JSON`, `Object`, or `String`.
 `FixedString` pads short values with NUL and raises

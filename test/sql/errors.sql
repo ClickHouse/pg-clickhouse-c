@@ -48,6 +48,12 @@ SELECT pgch_encode_pairs('Map(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[], 3
 SELECT pgch_encode_pairs('Tuple(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[]);
 SELECT pgch_encode_pairs('Map(String)', ARRAY['a'], ARRAY[1]::bigint[]);
 
+-- Reject invalid Map arrays
+SELECT pgch_encode('Map(String, Int64)', ARRAY['a', '1']::text[]);
+SELECT pgch_encode('Map(String, Int64)', ARRAY[['a', '1', 'x']]::text[]);
+SELECT pgch_encode('Map(String, Int64)', ARRAY[['a', 'x']]::text[]);
+SELECT pgch_encode('Map(String, Int64)', NULL::text[]);
+
 -- Reject types without PostgreSQL mapping
 SELECT pgch_pgtype('Int128');
 SELECT pgch_pgtype('Nonsense');
