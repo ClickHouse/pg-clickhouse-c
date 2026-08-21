@@ -63,6 +63,15 @@ SELECT pgch_encode_pairs('Tuple(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[])
 ERROR:  pgch: Array value into column "c"
 SELECT pgch_encode_pairs('Map(String)', ARRAY['a'], ARRAY[1]::bigint[]);
 ERROR:  pgch: Map wants key and value
+-- Reject invalid Map arrays
+SELECT pgch_encode('Map(String, Int64)', ARRAY['a', '1']::text[]);
+ERROR:  pgch: cannot encode text into ClickHouse Map(String, Int64) (column "c")
+SELECT pgch_encode('Map(String, Int64)', ARRAY[['a', '1', 'x']]::text[]);
+ERROR:  pgch: Tuple takes 2 values
+SELECT pgch_encode('Map(String, Int64)', ARRAY[['a', 'x']]::text[]);
+ERROR:  invalid input syntax for type bigint: "x"
+SELECT pgch_encode('Map(String, Int64)', NULL::text[]);
+ERROR:  pgch: cannot append NULL to NOT NULL Map(String, Int64) column "c"
 -- Reject types without PostgreSQL mapping
 SELECT pgch_pgtype('Int128');
 ERROR:  pgch: unsupported column type "Int128"

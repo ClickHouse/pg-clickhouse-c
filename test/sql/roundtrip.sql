@@ -283,6 +283,18 @@ FROM pgch_block('Map(String, Array(Int32))', 1,
                 '\x01' || convert_to('a', 'UTF8') ||
                 '\x0100000000000000'::bytea || '\x07000000'::bytea) AS b;
 
+-- Encode Map from key-value arrays, converting each item to its field type
+SELECT pgch_decode_as(pgch_encode('Map(String, Int64)',
+                                  ARRAY[['a', '1'], ['b', '2']]::text[]),
+                      NULL::pairformat[]) AS pairs,
+       pgch_decode_as(pgch_encode('Map(String, Nullable(Int64))',
+                                  ARRAY[['a', NULL]]::text[]),
+                      NULL::pairformat[]) AS null_value,
+       pgch_decode_as(pgch_encode('Map(String, Int64)', ARRAY[]::text[]),
+                      NULL::pairformat[]) AS empty;
+-- Encode Tuple from an array of fields
+SELECT pgch_decode_as(pgch_encode('Tuple(String, Int64)', ARRAY['a', '1']::text[]),
+                      NULL::pairformat) AS tuple;
 -- Nest tuples through the cursor, Nullable wrapping the inner one
 SELECT pgch_decode(pgch_encode_pairs('Map(String, Tuple(Int64))',
                                      ARRAY['a', 'b'], ARRAY[1, 2]::bigint[],
