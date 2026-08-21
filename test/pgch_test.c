@@ -17,6 +17,7 @@
 #include "executor/executor.h"
 #include "fmgr.h"
 #include "funcapi.h"
+#include "nodes/nodeFuncs.h"
 #include "parser/parse_type.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -291,7 +292,7 @@ reader_from_bytea(pgch_reader* r, bytes_source* src, bytea* data) {
 
 /* Decode first column as text, optionally prepare conversion from column type */
 static Datum
-decode_reader(pgch_reader* r, Oid outtype, bool from_type) {
+decode_reader(pgch_reader* r, Oid outtype, int32 outtypmod, bool from_type) {
     ArrayBuildState* out = initArrayResult(TEXTOID, CurrentMemoryContext, false);
     void* convstate      = NULL;
     bool converted       = false;
@@ -312,7 +313,7 @@ decode_reader(pgch_reader* r, Oid outtype, bool from_type) {
         elog(ERROR, "expected 1 column, got %zu", pgch_reader_columns(r));
     }
     if (OidIsValid(outtype) && from_type) {
-        convstate = pgch_reader_convert_init(r, 0, outtype, -1);
+        convstate = pgch_reader_convert_init(r, 0, outtype, outtypmod);
         converted = true;
     }
 
@@ -328,7 +329,7 @@ decode_reader(pgch_reader* r, Oid outtype, bool from_type) {
         } else {
             if (!converted) {
                 convstate =
-                    pgch_convert_init(r->values[0], r->coltypes[0], outtype, -1);
+                    pgch_convert_init(r->values[0], r->coltypes[0], outtype, outtypmod);
                 converted = true;
             }
             val = CStringGetTextDatum(
@@ -349,12 +350,24 @@ decode_reader(pgch_reader* r, Oid outtype, bool from_type) {
 }
 
 static Datum
-decode_column(bytea* data, Oid outtype, bool from_type) {
+decode_column(bytea* data, Oid outtype, int32 outtypmod, bool from_type) {
     bytes_source src;
     pgch_reader r;
 
     reader_from_bytea(&r, &src, data);
-    return decode_reader(&r, outtype, from_type);
+    return decode_reader(&r, outtype, outtypmod, from_type);
+}
+
+/* Arguments carry no type modifier at run time, so read it off the call site */
+static int32
+arg_typmod(FunctionCallInfo fcinfo, int argno) {
+    Node* expr = fcinfo->flinfo ? fcinfo->flinfo->fn_expr : NULL;
+
+    if (!expr || !IsA(expr, FuncExpr) ||
+        argno >= list_length(((FuncExpr*)expr)->args)) {
+        return -1;
+    }
+    return exprTypmod((Node*)list_nth(((FuncExpr*)expr)->args, argno));
 }
 
 /* Supply fixed-size chunks */
@@ -401,7 +414,7 @@ pgch_decode_chunks(PG_FUNCTION_ARGS) {
     src.cancelled  = NULL;
 
     pgch_reader_init_chunks(&r, &src, NULL);
-    PG_RETURN_DATUM(decode_reader(&r, InvalidOid, false));
+    PG_RETURN_DATUM(decode_reader(&r, InvalidOid, -1, false));
 }
 
 PG_FUNCTION_INFO_V1(pgch_decode);
@@ -409,7 +422,7 @@ PG_FUNCTION_INFO_V1(pgch_decode);
 /* Decode first column of every row as text */
 Datum
 pgch_decode(PG_FUNCTION_ARGS) {
-    PG_RETURN_DATUM(decode_column(PG_GETARG_BYTEA_PP(0), InvalidOid, false));
+    PG_RETURN_DATUM(decode_column(PG_GETARG_BYTEA_PP(0), InvalidOid, -1, false));
 }
 
 PG_FUNCTION_INFO_V1(pgch_decode_as);
@@ -425,7 +438,9 @@ pgch_decode_as(PG_FUNCTION_ARGS) {
     if (!OidIsValid(outtype)) {
         elog(ERROR, "could not determine target type");
     }
-    PG_RETURN_DATUM(decode_column(PG_GETARG_BYTEA_PP(0), outtype, false));
+    PG_RETURN_DATUM(
+        decode_column(PG_GETARG_BYTEA_PP(0), outtype, arg_typmod(fcinfo, 1), false)
+    );
 }
 
 PG_FUNCTION_INFO_V1(pgch_decode_typed);
@@ -441,7 +456,9 @@ pgch_decode_typed(PG_FUNCTION_ARGS) {
     if (!OidIsValid(outtype)) {
         elog(ERROR, "could not determine target type");
     }
-    PG_RETURN_DATUM(decode_column(PG_GETARG_BYTEA_PP(0), outtype, true));
+    PG_RETURN_DATUM(
+        decode_column(PG_GETARG_BYTEA_PP(0), outtype, arg_typmod(fcinfo, 1), true)
+    );
 }
 
 PG_FUNCTION_INFO_V1(pgch_pgtype);

@@ -1637,6 +1637,33 @@ pgch__convert_record(pgch_convert_state* state, Datum val) {
     return val;
 }
 
+/*
+ * Expand Tuple fields into an intermediate array. When nested in another
+ * array, fields form one additional inner dimension
+ */
+static Datum
+pgch__convert_record_array(pgch_convert_state* state, Datum val) {
+    pgch_tuple* slot = (pgch_tuple*)DatumGetPointer(val);
+    pgch_array* out  = (pgch_array*)palloc(sizeof(pgch_array));
+
+    out->len        = slot->len;
+    out->ndim       = 1;
+    out->item_type  = state->item_type;
+    out->array_type = state->outtype;
+    out->datums     = (Datum*)palloc(sizeof(Datum) * slot->len);
+    out->nulls      = (bool*)palloc(sizeof(bool) * slot->len);
+
+    for (size_t i = 0; i < slot->len; i++) {
+        pgch_convert_state* field = state->field_states[i];
+
+        out->nulls[i]  = slot->nulls[i];
+        out->datums[i] = field && !slot->nulls[i] ? field->func(field, slot->datums[i])
+                                                  : slot->datums[i];
+    }
+
+    return PointerGetDatum(out);
+}
+
 static bool
 pgch__flatten_array(
     pgch_array* slot,
@@ -1660,7 +1687,8 @@ pgch__flatten_array(
         for (size_t i = 0; i < slot->len; i++) {
             pgch_array* child = (pgch_array*)DatumGetPointer(slot->datums[i]);
 
-            if (!pgch__flatten_array(child, dims, level + 1, values, nulls, idx)) {
+            if (slot->nulls[i] ||
+                !pgch__flatten_array(child, dims, level + 1, values, nulls, idx)) {
                 return false;
             }
         }
@@ -1676,6 +1704,10 @@ pgch__convert_elems(pgch_convert_state* elem, pgch_array* slot) {
         } else if (!slot->nulls[i]) {
             slot->datums[i] = elem->func(elem, slot->datums[i]);
         }
+    }
+    /* Fields of an expanded Tuple fill one more dimension */
+    if (elem->func == pgch__convert_record_array) {
+        slot->ndim++;
     }
 }
 
@@ -1759,6 +1791,16 @@ pgch__convert_array(pgch_convert_state* state, Datum val) {
     }
 
     return pgch__convert_generic(state, val);
+}
+
+static Datum
+pgch__convert_tuple_array(pgch_convert_state* state, Datum val) {
+    return pgch__convert_array(state, pgch__convert_record_array(state, val));
+}
+
+static bool
+pgch__record_axes(Oid outtype) {
+    return outtype == BOXOID || outtype == CIRCLEOID || outtype == LINEOID;
 }
 
 /* Flatten Point and Float64 fields left to right, as the writer fills them */
@@ -1964,6 +2006,30 @@ pgch__init_typmod_coerce(pgch_convert_state* state) {
     return true;
 }
 
+/*
+ * Return elem[] when Tuple should become array of items, or InvalidOid for record.
+ * Anonymous records cannot define PostgreSQL column shape. Keep Tuple intact
+ * for absent, composite, or geometric elem. Array fields also require record
+ * conversion because fields still contain pgch_array intermediates
+ */
+static Oid
+pgch__spread_type(const chc_type* ct, const pgch_tuple* slot, Oid elem) {
+    size_t nfields = ct ? chc_type_n_children(ct) : slot->len;
+
+    if (!OidIsValid(elem) || pgch__record_axes(elem) ||
+        type_is_rowtype(getBaseType(elem))) {
+        return InvalidOid;
+    }
+    for (size_t i = 0; i < nfields; i++) {
+        Oid ftype = ct ? pgch_datum_oid(chc_type_child(ct, i)) : slot->types[i];
+
+        if (ftype == ANYARRAYOID) {
+            return InvalidOid;
+        }
+    }
+    return get_array_type(elem);
+}
+
 static pgch_convert_state*
 pgch__convert_init(
     const chc_type* ct,
@@ -2032,9 +2098,26 @@ pgch__convert_init(
              * they need the element type named but no conversion built
              * Pass array column's type modifier to each element */
             if (have_leaf || state->item_type != RECORDOID) {
+                Oid elem_out = out_elem;
+
+                if (state->item_type == RECORDOID) {
+                    Oid spread = pgch__spread_type(
+                        leaf, (const pgch_tuple*)DatumGetPointer(leafval), out_elem
+                    );
+
+                    if (OidIsValid(spread)) {
+                        elem_out = spread;
+                    }
+                }
                 state->elem_state = pgch__convert_init(
-                    leaf, leafval, state->item_type, out_elem, outtypmod
+                    leaf, leafval, state->item_type, elem_out, outtypmod
                 );
+                /* This array builds every dimension at once, so leave the
+                 * fields of each Tuple unbuilt */
+                if (state->elem_state &&
+                    state->elem_state->func == pgch__convert_tuple_array) {
+                    state->elem_state->func = pgch__convert_record_array;
+                }
             }
             if (out_elem != state->item_type) {
                 state->item_type = out_elem;
@@ -2047,9 +2130,7 @@ pgch__convert_init(
         intype = state->intype;
     }
 
-    /* Geometric types PostgreSQL cannot cast from the shape they cross as */
-    if (intype == RECORDOID &&
-        (outtype == BOXOID || outtype == CIRCLEOID || outtype == LINEOID)) {
+    if (intype == RECORDOID && pgch__record_axes(outtype)) {
         state->func = pgch__convert_axes;
         return state;
     }
@@ -2061,6 +2142,28 @@ pgch__convert_init(
     if (intype == RECORDOID) {
         pgch_tuple* slot = ct ? NULL : (pgch_tuple*)DatumGetPointer(val);
         size_t nfields   = ct ? chc_type_n_children(ct) : slot->len;
+        Oid item         = get_element_type(outtype);
+
+        if (OidIsValid(pgch__spread_type(ct, slot, item))) {
+            state->func         = pgch__convert_tuple_array;
+            state->item_type    = item;
+            state->field_states = palloc(sizeof(void*) * nfields);
+            get_typlenbyvalalign(
+                item, &state->typlen, &state->typbyval, &state->typalign
+            );
+
+            for (size_t i = 0; i < nfields; ++i) {
+                const chc_type* ft = ct ? chc_type_child(ct, i) : NULL;
+                Oid ftype          = ct ? pgch_datum_oid(ft) : slot->types[i];
+                Datum fval         = ct ? (Datum)0 : slot->datums[i];
+
+                state->field_states[i] =
+                    !ct && slot->nulls[i]
+                        ? NULL
+                        : pgch__convert_init(ft, fval, ftype, item, outtypmod);
+            }
+            return state;
+        }
 
         state->func         = pgch__convert_record;
         state->indesc       = CreateTemplateTupleDesc(nfields);

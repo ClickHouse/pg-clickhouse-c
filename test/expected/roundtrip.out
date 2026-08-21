@@ -430,15 +430,49 @@ FROM pgch_block('Tuple(Nullable(Tuple(Int32)), String)', 2,
  {"(,\"\")","(\"(9)\",ok)"} | {"(,\"\")","(\"(9)\",ok)"}
 (1 row)
 
+-- Spread Tuple fields over an array where no composite type names the record
+SELECT pgch_decode_as(b, NULL::text[]) AS from_value,
+       pgch_decode_typed(b, NULL::text[]) AS from_type
+FROM pgch_block('Tuple(Int32, String)', 1,
+                '\x2a000000'::bytea || '\x02' || convert_to('hi', 'UTF8')) AS b;
+ from_value  |  from_type  
+-------------+-------------
+ {"{42,hi}"} | {"{42,hi}"}
+(1 row)
+
+-- Widen unlike Tuple fields into one element type, NULL fields included
+SELECT pgch_decode_as(b, NULL::bigint[]) AS from_value,
+       pgch_decode_typed(b, NULL::bigint[]) AS from_type
+FROM pgch_block('Tuple(Nullable(Int16), Int32, String)', 2,
+                '\x0100'::bytea || '\x00002a00'::bytea ||
+                '\x3905000002000000'::bytea ||
+                '\x01' || convert_to('7', 'UTF8') ||
+                '\x01' || convert_to('8', 'UTF8')) AS b;
+          from_value          |          from_type           
+------------------------------+------------------------------
+ {"{NULL,1337,7}","{42,2,8}"} | {"{NULL,1337,7}","{42,2,8}"}
+(1 row)
+
+-- Fields of a Tuple inside an Array fill the inner dimension
+SELECT pgch_decode_as(b, NULL::numeric[])
+FROM pgch_block('Array(Tuple(Int16, Decimal(10, 4)))', 1,
+                '\x0200000000000000'::bytea ||
+                '\x2a00'::bytea || '\x0100'::bytea ||
+                '\x3905000000000000'::bytea || '\x0200000000000000'::bytea) AS b;
+        pgch_decode_as        
+------------------------------
+ {"{{42,0.1337},{1,0.0002}}"}
+(1 row)
+
 -- Map writes and reads as Array(Tuple(K, V)), so both spellings agree
 CREATE TYPE pairformat AS (k text, v bigint);
 SELECT pgch_decode(pgch_encode_pairs('Map(String, Int64)',
                                      ARRAY['a', 'b'], ARRAY[1, 2]::bigint[])) AS map,
        pgch_decode(pgch_encode_pairs('Array(Tuple(String, Int64))',
                                      ARRAY['a', 'b'], ARRAY[1, 2]::bigint[])) AS array_tuple;
-            map            |        array_tuple        
----------------------------+---------------------------
- {"{\"(a,1)\",\"(b,2)\"}"} | {"{\"(a,1)\",\"(b,2)\"}"}
+        map        |    array_tuple    
+-------------------+-------------------
+ {"{{a,1},{b,2}}"} | {"{{a,1},{b,2}}"}
 (1 row)
 
 SELECT pgch_decode_as(pgch_encode_pairs('Map(String, Nullable(Int64))',
@@ -462,6 +496,19 @@ SELECT pgch_pgtype('Map(String, Int64)');
  record[]
 (1 row)
 
+-- An Array field is an unbuilt intermediate, not an array item, so its Tuple
+-- stays a record
+SELECT pgch_decode_as(b, NULL::text[]) AS from_value,
+       pgch_decode_typed(b, NULL::text[]) AS from_type
+FROM pgch_block('Map(String, Array(Int32))', 1,
+                '\x0100000000000000'::bytea ||
+                '\x01' || convert_to('a', 'UTF8') ||
+                '\x0100000000000000'::bytea || '\x07000000'::bytea) AS b;
+    from_value     |     from_type     
+-------------------+-------------------
+ {"{\"(a,{7})\"}"} | {"{\"(a,{7})\"}"}
+(1 row)
+
 -- Nest tuples through the cursor, Nullable wrapping the inner one
 SELECT pgch_decode(pgch_encode_pairs('Map(String, Tuple(Int64))',
                                      ARRAY['a', 'b'], ARRAY[1, 2]::bigint[],
@@ -469,8 +516,8 @@ SELECT pgch_decode(pgch_encode_pairs('Map(String, Tuple(Int64))',
        pgch_decode(pgch_encode_pairs('Array(Tuple(String, Nullable(Tuple(Int64))))',
                                      ARRAY['a', 'b'], ARRAY[1, 2]::bigint[],
                                      2, true)) AS nullable_nested;
-                    nested                     |                nullable_nested                
------------------------------------------------+-----------------------------------------------
- {"{\"(a,\\\"(1)\\\")\",\"(b,\\\"(2)\\\")\"}"} | {"{\"(a,\\\"(1)\\\")\",\"(b,\\\"(2)\\\")\"}"}
+        nested         |    nullable_nested    
+-----------------------+-----------------------
+ {"{{a,(1)},{b,(2)}}"} | {"{{a,(1)},{b,(2)}}"}
 (1 row)
 
