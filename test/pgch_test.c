@@ -65,11 +65,9 @@ encode_rows(text* chtype, Datum* vals, bool* nulls, int nrows, Oid valtype) {
     chc_type* t    = parse_ch_type(chtype, "column c");
     pgch_col col   = { .name = "c", .name_len = 1, .type = t };
     pgch_writer* w = pgch_writer_new(CurrentMemoryContext, &col, 1);
-    const chc_block_builder* bb;
-    pgch_buf buf = {};
+    pgch_buf buf   = {};
     chc_io io;
     chc_err err = {};
-    bytea* out;
 
     for (int i = 0; i < nrows; i++) {
         pgch_append_datum(w, 0, vals[i], valtype, nulls[i]);
@@ -81,13 +79,13 @@ encode_rows(text* chtype, Datum* vals, bool* nulls, int nrows, Oid valtype) {
         );
     }
 
-    bb = pgch_writer_build(w);
+    const chc_block_builder* bb = pgch_writer_build(w);
     pgch_buf_io(&buf, &io);
     if (chc_block_write(&io, bb, &pgch_block_opts_local, &err) != CHC_OK) {
         pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
     }
 
-    out = bytea_from_buf(&buf);
+    bytea* out = bytea_from_buf(&buf);
 
     pgch_writer_reset(w);
     pgch_writer_free(w);
@@ -115,7 +113,6 @@ PG_FUNCTION_INFO_V1(pgch_encode_rows);
 Datum
 pgch_encode_rows(PG_FUNCTION_ARGS) {
     Oid arrtype = get_fn_expr_argtype(fcinfo->flinfo, 1);
-    Oid elemtype;
     int16 typlen;
     bool typbyval;
     char typalign;
@@ -127,7 +124,7 @@ pgch_encode_rows(PG_FUNCTION_ARGS) {
         PG_RETURN_NULL();
     }
 
-    elemtype = get_element_type(arrtype);
+    Oid elemtype = get_element_type(arrtype);
     if (!OidIsValid(elemtype)) {
         elog(ERROR, "second argument is not an array");
     }
@@ -242,12 +239,11 @@ bytes_next_block(void* ud) {
     bytes_source* s = (bytes_source*)ud;
     chc_block* b    = NULL;
     chc_err err     = {};
-    int rc;
 
     if (s->done) {
         return NULL;
     }
-    rc = chc_block_read(s->in, &pgch_alloc, &pgch_block_opts_local, &b, &err);
+    int rc = chc_block_read(s->in, &pgch_alloc, &pgch_block_opts_local, &b, &err);
     if (rc != CHC_OK) {
         s->done = true;
         if (rc != CHC_WOULD_BLOCK || chc_in_available(s->in) > 0) {
@@ -594,12 +590,11 @@ probe_column(const char* decl, const char** reason) {
     }
     PG_CATCH();
     {
-        ErrorData* edata;
-
         cell = NULL;
         MemoryContextSwitchTo(outer);
-        edata   = CopyErrorData();
-        *reason = pstrdup(edata->message);
+
+        ErrorData* edata = CopyErrorData();
+        *reason          = pstrdup(edata->message);
         FreeErrorData(edata);
         FlushErrorState();
         RollbackAndReleaseCurrentSubTransaction();
@@ -785,18 +780,16 @@ static pgch_writer*
 writer_for_tupdesc(TupleDesc desc, const pgch_type_opts* opts, size_t* out_ncols) {
     pgch_col* cols = palloc0(desc->natts * sizeof(pgch_col));
     size_t n       = 0;
-    pgch_writer* w;
 
     for (int i = 0; i < desc->natts; i++) {
         Form_pg_attribute a = TupleDescAttr(desc, i);
-        char* chtype;
-        chc_err err = {};
+        chc_err err         = {};
         chc_type* t;
 
         if (!pgch_attr_is_streamed(a)) {
             continue;
         }
-        chtype = pgch_ch_type_for(a->atttypid, a->atttypmod, a->attnotnull, opts);
+        char* chtype = pgch_ch_type_for(a->atttypid, a->atttypmod, a->attnotnull, opts);
         if (chc_type_parse(chtype, strlen(chtype), &pgch_alloc, &t, &err) != CHC_OK) {
             pgch_raise(
                 &err,
@@ -811,8 +804,8 @@ writer_for_tupdesc(TupleDesc desc, const pgch_type_opts* opts, size_t* out_ncols
         n++;
     }
 
-    w          = pgch_writer_new(CurrentMemoryContext, cols, n);
-    *out_ncols = n;
+    pgch_writer* w = pgch_writer_new(CurrentMemoryContext, cols, n);
+    *out_ncols     = n;
     return w;
 }
 
@@ -837,9 +830,6 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
     size_t ncols;
     pgch_writer* w = writer_for_tupdesc(desc, &opts, &ncols);
     pgch_buf buf   = {};
-    TableScanDesc scan;
-    TupleTableSlot* slot;
-    bytea* bytes;
     Oid* targets   = palloc0(ncols * sizeof(Oid));
     int32* typmods = palloc0(ncols * sizeof(int32));
     FmgrInfo* out  = palloc0(ncols * sizeof(FmgrInfo));
@@ -847,7 +837,6 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
     int* dest     = palloc0(ncols * sizeof(int));
     Datum* values = palloc0(desc->natts * sizeof(Datum));
     bool* nulls   = palloc0(desc->natts * sizeof(bool));
-    void** states;
     bytes_source src;
     pgch_reader r;
     ArrayBuildState* rows = initArrayResult(TEXTOID, CurrentMemoryContext, false);
@@ -873,8 +862,8 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
         pgch_writer_set_null_array(w, PGCH_NULL_ARRAY_EMPTY);
     }
 
-    scan = begin_scan(rel);
-    slot = table_slot_create(rel, NULL);
+    TableScanDesc scan   = begin_scan(rel);
+    TupleTableSlot* slot = table_slot_create(rel, NULL);
     while (table_scan_getnextslot(scan, ForwardScanDirection, slot)) {
         pgch_append_slot(w, slot);
     }
@@ -883,7 +872,7 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
     table_close(rel, AccessShareLock);
 
     pgch_writer_flush(w, &buf, NULL);
-    bytes = bytea_from_buf(&buf);
+    bytea* bytes = bytea_from_buf(&buf);
     pgch_writer_free(w);
 
     reader_from_bytea(&r, &src, bytes);
@@ -891,7 +880,7 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
         elog(ERROR, "decode: %s", r.error);
     }
 
-    states = palloc0(ncols * sizeof(void*));
+    void** states = palloc0(ncols * sizeof(void*));
     for (size_t i = 0; i < ncols; i++) {
         states[i] = pgch_reader_convert_init(&r, i, targets[i], typmods[i]);
     }
