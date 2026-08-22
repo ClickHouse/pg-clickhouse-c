@@ -484,12 +484,10 @@ pgch_writer_set_null_array(pgch_writer* w, pgch_null_array policy) {
 /* Return node taking next value: an array's element or a tuple's current field */
 static inline pgch__node*
 pgch__cursor_node(const pgch_writer* w, size_t col) {
-    const pgch__frame* f;
-
     if (!w->cursor_len) {
         return w->cols[col].root;
     }
-    f = &w->cursor[w->cursor_len - 1];
+    const pgch__frame* f = &w->cursor[w->cursor_len - 1];
     if (f->node->layout == CHC_COL_ARRAY) {
         return f->node->array.values;
     }
@@ -543,14 +541,13 @@ pgch__null_violation(pgch_writer* w, size_t col) {
 
 static pgch__node*
 pgch__resolve_leaf(pgch_writer* w, size_t col, bool isnull) {
-    pgch__node* node;
     uint8_t b     = isnull ? 1 : 0;
     bool nullable = false;
 
     if (!w->cursor_len && col >= w->ncols) {
         pgch_errorf(ERRCODE_FDW_ERROR, "column %zu out of range", col);
     }
-    node = pgch__cursor_node(w, col);
+    pgch__node* node = pgch__cursor_node(w, col);
     pgch__cursor_step(w);
 
     while (node->layout == CHC_COL_NULLABLE) {
@@ -857,7 +854,6 @@ static void
 pgch__cursor_push(pgch_writer* w, size_t col, chc_col_kind layout) {
     const char* what = layout == CHC_COL_ARRAY ? "Array" : "Tuple";
     pgch__node* node;
-    MemoryContext old;
 
     if (w->cursor_len) {
         node = pgch__cursor_node(w, col);
@@ -868,7 +864,7 @@ pgch__cursor_push(pgch_writer* w, size_t col, chc_col_kind layout) {
         node = w->cols[col].root;
     }
 
-    old = MemoryContextSwitchTo(w->cxt);
+    MemoryContext old = MemoryContextSwitchTo(w->cxt);
 
     if (node->layout == CHC_COL_NULLABLE && node->nullable.inner->layout == layout) {
         uint8_t b = 0;
@@ -898,12 +894,10 @@ pgch__cursor_push(pgch_writer* w, size_t col, chc_col_kind layout) {
 
 static pgch__frame*
 pgch__cursor_pop(pgch_writer* w, chc_col_kind layout) {
-    pgch__frame* f;
-
     if (w->cursor_len == 0) {
         return NULL;
     }
-    f = &w->cursor[w->cursor_len - 1];
+    pgch__frame* f = &w->cursor[w->cursor_len - 1];
     if (f->node->layout != layout) {
         pgch_error(ERRCODE_FDW_ERROR, "mismatched Array and Tuple nesting");
     }
@@ -919,12 +913,11 @@ pgch_array_begin(pgch_writer* w, size_t col) {
 void
 pgch_array_end(pgch_writer* w) {
     pgch__frame* f = pgch__cursor_pop(w, CHC_COL_ARRAY);
-    MemoryContext old;
 
     if (!f) {
         return;
     }
-    old = MemoryContextSwitchTo(w->cxt);
+    MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__offs_push(&f->node->array.offs, pgch__node_rows(f->node->array.values));
     MemoryContextSwitchTo(old);
 }
@@ -1287,12 +1280,11 @@ pgch__append_one(
         valtype != ANYARRAYOID) {
         pgch__node* node  = pgch__cursor_node(w, col);
         pgch__arrmeta* am = node->arrmeta;
-        ArrayMetaState* ms;
 
         if (!am) {
             am = node->arrmeta = MemoryContextAllocZero(w->cxt, sizeof(*am));
         }
-        ms = &am->meta;
+        ArrayMetaState* ms = &am->meta;
         if (am->valtype != valtype) {
             am->valtype      = valtype;
             ms->element_type = get_element_type(valtype);
@@ -1507,10 +1499,6 @@ pgch__append_one(
         return;
     }
     case ANYARRAYOID: {
-        pgch_array* arr;
-        chc_kind item_kind;
-        Oid child_valtype;
-
         if (kind != CHC_TUPLE && !pgch__kind_takes_array(kind)) {
             goto type_mismatch;
         }
@@ -1523,8 +1511,8 @@ pgch__append_one(
             return;
         }
 
-        arr           = (pgch_array*)DatumGetPointer(val);
-        child_valtype = (arr->ndim > 1) ? ANYARRAYOID : arr->item_type;
+        pgch_array* arr   = (pgch_array*)DatumGetPointer(val);
+        Oid child_valtype = (arr->ndim > 1) ? ANYARRAYOID : arr->item_type;
 
         /* Read Tuple fields, including key-value pairs in Maps */
         if (kind == CHC_TUPLE) {
@@ -1545,7 +1533,7 @@ pgch__append_one(
 
         pgch_array_begin(w, col);
 
-        item_kind = pgch_column_kind(w, col);
+        chc_kind item_kind = pgch_column_kind(w, col);
         for (size_t i = 0; i < arr->len; i++) {
             pgch__append_one(
                 w, 0, item_kind, arr->datums[i], child_valtype, arr->nulls[i]
@@ -1603,8 +1591,6 @@ pgch__append_one(
         return;
     }
     case PATHOID: {
-        PATH* path;
-
         if (kind != CHC_LINE_STRING && kind != CHC_RING) {
             goto type_mismatch;
         }
@@ -1612,7 +1598,7 @@ pgch__append_one(
             pgch__append_null_array(w, col);
             return;
         }
-        path = DatumGetPathP(val);
+        PATH* path = DatumGetPathP(val);
         pgch__append_points(w, col, path->p, path->npts, path->closed);
         if ((Pointer)path != DatumGetPointer(val)) {
             pfree(path);
@@ -1620,8 +1606,6 @@ pgch__append_one(
         return;
     }
     case POLYGONOID: {
-        POLYGON* poly;
-
         if (kind != CHC_RING && kind != CHC_LINE_STRING) {
             goto type_mismatch;
         }
@@ -1629,7 +1613,7 @@ pgch__append_one(
             pgch__append_null_array(w, col);
             return;
         }
-        poly = DatumGetPolygonP(val);
+        POLYGON* poly = DatumGetPolygonP(val);
         pgch__append_points(w, col, poly->p, poly->npts, false);
         if ((Pointer)poly != DatumGetPointer(val)) {
             pfree(poly);
@@ -1879,15 +1863,14 @@ pgch__build_lc_dict(
         size_t len           = (size_t)(end - start);
         const uint8_t* bytes = node->lc.data.data + start;
         pgch_lcd_key k       = { bytes, len };
-        pgch_lcd_entry* entry;
-        bool found;
 
         if (nullable && node->lc.null_map.data[i]) {
             keys[i] = 0;
             continue;
         }
 
-        entry = pgch_lcd_insert(ht, k, &found);
+        bool found;
+        pgch_lcd_entry* entry = pgch_lcd_insert(ht, k, &found);
         if (found) {
             keys[i] = entry->idx;
             continue;
@@ -2065,9 +2048,6 @@ pgch_writer_bytes(const pgch_writer* w) {
 
 const chc_block_builder*
 pgch_writer_build(pgch_writer* w) {
-    MemoryContext old;
-    chc_block_col* bcols;
-
     /* Close every array context before building block */
     Assert(w->cursor_len == 0);
 
@@ -2075,9 +2055,9 @@ pgch_writer_build(pgch_writer* w) {
         MemoryContextDelete(w->bcxt);
     }
     w->bcxt = AllocSetContextCreate(w->cxt, "pgch block", ALLOCSET_DEFAULT_SIZES);
-    old     = MemoryContextSwitchTo(w->bcxt);
 
-    bcols = w->ncols ? palloc(w->ncols * sizeof(*bcols)) : NULL;
+    MemoryContext old    = MemoryContextSwitchTo(w->bcxt);
+    chc_block_col* bcols = w->ncols ? palloc(w->ncols * sizeof(*bcols)) : NULL;
     chc_block_builder_init(&w->bb, bcols);
 
     for (size_t i = 0; i < w->ncols; i++) {

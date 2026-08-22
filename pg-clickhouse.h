@@ -408,12 +408,11 @@ pgch_native_oid_for(const chc_type* type, const char* what) {
     case CHC_ARRAY: {
         /* PostgreSQL uses one array type for every nesting depth */
         const chc_type* leaf = type;
-        Oid array_type;
 
         while (chc_type_kind(leaf) == CHC_ARRAY) {
             leaf = chc_type_child(leaf, 0);
         }
-        array_type = pgch_native_oid_for(leaf, what);
+        Oid array_type = pgch_native_oid_for(leaf, what);
         /* Map and the multi-geometry types already name an array type */
         if (!type_is_array(array_type)) {
             array_type = get_array_type(array_type);
@@ -608,8 +607,6 @@ pgch__ch_scalar(Oid typid, int32 typmod, const pgch_type_opts* opts) {
 char*
 pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* opts) {
     static const pgch_type_opts defaults = {};
-    Oid elemtype;
-    const char* base;
 
     if (!opts) {
         opts = &defaults;
@@ -620,12 +617,12 @@ pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* op
      * Elements stay Nullable: PostgreSQL constrains the array, never its
      * elements, and ClickHouse rejects Nullable(Array)
      */
-    elemtype = get_element_type(typid);
+    Oid elemtype = get_element_type(typid);
     if (OidIsValid(elemtype)) {
         return psprintf("Array(%s)", pgch_ch_type_for(elemtype, typmod, false, opts));
     }
 
-    base = pgch__ch_scalar(typid, typmod, opts);
+    const char* base = pgch__ch_scalar(typid, typmod, opts);
     if (!base) {
         if (opts->low_cardinality) {
             return psprintf(

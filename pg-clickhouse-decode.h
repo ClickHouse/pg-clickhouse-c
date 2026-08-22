@@ -340,7 +340,6 @@ pgch__read_decimal(const chc_column* col, const chc_type* type, uint64_t row) {
     const uint8_t* p = (const uint8_t*)chc_column_fixed_data(col, &es);
     uint32_t scale   = (uint32_t)chc_type_decimal_scale(type);
     char buf[80];
-    int rc;
 
 #if PG_VERSION_NUM >= 140000
     if (es == 4) {
@@ -355,7 +354,7 @@ pgch__read_decimal(const chc_column* col, const chc_type* type, uint64_t row) {
     }
 #endif
 
-    rc = pgch__format_decimal(p + row * es, es, scale, buf, sizeof(buf));
+    int rc = pgch__format_decimal(p + row * es, es, scale, buf, sizeof(buf));
     if (rc < 0) {
         pgch_error(ERRCODE_FDW_ERROR, "decimal too wide");
     }
@@ -475,16 +474,14 @@ static Datum
 pgch__read_polygon(const chc_column* col, uint64_t row, bool* is_null) {
     const uint8_t *xs, *ys;
     int npts = pgch__read_axes(col, row, &xs, &ys);
-    size_t size;
-    POLYGON* poly;
 
     /* PostgreSQL has no pointless polygon, so an empty ring reads as NULL */
     if (npts == 0) {
         *is_null = true;
         return (Datum)0;
     }
-    size = offsetof(POLYGON, p) + sizeof(Point) * npts;
-    poly = (POLYGON*)palloc0(size);
+    size_t size   = offsetof(POLYGON, p) + sizeof(Point) * npts;
+    POLYGON* poly = (POLYGON*)palloc0(size);
     SET_VARSIZE(poly, size);
     poly->npts = npts;
     pgch__fill_points(poly->p, xs, ys, npts);
@@ -500,8 +497,6 @@ pgch__read_path(const chc_column* col, uint64_t row, bool* is_null) {
     bool closed = npts > 1 &&
                   float8_eq(pgch__rd_f64(xs, 0), pgch__rd_f64(xs, npts - 1)) &&
                   float8_eq(pgch__rd_f64(ys, 0), pgch__rd_f64(ys, npts - 1));
-    size_t size;
-    PATH* path;
 
     npts -= closed;
     /* PostgreSQL has no pointless path, so an empty line reads as NULL */
@@ -509,8 +504,8 @@ pgch__read_path(const chc_column* col, uint64_t row, bool* is_null) {
         *is_null = true;
         return (Datum)0;
     }
-    size = offsetof(PATH, p) + sizeof(Point) * npts;
-    path = (PATH*)palloc0(size);
+    size_t size = offsetof(PATH, p) + sizeof(Point) * npts;
+    PATH* path  = (PATH*)palloc0(size);
     SET_VARSIZE(path, size);
     path->npts   = npts;
     path->closed = closed;
@@ -578,12 +573,10 @@ static Datum
 pgch__read_json(const chc_column* col, uint64_t row, Oid valtype) {
     const char* p;
     size_t len;
-    char* cstr;
-    Datum ret;
 
     pgch__slice_str(col, row, &p, &len);
-    cstr = pnstrdup(p, len);
-    ret  = DirectFunctionCall1(
+    char* cstr = pnstrdup(p, len);
+    Datum ret  = DirectFunctionCall1(
         valtype == JSONOID ? json_in : jsonb_in, CStringGetDatum(cstr)
     );
     pfree(cstr);
@@ -839,13 +832,12 @@ pgch__read_tuple(
     bool* is_null
 ) {
     size_t n = chc_type_n_children(type);
-    pgch_tuple* slot;
 
     if (n == 0) {
         pgch_error(ERRCODE_FDW_ERROR, "returned tuple is empty");
     }
 
-    slot               = (pgch_tuple*)palloc(sizeof(pgch_tuple));
+    pgch_tuple* slot   = (pgch_tuple*)palloc(sizeof(pgch_tuple));
     slot->datums       = (Datum*)palloc(sizeof(Datum) * n);
     slot->nulls        = (bool*)palloc0(sizeof(bool) * n);
     slot->types        = (Oid*)palloc0(sizeof(Oid) * n);
@@ -1458,14 +1450,11 @@ pgch_reader_init_chunks(
 
 void
 pgch_reader_init(pgch_reader* r, const pgch_block_source* src) {
-    const char* src_err;
-    size_t ncols;
-
     memset(r, 0, sizeof(*r));
     r->src = *src;
     r->cxt = CurrentMemoryContext;
 
-    src_err = r->src.error(r->src.ud);
+    const char* src_err = r->src.error(r->src.ud);
     if (src_err) {
         r->done  = true;
         r->error = pstrdup(src_err);
@@ -1477,8 +1466,8 @@ pgch_reader_init(pgch_reader* r, const pgch_block_source* src) {
         return;
     }
 
-    ncols    = chc_block_n_columns(r->cur);
-    r->ncols = ncols;
+    size_t ncols = chc_block_n_columns(r->cur);
+    r->ncols     = ncols;
     if (ncols == 0) {
         r->done = true;
         return;
@@ -1499,13 +1488,11 @@ pgch_reader_init(pgch_reader* r, const pgch_block_source* src) {
 
 bool
 pgch_reader_next(pgch_reader* r) {
-    size_t ncols;
-
     if (r->done || r->coltypes == NULL || r->error) {
         return false;
     }
 
-    ncols = r->ncols;
+    size_t ncols = r->ncols;
 
     while (r->row >= chc_block_n_rows(r->cur)) {
         r->row = 0;
@@ -1588,8 +1575,6 @@ pgch__convert_generic(pgch_convert_state* state, Datum val) {
 
 static Datum
 pgch__convert_record(pgch_convert_state* state, Datum val) {
-    HeapTuple temptup;
-    HeapTuple htup;
     pgch_tuple* slot = (pgch_tuple*)DatumGetPointer(val);
 
     for (size_t i = 0; i < slot->len; i++) {
@@ -1615,7 +1600,7 @@ pgch__convert_record(pgch_convert_state* state, Datum val) {
         }
     }
 
-    htup = heap_form_tuple(state->indesc, slot->datums, slot->nulls);
+    HeapTuple htup = heap_form_tuple(state->indesc, slot->datums, slot->nulls);
     if (!state->outdesc) {
         val = heap_copy_tuple_as_datum(htup, state->indesc);
 
@@ -1625,11 +1610,8 @@ pgch__convert_record(pgch_convert_state* state, Datum val) {
             );
         }
     } else {
-        if (state->tupmap) {
-            temptup = execute_attr_map_tuple(htup, state->tupmap);
-        } else {
-            temptup = htup;
-        }
+        HeapTuple temptup =
+            state->tupmap ? execute_attr_map_tuple(htup, state->tupmap) : htup;
 
         val = heap_copy_tuple_as_datum(temptup, state->outdesc);
     }
@@ -1737,11 +1719,9 @@ pgch__convert_array(pgch_convert_state* state, Datum val) {
             state->typalign
         ));
     } else {
-        int dims[MAXDIM] = {};
-        int lbs[MAXDIM]  = {};
-        size_t idx       = 0;
-        Datum* flat;
-        bool* flatnulls;
+        int dims[MAXDIM]  = {};
+        int lbs[MAXDIM]   = {};
+        size_t idx        = 0;
         pgch_array* probe = slot;
 
         if (slot->ndim > MAXDIM) {
@@ -1766,8 +1746,8 @@ pgch__convert_array(pgch_convert_state* state, Datum val) {
         if (total == 0) {
             val = PointerGetDatum(construct_empty_array(state->item_type));
         } else {
-            flat      = palloc(sizeof(Datum) * total);
-            flatnulls = palloc0(sizeof(bool) * total);
+            Datum* flat     = palloc(sizeof(Datum) * total);
+            bool* flatnulls = palloc0(sizeof(bool) * total);
 
             /* PostgreSQL arrays are rectangular, ClickHouse nested arrays are not */
             if (!pgch__flatten_array(slot, dims, 0, flat, flatnulls, &idx)) {
@@ -1889,7 +1869,6 @@ static Datum
 pgch__convert_lseg(pgch_convert_state* state, Datum val) {
     Point* pts;
     int stored, npts;
-    LSEG* lseg;
 
     if (state->intype == PATHOID) {
         PATH* path = DatumGetPathP(val);
@@ -1912,7 +1891,7 @@ pgch__convert_lseg(pgch_convert_state* state, Datum val) {
             format_type_be(state->outtype)
         );
     }
-    lseg       = (LSEG*)palloc(sizeof(LSEG));
+    LSEG* lseg = (LSEG*)palloc(sizeof(LSEG));
     lseg->p[0] = pts[0];
     lseg->p[1] = pts[1 % stored];
     return LsegPGetDatum(lseg);
@@ -2172,12 +2151,10 @@ pgch__convert_init(
         if (outtype == TEXTOID) {
             fmgr_info(F_RECORD_OUT, &state->flinfo);
         } else if (outtype != RECORDOID) {
-            TypeCacheEntry* typentry;
-            TupleDesc tupdesc;
-
-            typentry = lookup_type_cache(
+            TypeCacheEntry* typentry = lookup_type_cache(
                 outtype, TYPECACHE_TUPDESC | TYPECACHE_DOMAIN_BASE_INFO
             );
+            TupleDesc tupdesc;
 
             if (typentry->typtype == TYPTYPE_DOMAIN) {
                 tupdesc = lookup_rowtype_tupdesc_noerror(
