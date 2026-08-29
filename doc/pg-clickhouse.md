@@ -67,6 +67,8 @@ translation unit also defines `CHC_IMPLEMENTATION`.
 extern const Oid pgch_kind_oids[CHC_KIND_COUNT];
 extern const int64_t pgch_pow10[10];
 
+Interval pgch_interval_unit_of(const chc_type *type);
+
 Oid pgch_datum_oid(const chc_type *type);
 Oid pgch_native_oid(const chc_type *type);
 Oid pgch_native_oid_for(const chc_type *type, const char *what);

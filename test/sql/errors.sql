@@ -82,6 +82,14 @@ SELECT pgch_decode(pgch_block('DateTime64(0)', 1, '\x0000000000000080'::bytea));
 SELECT pgch_decode(pgch_block('Date32', 1, '\x60dad9ff'::bytea));
 SELECT pgch_decode(pgch_block('Date32', 1, '\x00000080'::bytea));
 
+-- Reject intervals the ClickHouse unit cannot hold, months having no length
+SELECT pgch_roundtrip('IntervalDay', '36 hours'::interval);
+SELECT pgch_roundtrip('IntervalHour', '1 mon'::interval);
+SELECT pgch_roundtrip('IntervalYear', '18 mons'::interval);
+
+-- Reject Interval counts outside the PostgreSQL interval field
+SELECT pgch_decode(pgch_block('IntervalYear', 1, '\xffffffff00000000'::bytea));
+
 -- Reject Time and Time64 values greater than one day
 SELECT pgch_decode(pgch_block('Time', 1, '\xb0df3600'::bytea));
 SELECT pgch_decode(pgch_block('Time64(0)', 1, '\xb0df360000000000'::bytea));
