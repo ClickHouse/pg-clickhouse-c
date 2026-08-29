@@ -313,6 +313,7 @@ const Oid pgch_kind_oids[CHC_KIND_COUNT] = {
     [CHC_UINT32]       = INT8OID,
     [CHC_UINT64]       = INT8OID,
     [CHC_FLOAT32]      = FLOAT4OID,
+    [CHC_BFLOAT16]     = FLOAT4OID,
     [CHC_FLOAT64]      = FLOAT8OID,
     [CHC_DECIMAL32]    = NUMERICOID,
     [CHC_DECIMAL64]    = NUMERICOID,

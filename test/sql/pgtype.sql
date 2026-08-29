@@ -6,7 +6,7 @@ SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
   FROM unnest(ARRAY[
     'Int8', 'Int16', 'Int32', 'Int64',
     'UInt8', 'UInt16', 'UInt32', 'UInt64',
-    'Bool', 'Float32', 'Float64',
+    'Bool', 'Float32', 'Float64', 'BFloat16',
     'String', 'FixedString(5)', 'Enum8(''a'' = 1)', 'Enum16(''a'' = 1)',
     'UUID', 'IPv4', 'IPv6', 'JSON', 'Object(''json'')',
     'Date', 'Date32', 'DateTime', 'DateTime(''Europe/Berlin'')', 'Time'
@@ -78,7 +78,6 @@ SELECT t AS ch_type, c.type, c.ndims
 -- Types PostgreSQL cannot represent report the ClickHouse declaration
 SELECT pgch_pgcolumn('Int128');
 SELECT pgch_pgcolumn('UInt256');
-SELECT pgch_pgcolumn('BFloat16');
 SELECT pgch_pgcolumn('Dynamic');
 SELECT pgch_pgcolumn('Variant(Int32, String)');
 SELECT pgch_pgcolumn('QBit(Float32, 16)');

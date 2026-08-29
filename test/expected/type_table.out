@@ -13,7 +13,6 @@ SELECT r[1] AS "Omitted", r[2] AS "Reason" FROM pgch_rows(pgch_type_omitted()) t
 |               Omitted               |                         Reason                         |
 +-------------------------------------+--------------------------------------------------------+
 | AggregateFunction(sum, Int64)       | pgch: unknown type: sum                                |
-| BFloat16                            | pgch: unsupported column type "BFloat16"               |
 | Dynamic                             | pgch: unsupported column type "Dynamic"                |
 | Int128                              | pgch: unsupported column type "Int128"                 |
 | Int256                              | pgch: unsupported column type "Int256"                 |
@@ -47,6 +46,7 @@ SELECT r[1] AS "ClickHouse", r[2] AS "PostgreSQL", r[3] AS "Notes"
 |    ClickHouse     |         PostgreSQL          |              Notes               |
 +-------------------+-----------------------------+----------------------------------+
 | Array(T)          | T[]                         | One PG array type per depth      |
+| BFloat16          | real                        | Write drops low mantissa bits    |
 | Bool              | boolean                     |                                  |
 | Date              | date                        |                                  |
 | Date32            | date                        |                                  |

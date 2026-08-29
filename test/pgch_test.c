@@ -507,6 +507,7 @@ typedef struct type_doc {
 static const type_doc type_docs[] = {
     { "AggregateFunction", NULL, "sum, Int64" },
     { "Array", "T", "Int32", "T[]", "One PG array type per depth" },
+    { "BFloat16", NULL, NULL, NULL, "Write drops low mantissa bits" },
     { "DateTime64", "P", "3", "timestamp(P) with time zone", "P over 6 caps at 6" },
     { "Decimal", "P,S", "9,4", "numeric(P,S)" },
     { "Decimal32", "S", "4", "numeric(9,S)" },

@@ -6,7 +6,7 @@ SET IntervalStyle = 'postgres';
 SELECT t, pgch_pgtype(t) FROM unnest(ARRAY[
     'Int8', 'Int16', 'Int32', 'Int64',
     'UInt8', 'UInt16', 'UInt32', 'UInt64',
-    'Bool', 'Float32', 'Float64',
+    'Bool', 'Float32', 'Float64', 'BFloat16',
     'Decimal(9,2)', 'Decimal(38,10)',
     'String', 'FixedString(5)', 'Enum8(''a'' = 1)',
     'Date', 'Date32', 'DateTime', 'DateTime64(3)',
@@ -28,6 +28,7 @@ SELECT t, pgch_pgtype(t) FROM unnest(ARRAY[
  Bool                             | boolean
  Float32                          | real
  Float64                          | double precision
+ BFloat16                         | real
  Decimal(9,2)                     | numeric
  Decimal(38,10)                   | numeric
  String                           | text
@@ -47,7 +48,7 @@ SELECT t, pgch_pgtype(t) FROM unnest(ARRAY[
  Array(Int32)                     | integer[]
  Array(Array(String))             | text[]
  Tuple(Int32, String)             | record
-(30 rows)
+(31 rows)
 
 -- Verify integer bounds and width mappings
 SELECT pgch_roundtrip('Int8', 127::int2),
@@ -80,6 +81,16 @@ SELECT pgch_roundtrip('Float32', 1.5::float4),
  pgch_roundtrip | pgch_roundtrip 
 ----------------+----------------
  1.5            | -2.25
+(1 row)
+
+-- BFloat16 holds the leading 16 bits of a Float32, dropping the rest
+SELECT pgch_roundtrip('BFloat16', 1.5::float4),
+       pgch_roundtrip('BFloat16', (-2.25)::float4),
+       pgch_roundtrip('BFloat16', 1.1::float4),
+       encode(pgch_encode('BFloat16', 1.5::float4), 'hex');
+ pgch_roundtrip | pgch_roundtrip | pgch_roundtrip |             encode             
+----------------+----------------+----------------+--------------------------------
+ 1.5            | -2.25          | 1.09375        | 010101630842466c6f61743136c03f
 (1 row)
 
 -- Round-trip signed values across all Decimal widths

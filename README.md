@@ -200,6 +200,7 @@ name the parser resolves reaches this table or the omitted list `test/sql/type_t
 |    ClickHouse     |         PostgreSQL          |              Notes               |
 |-------------------|-----------------------------|----------------------------------|
 | Array(T)          | T[]                         | One PG array type per depth      |
+| BFloat16          | real                        | Write drops low mantissa bits    |
 | Bool              | boolean                     |                                  |
 | Date              | date                        |                                  |
 | Date32            | date                        |                                  |
