@@ -695,6 +695,15 @@ PGCH__APPEND_SCALAR(i64, int64_t, int64_t, uint64_t, PGCH__LE64)
 PGCH__APPEND_SCALAR(f32, float, double, uint32_t, PGCH__LE32)
 PGCH__APPEND_SCALAR(f64, double, double, uint64_t, PGCH__LE64)
 
+/* ClickHouse truncates a Float32 to its leading 16 bits, so match, do not round */
+static void
+pgch__append_bf16(pgch_writer* w, size_t col, float val, bool isnull) {
+    uint32_t bits;
+
+    memcpy(&bits, &val, sizeof bits);
+    pgch__append_i16(w, col, (int16_t)(uint16_t)(bits >> 16), isnull);
+}
+
 /* Fixed-width leaf takes n bytes as given, NULL rows taking zeros */
 static void
 pgch__append_raw(pgch_writer* w, size_t col, const void* p, size_t n, bool isnull) {
@@ -1352,6 +1361,10 @@ pgch__append_one(
         pgch__append_i8(w, col, DatumGetBool(val), isnull);
         return;
     case FLOAT4OID:
+        if (kind == CHC_BFLOAT16) {
+            pgch__append_bf16(w, col, DatumGetFloat4(val), isnull);
+            return;
+        }
         if (kind != CHC_FLOAT32) {
             goto type_mismatch;
         }

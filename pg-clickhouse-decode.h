@@ -237,6 +237,16 @@ PGCH__RD_FIXED(f32, float, uint32_t, PGCH__LE32)
 PGCH__RD_FIXED(f64, double, uint64_t, PGCH__LE64)
 PGCH__RD_FIXED(u64, uint64_t, uint64_t, PGCH__LE64)
 
+/* BFloat16 holds the leading 16 bits of a Float32, so widening fills with zeros */
+static inline float
+pgch__rd_bf16(const uint8_t* p, uint64_t row) {
+    uint32_t bits = (uint32_t)pgch__rd_u16(p, row) << 16;
+    float v;
+
+    memcpy(&v, &bits, sizeof v);
+    return v;
+}
+
 static inline void
 pgch__slice_str(
     const chc_column* col,
@@ -984,6 +994,10 @@ pgch_read_value(
     case CHC_FLOAT32:
         return Float4GetDatum(
             pgch__rd_f32((const uint8_t*)chc_column_fixed_data(col, NULL), row)
+        );
+    case CHC_BFLOAT16:
+        return Float4GetDatum(
+            pgch__rd_bf16((const uint8_t*)chc_column_fixed_data(col, NULL), row)
         );
     case CHC_FLOAT64:
         return Float8GetDatum(

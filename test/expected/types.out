@@ -346,6 +346,12 @@ SELECT pgch_roundtrip('Float32', '-Infinity'::float4) AS float_keeps_inf;
  -Infinity
 (1 row)
 
+SELECT pgch_roundtrip('BFloat16', 'NaN'::float4) AS bfloat_keeps_nan;
+ bfloat_keeps_nan 
+------------------
+ NaN
+(1 row)
+
 -- Return required Native query settings
 SELECT pgch_native_settings();
                                        pgch_native_settings                                       

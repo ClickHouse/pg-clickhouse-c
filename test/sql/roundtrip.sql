@@ -7,7 +7,7 @@ SET IntervalStyle = 'postgres';
 SELECT t, pgch_pgtype(t) FROM unnest(ARRAY[
     'Int8', 'Int16', 'Int32', 'Int64',
     'UInt8', 'UInt16', 'UInt32', 'UInt64',
-    'Bool', 'Float32', 'Float64',
+    'Bool', 'Float32', 'Float64', 'BFloat16',
     'Decimal(9,2)', 'Decimal(38,10)',
     'String', 'FixedString(5)', 'Enum8(''a'' = 1)',
     'Date', 'Date32', 'DateTime', 'DateTime64(3)',
@@ -33,6 +33,12 @@ SELECT pgch_roundtrip('Bool', true), pgch_roundtrip('Bool', false);
 
 SELECT pgch_roundtrip('Float32', 1.5::float4),
        pgch_roundtrip('Float64', (-2.25)::float8);
+
+-- BFloat16 holds the leading 16 bits of a Float32, dropping the rest
+SELECT pgch_roundtrip('BFloat16', 1.5::float4),
+       pgch_roundtrip('BFloat16', (-2.25)::float4),
+       pgch_roundtrip('BFloat16', 1.1::float4),
+       encode(pgch_encode('BFloat16', 1.5::float4), 'hex');
 
 -- Round-trip signed values across all Decimal widths
 SELECT pgch_roundtrip('Decimal(9,2)', 123.45::numeric),

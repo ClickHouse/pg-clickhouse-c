@@ -5,7 +5,7 @@ SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
   FROM unnest(ARRAY[
     'Int8', 'Int16', 'Int32', 'Int64',
     'UInt8', 'UInt16', 'UInt32', 'UInt64',
-    'Bool', 'Float32', 'Float64',
+    'Bool', 'Float32', 'Float64', 'BFloat16',
     'String', 'FixedString(5)', 'Enum8(''a'' = 1)', 'Enum16(''a'' = 1)',
     'UUID', 'IPv4', 'IPv6', 'JSON', 'Object(''json'')',
     'Date', 'Date32', 'DateTime', 'DateTime(''Europe/Berlin'')', 'Time'
@@ -23,6 +23,7 @@ SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
  Bool                      | boolean                  |     0 | f        | t
  Float32                   | real                     |     0 | f        | t
  Float64                   | double precision         |     0 | f        | t
+ BFloat16                  | real                     |     0 | f        | t
  String                    | text                     |     0 | f        | t
  FixedString(5)            | text                     |     0 | f        | t
  Enum8('a' = 1)            | text                     |     0 | f        | t
@@ -37,7 +38,7 @@ SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
  DateTime                  | timestamp with time zone |     0 | f        | t
  DateTime('Europe/Berlin') | timestamp with time zone |     0 | f        | t
  Time                      | time without time zone   |     0 | f        | t
-(25 rows)
+(26 rows)
 
 -- Nothing describes no column, so it maps to no type
 SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
@@ -190,8 +191,6 @@ SELECT pgch_pgcolumn('Int128');
 ERROR:  pgch: unsupported column type "Int128"
 SELECT pgch_pgcolumn('UInt256');
 ERROR:  pgch: unsupported column type "UInt256"
-SELECT pgch_pgcolumn('BFloat16');
-ERROR:  pgch: unsupported column type "BFloat16"
 SELECT pgch_pgcolumn('Dynamic');
 ERROR:  pgch: unsupported column type "Dynamic"
 SELECT pgch_pgcolumn('Variant(Int32, String)');

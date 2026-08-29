@@ -172,6 +172,7 @@ SELECT unnest(pgch_table_roundtrip('geoshape', null_array_empty => true));
 -- Keep non-finite values, which Float columns take
 SELECT pgch_roundtrip('Float64', 'NaN'::float8) AS float_keeps_nan;
 SELECT pgch_roundtrip('Float32', '-Infinity'::float4) AS float_keeps_inf;
+SELECT pgch_roundtrip('BFloat16', 'NaN'::float4) AS bfloat_keeps_nan;
 
 -- Return required Native query settings
 SELECT pgch_native_settings();
