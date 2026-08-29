@@ -38,7 +38,7 @@ SELECT pgch_roundtrip('Float32', 1.5::float4),
 SELECT pgch_roundtrip('BFloat16', 1.5::float4),
        pgch_roundtrip('BFloat16', (-2.25)::float4),
        pgch_roundtrip('BFloat16', 1.1::float4),
-       encode(pgch_encode('BFloat16', 1.5::float4), 'hex');
+       pgch_encode('BFloat16', 1.5::float4);
 
 -- Round-trip signed values across all Decimal widths
 SELECT pgch_roundtrip('Decimal(9,2)', 123.45::numeric),
@@ -53,8 +53,8 @@ SELECT pgch_roundtrip('String', 'hello'::text),
        pgch_roundtrip('FixedString(5)', 'abcde'::text);
 
 -- Verify binary String data and FixedString NUL padding on wire
-SELECT encode(pgch_encode('String', '\x00ff'::bytea), 'hex'),
-       encode(pgch_encode('FixedString(5)', 'abc'::text), 'hex');
+SELECT pgch_encode('String', '\x00ff'::bytea),
+       pgch_encode('FixedString(5)', 'abc'::text);
 
 SELECT pgch_roundtrip('Enum8(''red'' = 1, ''green'' = 2)', 'green'::text),
        pgch_roundtrip('Enum16(''a'' = -300, ''b'' = 300)', 'a'::text);
@@ -89,7 +89,7 @@ SELECT t, v AS one_unit, pgch_roundtrip_as(t, v) AS back
 SELECT pgch_roundtrip('IntervalHour', '1 day 2 hours'::interval),
        pgch_roundtrip('IntervalSecond', '-00:01:30'::interval),
        pgch_roundtrip('IntervalNanosecond', '00:00:00.000001'::interval),
-       encode(pgch_encode('IntervalWeek', '14 days'::interval), 'hex');
+       pgch_encode('IntervalWeek', '14 days'::interval);
 
 -- Interval columns take arrays and nulls, and String columns take an interval
 SELECT pgch_roundtrip('Array(IntervalMonth)', ARRAY['1 mon', '2 mons']::interval[]),
@@ -234,7 +234,7 @@ SELECT pgch_decode_chunks(pgch_encode_rows('Int32', ARRAY[1, 2]::int4[]) ||
 SELECT pgch_decode(pgch_encode_rows('Int32', ARRAY[]::int4[]));
 
 -- Pin Native output for one Int32 column and three rows
-SELECT encode(pgch_encode_rows('Int32', ARRAY[1, 2, 3]::int4[]), 'hex');
+SELECT pgch_encode_rows('Int32', ARRAY[1, 2, 3]::int4[]);
 
 -- Decode Tuple into record
 SELECT pgch_decode(
