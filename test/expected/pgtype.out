@@ -8,7 +8,8 @@ SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
     'Bool', 'Float32', 'Float64', 'BFloat16',
     'String', 'FixedString(5)', 'Enum8(''a'' = 1)', 'Enum16(''a'' = 1)',
     'UUID', 'IPv4', 'IPv6', 'JSON', 'Object(''json'')',
-    'Date', 'Date32', 'DateTime', 'DateTime(''Europe/Berlin'')', 'Time'
+    'Date', 'Date32', 'DateTime', 'DateTime(''Europe/Berlin'')', 'Time',
+    'IntervalNanosecond', 'IntervalDay', 'IntervalYear'
 ]) AS t, pgch_pgcolumn(t) AS c;
           ch_type          |           type           | ndims | nullable | is_column 
 ---------------------------+--------------------------+-------+----------+-----------
@@ -38,7 +39,10 @@ SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
  DateTime                  | timestamp with time zone |     0 | f        | t
  DateTime('Europe/Berlin') | timestamp with time zone |     0 | f        | t
  Time                      | time without time zone   |     0 | f        | t
-(26 rows)
+ IntervalNanosecond        | interval                 |     0 | f        | t
+ IntervalDay               | interval                 |     0 | f        | t
+ IntervalYear              | interval                 |     0 | f        | t
+(29 rows)
 
 -- Nothing describes no column, so it maps to no type
 SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
@@ -197,8 +201,6 @@ SELECT pgch_pgcolumn('Variant(Int32, String)');
 ERROR:  pgch: unsupported column type "Variant(Int32, String)"
 SELECT pgch_pgcolumn('QBit(Float32, 16)');
 ERROR:  pgch: unsupported column type "QBit(Float32, 16)"
-SELECT pgch_pgcolumn('IntervalDay');
-ERROR:  pgch: unsupported column type "IntervalDay"
 SELECT pgch_pgcolumn('Array(Int128)');
 ERROR:  pgch: unsupported column type "Int128"
 SELECT pgch_pgcolumn('AggregateFunction(sum, Int64)');

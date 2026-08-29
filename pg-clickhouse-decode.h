@@ -407,6 +407,34 @@ pgch__read_uuid(const chc_column* col, uint64_t row) {
     return UUIDPGetDatum(u);
 }
 
+/* ClickHouse is one unit, PostgreSQL keeps months, days and time apart */
+static Datum
+pgch__read_interval(const chc_column* col, const chc_type* type, uint64_t row) {
+    int64 raw     = pgch__rd_i64((const uint8_t*)chc_column_fixed_data(col, NULL), row);
+    Interval unit = pgch_interval_unit_of(type);
+    /* Exactly one field is set, or all zero for nanoseconds */
+    int64 scale  = unit.month + unit.day + unit.time;
+    Interval* iv = (Interval*)palloc0(sizeof(Interval));
+    int64 v      = raw / 1000;
+
+    if (scale && (pg_mul_s64_overflow(raw, scale, &v) ||
+                  ((unit.month || unit.day) && v != (int32)v))) {
+        pgch_errorf(
+            ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
+            "%s value out of range",
+            chc_type_name(type, NULL)
+        );
+    }
+    if (unit.month) {
+        iv->month = (int32)v;
+    } else if (unit.day) {
+        iv->day = (int32)v;
+    } else {
+        iv->time = v;
+    }
+    return IntervalPGetDatum(iv);
+}
+
 /* ClickHouse Point is Tuple(Float64, Float64), one column per axis */
 static Datum
 pgch__read_point(const chc_column* col, uint64_t row) {
@@ -1100,6 +1128,8 @@ pgch_read_value(
         }
         return TimeADTGetDatum(t);
     }
+    case CHC_INTERVAL:
+        return pgch__read_interval(col, type, row);
     case CHC_UUID:
         return pgch__read_uuid(col, row);
     case CHC_POINT:

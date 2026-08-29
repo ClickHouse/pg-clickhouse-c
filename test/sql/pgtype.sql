@@ -9,7 +9,8 @@ SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
     'Bool', 'Float32', 'Float64', 'BFloat16',
     'String', 'FixedString(5)', 'Enum8(''a'' = 1)', 'Enum16(''a'' = 1)',
     'UUID', 'IPv4', 'IPv6', 'JSON', 'Object(''json'')',
-    'Date', 'Date32', 'DateTime', 'DateTime(''Europe/Berlin'')', 'Time'
+    'Date', 'Date32', 'DateTime', 'DateTime(''Europe/Berlin'')', 'Time',
+    'IntervalNanosecond', 'IntervalDay', 'IntervalYear'
 ]) AS t, pgch_pgcolumn(t) AS c;
 
 -- Nothing describes no column, so it maps to no type
@@ -81,7 +82,6 @@ SELECT pgch_pgcolumn('UInt256');
 SELECT pgch_pgcolumn('Dynamic');
 SELECT pgch_pgcolumn('Variant(Int32, String)');
 SELECT pgch_pgcolumn('QBit(Float32, 16)');
-SELECT pgch_pgcolumn('IntervalDay');
 SELECT pgch_pgcolumn('Array(Int128)');
 SELECT pgch_pgcolumn('AggregateFunction(sum, Int64)');
 

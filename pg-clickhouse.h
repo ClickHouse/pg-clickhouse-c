@@ -16,6 +16,7 @@
 #include <stdint.h>
 
 #include "access/tupdesc.h"
+#include "datatype/timestamp.h"
 #include "utils/palloc.h"
 
 #include "clickhouse.h"
@@ -74,6 +75,13 @@ extern const Oid pgch_kind_oids[CHC_KIND_COUNT];
 
 /* Provide powers of ten for supported DateTime64 and Time64 scales */
 extern const int64_t pgch_pow10[10];
+
+/*
+ * Convert ClickHouse interval type to postgres interval description.
+ * One field set to scaling factor, except nanoseconds come back zeroed.
+ */
+extern Interval
+pgch_interval_unit_of(const chc_type* type);
 
 /*
  * Return OID describing Datum produced by pgch_read_value
@@ -216,7 +224,6 @@ pgch_buf_io(pgch_buf* b, chc_io* out_io);
 #include <string.h>
 
 #include "catalog/pg_type_d.h"
-#include "datatype/timestamp.h"
 #include "lib/stringinfo.h"
 #include "port/pg_bswap.h"
 #include "utils/date.h"
@@ -337,11 +344,39 @@ const Oid pgch_kind_oids[CHC_KIND_COUNT] = {
     [CHC_POINT]        = POINTOID,
     [CHC_RING]         = POLYGONOID,
     [CHC_LINE_STRING]  = PATHOID,
+    [CHC_INTERVAL]     = INTERVALOID,
 };
 
 const int64_t pgch_pow10[10] = {
     1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000,
 };
+
+Interval
+pgch_interval_unit_of(const chc_type* type) {
+    static const Interval units[] = {
+        [CHC_INTERVAL_NANOSECOND]  = { 0 }, /* Below microsecond */
+        [CHC_INTERVAL_MICROSECOND] = { .time = 1 },
+        [CHC_INTERVAL_MILLISECOND] = { .time = 1000 },
+        [CHC_INTERVAL_SECOND]      = { .time = USECS_PER_SEC },
+        [CHC_INTERVAL_MINUTE]      = { .time = USECS_PER_MINUTE },
+        [CHC_INTERVAL_HOUR]        = { .time = USECS_PER_HOUR },
+        [CHC_INTERVAL_DAY]         = { .day = 1 },
+        [CHC_INTERVAL_WEEK]        = { .day = 7 },
+        [CHC_INTERVAL_MONTH]       = { .month = 1 },
+        [CHC_INTERVAL_QUARTER]     = { .month = 3 },
+        [CHC_INTERVAL_YEAR]        = { .month = MONTHS_PER_YEAR },
+    };
+    chc_interval_unit unit = chc_type_interval_unit(type);
+
+    if (unit == CHC_INTERVAL_NONE || (size_t)unit >= lengthof(units)) {
+        pgch_errorf(
+            ERRCODE_FDW_INVALID_DATA_TYPE,
+            "unsupported Interval unit \"%s\"",
+            chc_type_name(type, NULL)
+        );
+    }
+    return units[unit];
+}
 
 static Oid
 pgch__datum_oid(const chc_type* type, const char* what) {

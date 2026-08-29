@@ -10,7 +10,7 @@ SELECT t, pgch_pgtype(t) FROM unnest(ARRAY[
     'Bool', 'Float32', 'Float64', 'BFloat16',
     'Decimal(9,2)', 'Decimal(38,10)',
     'String', 'FixedString(5)', 'Enum8(''a'' = 1)',
-    'Date', 'Date32', 'DateTime', 'DateTime64(3)',
+    'Date', 'Date32', 'DateTime', 'DateTime64(3)', 'IntervalDay',
     'UUID', 'IPv4', 'IPv6', 'JSON',
     'Nullable(String)', 'LowCardinality(String)',
     'LowCardinality(Nullable(String))',
@@ -73,6 +73,28 @@ SELECT pgch_roundtrip('Time', '12:34:56'::time),
        pgch_roundtrip('Time64(3)', '01:00:00'::time),
        pgch_roundtrip('Time64(6)', '12:34:56.123456'::time),
        pgch_roundtrip('Time64(9)', '23:59:59.999999'::time);
+
+-- Each Interval unit fills one PostgreSQL interval field, decoding a count of 1
+SELECT t, v AS one_unit, pgch_roundtrip_as(t, v) AS back
+  FROM unnest(ARRAY[
+    'IntervalNanosecond', 'IntervalMicrosecond', 'IntervalMillisecond',
+    'IntervalSecond', 'IntervalMinute', 'IntervalHour',
+    'IntervalDay', 'IntervalWeek',
+    'IntervalMonth', 'IntervalQuarter', 'IntervalYear'
+]) AS t,
+  LATERAL (SELECT (pgch_decode(pgch_block(t, 1, '\x0100000000000000')))[1]::interval)
+    AS s(v);
+
+-- A day counts 24 hours, as PostgreSQL epoch extraction does
+SELECT pgch_roundtrip('IntervalHour', '1 day 2 hours'::interval),
+       pgch_roundtrip('IntervalSecond', '-00:01:30'::interval),
+       pgch_roundtrip('IntervalNanosecond', '00:00:00.000001'::interval),
+       encode(pgch_encode('IntervalWeek', '14 days'::interval), 'hex');
+
+-- Interval columns take arrays and nulls, and String columns take an interval
+SELECT pgch_roundtrip('Array(IntervalMonth)', ARRAY['1 mon', '2 mons']::interval[]),
+       pgch_roundtrip('Nullable(IntervalSecond)', NULL::interval) IS NULL AS is_null,
+       pgch_roundtrip('String', '3 days'::interval);
 
 -- DateTime read as time keeps the UTC time of day, off the session zone
 SET TimeZone = 'America/Los_Angeles';

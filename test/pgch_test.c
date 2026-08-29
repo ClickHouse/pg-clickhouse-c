@@ -517,6 +517,7 @@ static const type_doc type_docs[] = {
     { "Enum8", NULL, "'a' = 1" },
     { "Enum16", NULL, "'a' = 1" },
     { "FixedString", "N", "5", NULL, "N counts CH bytes, PG characters" },
+    { "IntervalNanosecond", NULL, NULL, NULL, "Truncates to microsecond" },
     { "JSON", NULL, NULL, NULL, "Also reads into json" },
     { "LowCardinality", "T", "String", "T" },
     { "Map", "K,V", "String, Int64", NULL, "One record per pair" },
@@ -679,7 +680,7 @@ scan_types(void) {
     for (unsigned i = 0; i < lengthof(type_docs); i++) {
         const char* name = type_docs[i].name;
 
-        if (chc__name_to_kind(name, strlen(name)) == CHC_VOID) {
+        if (!chc__name_lookup(name, strlen(name))) {
             scan_type(&s, name);
         }
     }

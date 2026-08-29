@@ -81,6 +81,9 @@ them too. `Enum` takes text matching a declared name. `numeric` scales to
 destination `Decimal`, and values exceeding its width raise instead of
 wrapping. `inet` family must match `IPv4` or `IPv6`.
 
+`interval` conversion raises `ERRCODE_DATETIME_VALUE_OUT_OF_RANGE` when it'd
+be lossy, such as when converting 18 months into an IntervalYear.
+
 NULL requires nullable destination. NULL passed to non-nullable destination
 raises `ERRCODE_NOT_NULL_VIOLATION`, subject to array policy below.
 

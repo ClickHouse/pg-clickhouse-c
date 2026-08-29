@@ -704,6 +704,52 @@ pgch__append_bf16(pgch_writer* w, size_t col, float val, bool isnull) {
     pgch__append_i16(w, col, (int16_t)(uint16_t)(bits >> 16), isnull);
 }
 
+/* PostgreSQL interval to ClickHouse ticks. Months kept separate from days and time */
+static int64
+pgch__interval_raw(const Interval* iv, Interval unit, const char* name) {
+    int64 usec;
+
+    if (unit.month) {
+        if (!iv->day && !iv->time && iv->month % unit.month == 0) {
+            return iv->month / unit.month;
+        }
+    } else if (
+        !iv->month && !pg_mul_s64_overflow((int64)iv->day, USECS_PER_DAY, &usec) &&
+        !pg_add_s64_overflow(usec, iv->time, &usec)
+    ) {
+        int64 per = unit.day * USECS_PER_DAY + unit.time;
+
+        if (per) {
+            if (usec % per == 0) {
+                return usec / per;
+            }
+        } else {
+            int64 nsec;
+
+            if (!pg_mul_s64_overflow(usec, 1000, &nsec)) {
+                return nsec;
+            }
+        }
+    }
+    pgch_errorf(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, "interval does not fit %s", name);
+}
+
+static void
+pgch__append_interval(pgch_writer* w, size_t col, const Interval* iv, bool isnull) {
+    MemoryContext old = MemoryContextSwitchTo(w->cxt);
+    pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
+    uint64_t raw      = 0;
+
+    if (!isnull) {
+        raw = (uint64_t)pgch__interval_raw(
+            iv, pgch_interval_unit_of(node->type), chc_type_name(node->type, NULL)
+        );
+    }
+    raw = PGCH__LE64(raw);
+    pgch_buf_append(pgch__fixed_data(node), &raw, sizeof raw);
+    MemoryContextSwitchTo(old);
+}
+
 /* Fixed-width leaf takes n bytes as given, NULL rows taking zeros */
 static void
 pgch__append_raw(pgch_writer* w, size_t col, const void* p, size_t n, bool isnull) {
@@ -1459,6 +1505,12 @@ pgch__append_one(
             goto type_mismatch;
         }
     }
+    case INTERVALOID:
+        if (kind != CHC_INTERVAL) {
+            goto type_mismatch;
+        }
+        pgch__append_interval(w, col, isnull ? NULL : DatumGetIntervalP(val), isnull);
+        return;
     case TIMESTAMPOID:
     case TIMESTAMPTZOID: {
         /* PostgreSQL timestamp uses session timezone when cast to timestamptz */
