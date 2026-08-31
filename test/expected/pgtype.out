@@ -92,7 +92,9 @@ SELECT t AS ch_type, c.type, c.truncated
   FROM unnest(ARRAY[
     'DateTime64(0)', 'DateTime64(3)', 'DateTime64(6)', 'DateTime64(9)',
     'DateTime64(3, ''Europe/Berlin'')',
-    'Time64(0)', 'Time64(3)', 'Time64(6)', 'Time64(9)'
+    'Time64(0)', 'Time64(3)', 'Time64(6)', 'Time64(9)',
+    'IntervalNanosecond', 'IntervalMicrosecond', 'IntervalDay',
+    'Nullable(IntervalNanosecond)', 'Array(IntervalNanosecond)'
 ]) AS t, pgch_pgcolumn(t) AS c;
             ch_type             |            type             | truncated 
 --------------------------------+-----------------------------+-----------
@@ -105,7 +107,12 @@ SELECT t AS ch_type, c.type, c.truncated
  Time64(3)                      | time(3) without time zone   | f
  Time64(6)                      | time(6) without time zone   | f
  Time64(9)                      | time(6) without time zone   | t
-(9 rows)
+ IntervalNanosecond             | interval                    | t
+ IntervalMicrosecond            | interval                    | f
+ IntervalDay                    | interval                    | f
+ Nullable(IntervalNanosecond)   | interval                    | t
+ Array(IntervalNanosecond)      | interval[]                  | t
+(14 rows)
 
 -- Only an outer Nullable makes the column nullable
 SELECT t AS ch_type, c.type, c.nullable

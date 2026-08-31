@@ -36,7 +36,9 @@ SELECT t AS ch_type, c.type, c.truncated
   FROM unnest(ARRAY[
     'DateTime64(0)', 'DateTime64(3)', 'DateTime64(6)', 'DateTime64(9)',
     'DateTime64(3, ''Europe/Berlin'')',
-    'Time64(0)', 'Time64(3)', 'Time64(6)', 'Time64(9)'
+    'Time64(0)', 'Time64(3)', 'Time64(6)', 'Time64(9)',
+    'IntervalNanosecond', 'IntervalMicrosecond', 'IntervalDay',
+    'Nullable(IntervalNanosecond)', 'Array(IntervalNanosecond)'
 ]) AS t, pgch_pgcolumn(t) AS c;
 
 -- Only an outer Nullable makes the column nullable
