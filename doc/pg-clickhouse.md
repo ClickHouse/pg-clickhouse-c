@@ -128,8 +128,8 @@ include context in errors.
 Call `pgch_pg_type_is_column` before using result in a table definition. Choose
 a fallback when it returns false.
 
-`truncated` reports a `DateTime64` or `Time64` beyond microseconds, which
-PostgreSQL rounds off.
+`truncated` reports sub-microsecond precision PostgreSQL drops:
+`DateTime64(P > 6)`, `Time64(P > 6)`, or `IntervalNanosecond`.
 
 ## PostgreSQL to ClickHouse types
 

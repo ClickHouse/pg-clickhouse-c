@@ -525,6 +525,10 @@ pgch_pg_type_for(const chc_type* type, const char* what) {
         out.typmod    = Min(chc_type_datetime64_scale(leaf), MAX_TIME_PRECISION);
         out.truncated = out.typmod < chc_type_datetime64_scale(leaf);
         break;
+    /* PostgreSQL interval stops at microsecond */
+    case CHC_INTERVAL:
+        out.truncated = chc_type_interval_unit(leaf) == CHC_INTERVAL_NANOSECOND;
+        break;
     /* Map and the multi-geometry types name a PostgreSQL array of their own */
     case CHC_MAP:
     case CHC_POLYGON:
