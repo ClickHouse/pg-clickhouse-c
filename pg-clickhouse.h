@@ -70,8 +70,27 @@ pgch_in_alloc(void);
 
 /* ---- type mapping --------------------------------------------------- */
 
+/*
+ * PostgreSQL 19 oid8 represents UInt64 exactly, earlier versions use numeric
+ * Wider ClickHouse integers map to numeric on every PostgreSQL version
+ * Predefine PGCH_UINT64_OID to override
+ */
+#ifndef PGCH_UINT64_OID
+#if PG_VERSION_NUM >= 190000
+#define PGCH_UINT64_OID OID8OID
+#else
+#define PGCH_UINT64_OID NUMERICOID
+#endif
+#endif
+
 /* Map scalar ClickHouse kinds to PostgreSQL type OIDs */
 extern const Oid pgch_kind_oids[CHC_KIND_COUNT];
+
+/* Report ClickHouse unsigned integer kinds */
+static inline bool
+pgch_kind_is_unsigned(chc_kind kind) {
+    return kind >= CHC_UINT8 && kind <= CHC_UINT256;
+}
 
 /* Provide powers of ten for supported DateTime64 and Time64 scales */
 extern const int64_t pgch_pow10[10];
@@ -318,10 +337,14 @@ const Oid pgch_kind_oids[CHC_KIND_COUNT] = {
     [CHC_UINT16]       = INT4OID,
     [CHC_INT64]        = INT8OID,
     [CHC_UINT32]       = INT8OID,
-    [CHC_UINT64]       = INT8OID,
     [CHC_FLOAT32]      = FLOAT4OID,
     [CHC_BFLOAT16]     = FLOAT4OID,
     [CHC_FLOAT64]      = FLOAT8OID,
+    [CHC_UINT64]       = PGCH_UINT64_OID,
+    [CHC_INT128]       = NUMERICOID,
+    [CHC_UINT128]      = NUMERICOID,
+    [CHC_INT256]       = NUMERICOID,
+    [CHC_UINT256]      = NUMERICOID,
     [CHC_DECIMAL32]    = NUMERICOID,
     [CHC_DECIMAL64]    = NUMERICOID,
     [CHC_DECIMAL128]   = NUMERICOID,

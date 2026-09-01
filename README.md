@@ -222,6 +222,8 @@ name the parser resolves reaches this table or the omitted list `test/sql/type_t
 | Int16               | smallint                    |                                  |
 | Int32               | integer                     |                                  |
 | Int64               | bigint                      |                                  |
+| Int128              | numeric                     |                                  |
+| Int256              | numeric                     |                                  |
 | IntervalDay         | interval                    |                                  |
 | IntervalHour        | interval                    |                                  |
 | IntervalMicrosecond | interval                    |                                  |
@@ -250,7 +252,9 @@ name the parser resolves reaches this table or the omitted list `test/sql/type_t
 | UInt8               | smallint                    |                                  |
 | UInt16              | integer                     |                                  |
 | UInt32              | bigint                      |                                  |
-| UInt64              | bigint                      | Errors on values > BIGINT max    |
+| UInt64              | numeric                     | oid8 for PG19+                   |
+| UInt128             | numeric                     |                                  |
+| UInt256             | numeric                     |                                  |
 | UUID                | uuid                        |                                  |
 <!-- TYPE-TABLE-END -->
 

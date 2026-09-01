@@ -16,8 +16,8 @@ extern "C" {
 
 /*
  * Decode one value and store returned Datum type in *valtype
- * Set *valtype to JSONOID to preserve JSON text, or OID8OID on PostgreSQL 19+
- * to accept full UInt64 range
+ * Set *valtype to JSONOID to preserve JSON text, or to NUMERICOID to read
+ * UInt64 as numeric where oid8 is the default
  */
 extern Datum
 pgch_read_value(
@@ -265,12 +265,13 @@ pgch__slice_str(
 
 /* ---- per-kind readers ----------------------------------------------- */
 
-/* ClickHouse stores Decimal as a scaled, little-endian signed integer */
+/* ClickHouse stores Decimal and wide integers as little-endian two's complement */
 static int
-pgch__format_decimal(
+pgch__format_int(
     const uint8_t* bytes,
     size_t width,
     uint32_t scale,
+    bool is_signed,
     char* out,
     size_t out_cap
 ) {
@@ -285,7 +286,7 @@ pgch__format_decimal(
     for (size_t i = 0; i < nwords; i++) {
         mag[i] = pgch__rd_u32(bytes, i);
     }
-    if (mag[nwords - 1] & 0x80000000u) {
+    if (is_signed && (mag[nwords - 1] & 0x80000000u)) {
         neg = true;
         for (size_t i = 0; i < nwords; i++) {
             mag[i] = ~mag[i];
@@ -364,9 +365,34 @@ pgch__read_decimal(const chc_column* col, const chc_type* type, uint64_t row) {
     }
 #endif
 
-    int rc = pgch__format_decimal(p + row * es, es, scale, buf, sizeof(buf));
-    if (rc < 0) {
+    if (pgch__format_int(p + row * es, es, scale, true, buf, sizeof(buf)) < 0) {
         pgch_error(ERRCODE_FDW_ERROR, "decimal too wide");
+    }
+    return DirectFunctionCall3(
+        numeric_in, CStringGetDatum(buf), ObjectIdGetDatum(0), Int32GetDatum(-1)
+    );
+}
+
+/* ClickHouse integers outside bigint's range map to PostgreSQL numeric */
+static Datum
+pgch__read_wide_int(const chc_column* col, chc_kind kind, uint64_t row) {
+    size_t width;
+    const uint8_t* p = (const uint8_t*)chc_column_fixed_data(col, &width);
+    char buf[80];
+
+#if PG_VERSION_NUM >= 140000
+    if (kind == CHC_UINT64) {
+        uint64_t v = pgch__rd_u64(p, row);
+
+        if (v <= (uint64_t)PG_INT64_MAX) {
+            return NumericGetDatum(int64_to_numeric((int64)v));
+        }
+    }
+#endif
+    if (pgch__format_int(
+            p + row * width, width, 0, !pgch_kind_is_unsigned(kind), buf, sizeof(buf)
+        ) < 0) {
+        pgch_error(ERRCODE_FDW_ERROR, "integer too wide");
     }
     return DirectFunctionCall3(
         numeric_in, CStringGetDatum(buf), ObjectIdGetDatum(0), Int32GetDatum(-1)
@@ -999,26 +1025,21 @@ pgch_read_value(
         return Int64GetDatum(
             pgch__rd_i64((const uint8_t*)chc_column_fixed_data(col, NULL), row)
         );
-    case CHC_UINT64: {
-        uint64_t v =
-            pgch__rd_u64((const uint8_t*)chc_column_fixed_data(col, NULL), row);
-
+    case CHC_UINT64:
 #if PG_VERSION_NUM >= 190000
-        /* PostgreSQL oid8 supports full UInt64 range */
-        if (want == OID8OID) {
-            *valtype = OID8OID;
-            return ObjectId8GetDatum(v);
-        }
-#endif
-        if (v > (uint64_t)PG_INT64_MAX) {
-            pgch_errorf(
-                ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-                "value " UINT64_FORMAT " is out of range of bigint",
-                v
+        if (want != NUMERICOID) {
+            return ObjectId8GetDatum(
+                pgch__rd_u64((const uint8_t*)chc_column_fixed_data(col, NULL), row)
             );
         }
-        return Int64GetDatum((int64)v);
-    }
+        *valtype = NUMERICOID;
+#endif
+        /* fall through */
+    case CHC_INT128:
+    case CHC_UINT128:
+    case CHC_INT256:
+    case CHC_UINT256:
+        return pgch__read_wide_int(col, kind, row);
     case CHC_FLOAT32:
         return Float4GetDatum(
             pgch__rd_f32((const uint8_t*)chc_column_fixed_data(col, NULL), row)

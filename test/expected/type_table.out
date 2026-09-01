@@ -14,15 +14,11 @@ SELECT r[1] AS "Omitted", r[2] AS "Reason" FROM pgch_rows(pgch_type_omitted()) t
 +-------------------------------------+--------------------------------------------------------+
 | AggregateFunction(sum, Int64)       | pgch: unknown type: sum                                |
 | Dynamic                             | pgch: unsupported column type "Dynamic"                |
-| Int128                              | pgch: unsupported column type "Int128"                 |
-| Int256                              | pgch: unsupported column type "Int256"                 |
 | Nested(a Int32)                     | pgch: unknown type: a                                  |
 | Nothing                             | pgch: no PostgreSQL type                               |
 | Object('json')                      | serializes as a materialized Tuple, unlike JSON        |
 | QBit(BFloat16, 16)                  | pgch: unsupported column type "QBit(BFloat16, 16)"     |
 | SimpleAggregateFunction(sum, Int64) | pgch: unknown type: sum                                |
-| UInt128                             | pgch: unsupported column type "UInt128"                |
-| UInt256                             | pgch: unsupported column type "UInt256"                |
 | Variant(Int32, String)              | pgch: unsupported column type "Variant(Int32, String)" |
 | Void                                | pgch: no PostgreSQL type                               |
 +-------------------------------------+--------------------------------------------------------+
@@ -57,6 +53,8 @@ SELECT r[1] AS "ClickHouse", r[2] AS "PostgreSQL", r[3] AS "Notes"
 | Int16               | smallint                    |                                  |
 | Int32               | integer                     |                                  |
 | Int64               | bigint                      |                                  |
+| Int128              | numeric                     |                                  |
+| Int256              | numeric                     |                                  |
 | IntervalDay         | interval                    |                                  |
 | IntervalHour        | interval                    |                                  |
 | IntervalMicrosecond | interval                    |                                  |
@@ -85,7 +83,9 @@ SELECT r[1] AS "ClickHouse", r[2] AS "PostgreSQL", r[3] AS "Notes"
 | UInt8               | smallint                    |                                  |
 | UInt16              | integer                     |                                  |
 | UInt32              | bigint                      |                                  |
-| UInt64              | bigint                      | Errors on values > BIGINT max    |
+| UInt64              | numeric                     | oid8 for PG19+                   |
+| UInt128             | numeric                     |                                  |
+| UInt256             | numeric                     |                                  |
 | UUID                | uuid                        |                                  |
 +---------------------+-----------------------------+----------------------------------+
 
