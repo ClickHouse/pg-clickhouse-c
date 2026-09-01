@@ -143,6 +143,66 @@ pgch_encode_rows(PG_FUNCTION_ARGS) {
     PG_RETURN_BYTEA_P(encode_rows(PG_GETARG_TEXT_PP(0), vals, nulls, nvals, elemtype));
 }
 
+PG_FUNCTION_INFO_V1(pgch_encode_valid_rows);
+
+/* Test recovery after value conversion fails */
+Datum
+pgch_encode_valid_rows(PG_FUNCTION_ARGS) {
+    Oid arrtype  = get_fn_expr_argtype(fcinfo->flinfo, 1);
+    Oid elemtype = get_element_type(arrtype);
+    int16 typlen;
+    bool typbyval;
+    char typalign;
+    Datum* vals;
+    bool* nulls;
+    int nvals;
+    chc_type* t                = parse_ch_type(PG_GETARG_TEXT_PP(0), "column c");
+    pgch_col col               = { .name = "c", .name_len = 1, .type = t };
+    pgch_writer* w             = pgch_writer_new(CurrentMemoryContext, &col, 1);
+    pgch_buf buf               = {};
+    pgch_checkpoint checkpoint = {};
+    chc_io io;
+    chc_err err       = {};
+    MemoryContext old = CurrentMemoryContext;
+
+    if (!OidIsValid(elemtype)) {
+        elog(ERROR, "second argument is not an array");
+    }
+    get_typlenbyvalalign(elemtype, &typlen, &typbyval, &typalign);
+    deconstruct_array(
+        PG_GETARG_ARRAYTYPE_P(1),
+        elemtype,
+        typlen,
+        typbyval,
+        typalign,
+        &vals,
+        &nulls,
+        &nvals
+    );
+
+    for (int i = 0; i < nvals; i++) {
+        pgch_writer_checkpoint(w, &checkpoint);
+        PG_TRY();
+        { pgch_append_datum(w, 0, vals[i], elemtype, nulls[i]); }
+        PG_CATCH();
+        {
+            MemoryContextSwitchTo(old);
+            FlushErrorState();
+            pgch_writer_rollback(w, &checkpoint);
+        }
+        PG_END_TRY();
+    }
+
+    pgch_buf_io(&buf, &io);
+    if (chc_block_write(&io, pgch_writer_build(w), &pgch_block_opts_local, &err) !=
+        CHC_OK) {
+        pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
+    }
+    pgch_checkpoint_free(&checkpoint);
+    pgch_writer_free(w);
+    PG_RETURN_BYTEA_P(bytea_from_buf(&buf));
+}
+
 PG_FUNCTION_INFO_V1(pgch_encode_pairs);
 
 /*

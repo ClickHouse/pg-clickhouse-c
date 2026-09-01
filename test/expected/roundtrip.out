@@ -488,6 +488,14 @@ SELECT pgch_encode_rows('Int32', ARRAY[1, 2, 3]::int4[]);
  \x0103016305496e743332010000000200000003000000
 (1 row)
 
+-- Skip invalid value without losing complete rows
+SELECT pgch_decode(pgch_encode_valid_rows(
+    'Nullable(Enum8(''ok'' = 1))', ARRAY['ok', 'bad', 'ok']::text[]));
+ pgch_decode 
+-------------
+ {ok,ok}
+(1 row)
+
 -- Decode Tuple into record
 SELECT pgch_decode(
     '\x0102'::bytea ||

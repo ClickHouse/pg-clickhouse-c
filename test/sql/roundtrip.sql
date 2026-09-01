@@ -263,6 +263,10 @@ SELECT pgch_decode(pgch_encode_rows('Int32', ARRAY[]::int4[]));
 -- Pin Native output for one Int32 column and three rows
 SELECT pgch_encode_rows('Int32', ARRAY[1, 2, 3]::int4[]);
 
+-- Skip invalid value without losing complete rows
+SELECT pgch_decode(pgch_encode_valid_rows(
+    'Nullable(Enum8(''ok'' = 1))', ARRAY['ok', 'bad', 'ok']::text[]));
+
 -- Decode Tuple into record
 SELECT pgch_decode(
     '\x0102'::bytea ||
