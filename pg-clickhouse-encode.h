@@ -25,6 +25,15 @@ typedef struct pgch_col {
 
 typedef struct pgch_writer pgch_writer;
 
+/* Caller owns checkpoint, initialize to zero before first use */
+typedef struct pgch_checkpoint {
+    void* entries;
+    size_t nentries;
+    size_t capacity;
+    const pgch_writer* writer;
+    uint64 generation;
+} pgch_checkpoint;
+
 /*
  * Create writer in a child context of parent
  * Copy column names, borrow column types, reject unsupported types
@@ -43,6 +52,19 @@ typedef enum pgch_null_array {
 
 extern void
 pgch_writer_set_null_array(pgch_writer* w, pgch_null_array policy);
+
+/*
+ * Save or restore row write position, no array or tuple may be open when saving
+ * Allocate storage in CurrentMemoryContext, reuse it on later saves
+ */
+extern void
+pgch_writer_checkpoint(pgch_writer* w, pgch_checkpoint* checkpoint);
+
+extern void
+pgch_writer_rollback(pgch_writer* w, const pgch_checkpoint* checkpoint);
+
+extern void
+pgch_checkpoint_free(pgch_checkpoint* checkpoint);
 
 /*
  * Append PostgreSQL value to column
@@ -170,6 +192,12 @@ pgch__offs_len(const pgch_buf* b) {
 
 typedef struct pgch__node pgch__node;
 
+typedef struct pgch__node_checkpoint {
+    size_t data;
+    size_t offsets;
+    size_t nulls;
+} pgch__node_checkpoint;
+
 typedef struct pgch__cast {
     Oid from;
     Oid to;
@@ -259,6 +287,8 @@ struct pgch_writer {
     size_t cursor_len;
     size_t cursor_cap;
     size_t cursor_col;
+
+    uint64 generation;
 };
 
 static void
@@ -479,6 +509,167 @@ pgch_writer_free(pgch_writer* w) {
 void
 pgch_writer_set_null_array(pgch_writer* w, pgch_null_array policy) {
     w->null_array = policy;
+}
+
+static size_t
+pgch__node_count(const pgch__node* n) {
+    size_t count = 1;
+
+    switch (n->layout) {
+    case CHC_COL_NULLABLE:
+        return count + pgch__node_count(n->nullable.inner);
+    case CHC_COL_ARRAY:
+        return count + pgch__node_count(n->array.values);
+    case CHC_COL_TUPLE:
+        for (size_t i = 0; i < n->tuple.arity; i++) {
+            count += pgch__node_count(n->tuple.children[i]);
+        }
+        return count;
+    case CHC_COL_FIXED:
+    case CHC_COL_STRING:
+    case CHC_COL_LOW_CARDINALITY:
+        return count;
+    case CHC_COL_NOTHING:
+        break;
+    }
+    pg_unreachable();
+}
+
+static void
+pgch__checkpoint_node(
+    const pgch__node* n,
+    pgch__node_checkpoint* entries,
+    size_t* pos
+) {
+    pgch__node_checkpoint* checkpoint = &entries[(*pos)++];
+
+    *checkpoint = (pgch__node_checkpoint){};
+    switch (n->layout) {
+    case CHC_COL_FIXED:
+        checkpoint->data = n->fixed.data.len;
+        return;
+    case CHC_COL_STRING:
+        checkpoint->data    = n->str.data.len;
+        checkpoint->offsets = n->str.offs.len;
+        return;
+    case CHC_COL_NULLABLE:
+        checkpoint->nulls = n->nullable.null_map.len;
+        pgch__checkpoint_node(n->nullable.inner, entries, pos);
+        return;
+    case CHC_COL_ARRAY:
+        checkpoint->offsets = n->array.offs.len;
+        pgch__checkpoint_node(n->array.values, entries, pos);
+        return;
+    case CHC_COL_TUPLE:
+        for (size_t i = 0; i < n->tuple.arity; i++) {
+            pgch__checkpoint_node(n->tuple.children[i], entries, pos);
+        }
+        return;
+    case CHC_COL_LOW_CARDINALITY:
+        checkpoint->data    = n->lc.data.len;
+        checkpoint->offsets = n->lc.offs.len;
+        checkpoint->nulls   = n->lc.null_map.len;
+        return;
+    case CHC_COL_NOTHING:
+        break;
+    }
+    pg_unreachable();
+}
+
+static void
+pgch__rollback_node(pgch__node* n, const pgch__node_checkpoint* entries, size_t* pos) {
+    const pgch__node_checkpoint* checkpoint = &entries[(*pos)++];
+
+    switch (n->layout) {
+    case CHC_COL_FIXED:
+        n->fixed.data.len = checkpoint->data;
+        return;
+    case CHC_COL_STRING:
+        n->str.data.len = checkpoint->data;
+        n->str.offs.len = checkpoint->offsets;
+        return;
+    case CHC_COL_NULLABLE:
+        n->nullable.null_map.len = checkpoint->nulls;
+        pgch__rollback_node(n->nullable.inner, entries, pos);
+        return;
+    case CHC_COL_ARRAY:
+        n->array.offs.len = checkpoint->offsets;
+        pgch__rollback_node(n->array.values, entries, pos);
+        return;
+    case CHC_COL_TUPLE:
+        for (size_t i = 0; i < n->tuple.arity; i++) {
+            pgch__rollback_node(n->tuple.children[i], entries, pos);
+        }
+        return;
+    case CHC_COL_LOW_CARDINALITY:
+        n->lc.data.len     = checkpoint->data;
+        n->lc.offs.len     = checkpoint->offsets;
+        n->lc.null_map.len = checkpoint->nulls;
+        return;
+    case CHC_COL_NOTHING:
+        break;
+    }
+    pg_unreachable();
+}
+
+void
+pgch_writer_checkpoint(pgch_writer* w, pgch_checkpoint* checkpoint) {
+    size_t nentries = 0;
+    size_t pos      = 0;
+
+    if (w->cursor_len) {
+        pgch_error(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, "checkpoint inside nested value"
+        );
+    }
+    for (size_t i = 0; i < w->ncols; i++) {
+        nentries += pgch__node_count(w->cols[i].root);
+    }
+    if (checkpoint->capacity < nentries) {
+        checkpoint->entries =
+            checkpoint->entries
+                ? repalloc(
+                      checkpoint->entries, nentries * sizeof(pgch__node_checkpoint)
+                  )
+                : palloc(nentries * sizeof(pgch__node_checkpoint));
+        checkpoint->capacity = nentries;
+    }
+    for (size_t i = 0; i < w->ncols; i++) {
+        pgch__checkpoint_node(w->cols[i].root, checkpoint->entries, &pos);
+    }
+    checkpoint->nentries   = nentries;
+    checkpoint->writer     = w;
+    checkpoint->generation = w->generation;
+}
+
+void
+pgch_writer_rollback(pgch_writer* w, const pgch_checkpoint* checkpoint) {
+    size_t pos = 0;
+
+    if (checkpoint->writer != w || checkpoint->generation != w->generation) {
+        pgch_error(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE, "stale writer checkpoint");
+    }
+    if (w->bcxt) {
+        MemoryContextDelete(w->bcxt);
+        w->bcxt = NULL;
+    }
+    chc_block_builder_init(&w->bb, NULL);
+    w->cursor_len = 0;
+    for (size_t i = 0; i < w->ncols; i++) {
+        pgch__rollback_node(w->cols[i].root, checkpoint->entries, &pos);
+    }
+    if (pos != checkpoint->nentries) {
+        pgch_error(ERRCODE_INTERNAL_ERROR, "writer checkpoint shape changed");
+    }
+    w->generation++;
+}
+
+void
+pgch_checkpoint_free(pgch_checkpoint* checkpoint) {
+    if (checkpoint->entries) {
+        pfree(checkpoint->entries);
+    }
+    *checkpoint = (pgch_checkpoint){};
 }
 
 /* Return node taking next value: an array's element or a tuple's current field */
@@ -2161,6 +2352,7 @@ pgch_writer_reset(pgch_writer* w) {
     }
     chc_block_builder_init(&w->bb, NULL);
     w->cursor_len = 0;
+    w->generation++;
     for (size_t i = 0; i < w->ncols; i++) {
         pgch__reset_node(w->cols[i].root);
     }

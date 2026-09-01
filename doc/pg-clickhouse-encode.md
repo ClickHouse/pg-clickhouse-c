@@ -127,6 +127,28 @@ ClickHouse cannot represent nullable `Array` value. Set
 NaN and Infinity reach the destination unchanged, so `Float32` and `Float64`
 take them and `Decimal` raises.
 
+## Recover from row errors
+
+```c
+pgch_checkpoint checkpoint = {};
+
+pgch_writer_checkpoint(pgch_writer *w, pgch_checkpoint *checkpoint);
+pgch_writer_rollback(pgch_writer *w, const pgch_checkpoint *checkpoint);
+pgch_checkpoint_free(pgch_checkpoint *checkpoint);
+```
+
+Initialize checkpoint to zero before first use. Save checkpoint before appending
+each row. If append succeeds, no other call is needed. Saving again replaces
+previous saved position.
+
+If append fails, roll back to remove everything written since checkpoint. This
+also restores nested arrays, tuples, low-cardinality values, and NULL state.
+Writer keeps allocated memory and conversion information for later rows.
+
+Save checkpoints only at row boundaries, with no array or tuple open. Resetting
+writer or rolling back invalidates all saved checkpoints. Call
+`pgch_checkpoint_free` when checkpoint is no longer needed.
+
 ## Append arrays and tuples manually
 
 ```c
