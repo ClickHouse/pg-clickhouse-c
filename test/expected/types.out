@@ -246,6 +246,27 @@ SELECT pgch_decode_as(pgch_encode('Array(Decimal(10, 4))',
  {"{1.2,-6.8}"} | {"{\"ab \",\"cd \"}"} | {abc}
 (1 row)
 
+-- Apply type modifiers through cast functions
+SELECT pgch_decode_as(pgch_encode('Int32', 5::int4), NULL::bit(8)),
+       pgch_decode_as(pgch_encode('Int64', 5::int8), NULL::bit(12)),
+       pgch_decode_as(pgch_encode('Array(Int32)', ARRAY[1, 2]::int4[]),
+                      NULL::bit(4)[]);
+ pgch_decode_as | pgch_decode_as | pgch_decode_as  
+----------------+----------------+-----------------
+ {00000101}     | {000000000101} | {"{0001,0010}"}
+(1 row)
+
+-- Encode without a type modifier and request an explicit cast
+CREATE TYPE csuit AS ENUM ('hearts', 'spades');
+CREATE FUNCTION csuit_text(csuit, int4, bool) RETURNS text LANGUAGE sql IMMUTABLE AS
+    $$ SELECT (CASE $1 WHEN 'hearts' THEN 'h' ELSE 's' END) || $2 || $3 $$;
+CREATE CAST (csuit AS text) WITH FUNCTION csuit_text(csuit, int4, bool);
+SELECT pgch_roundtrip('String', 'spades'::csuit);
+ pgch_roundtrip 
+----------------
+ s-1true
+(1 row)
+
 -- Render scalars into a string type through the output function
 SELECT pgch_decode_as(pgch_encode('Int8', 7::int2), NULL::text),
        pgch_decode_as(pgch_encode('Float64', 1.5::float8), NULL::text),
