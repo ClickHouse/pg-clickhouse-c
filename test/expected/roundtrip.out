@@ -6,6 +6,7 @@ SET IntervalStyle = 'postgres';
 SELECT t, pgch_pgtype(t) FROM unnest(ARRAY[
     'Int8', 'Int16', 'Int32', 'Int64',
     'UInt8', 'UInt16', 'UInt32', 'UInt64',
+    'Int128', 'Int256', 'UInt128', 'UInt256',
     'Bool', 'Float32', 'Float64', 'BFloat16',
     'Decimal(9,2)', 'Decimal(38,10)',
     'String', 'FixedString(5)', 'Enum8(''a'' = 1)',
@@ -24,7 +25,11 @@ SELECT t, pgch_pgtype(t) FROM unnest(ARRAY[
  UInt8                            | smallint
  UInt16                           | integer
  UInt32                           | bigint
- UInt64                           | bigint
+ UInt64                           | numeric
+ Int128                           | numeric
+ Int256                           | numeric
+ UInt128                          | numeric
+ UInt256                          | numeric
  Bool                             | boolean
  Float32                          | real
  Float64                          | double precision
@@ -49,7 +54,7 @@ SELECT t, pgch_pgtype(t) FROM unnest(ARRAY[
  Array(Int32)                     | integer[]
  Array(Array(String))             | text[]
  Tuple(Int32, String)             | record
-(32 rows)
+(36 rows)
 
 -- Verify integer bounds and width mappings
 SELECT pgch_roundtrip('Int8', 127::int2),
@@ -69,6 +74,52 @@ SELECT pgch_roundtrip('UInt8', 255::int2),
  pgch_roundtrip | pgch_roundtrip | pgch_roundtrip |   pgch_roundtrip    
 ----------------+----------------+----------------+---------------------
  255            | 65535          | 4294967295     | 9223372036854775807
+(1 row)
+
+-- Test wide integer extremes represented as numeric
+SELECT pgch_roundtrip('UInt64', 18446744073709551615::numeric),
+       pgch_roundtrip('UInt128',
+           340282366920938463463374607431768211455::numeric),
+       pgch_roundtrip('UInt256',
+           115792089237316195423570985008687907853269984665640564039457584007913129639935::numeric);
+    pgch_roundtrip    |             pgch_roundtrip              |                                 pgch_roundtrip                                 
+----------------------+-----------------------------------------+--------------------------------------------------------------------------------
+ 18446744073709551615 | 340282366920938463463374607431768211455 | 115792089237316195423570985008687907853269984665640564039457584007913129639935
+(1 row)
+
+SELECT pgch_roundtrip('Int128', 170141183460469231731687303715884105727::numeric),
+       pgch_roundtrip('Int128', (-170141183460469231731687303715884105728)::numeric),
+       pgch_roundtrip('Int256',
+           57896044618658097711785492504343953926634992332820282019728792003956564819967::numeric),
+       pgch_roundtrip('Int256',
+           (-57896044618658097711785492504343953926634992332820282019728792003956564819968)::numeric);
+             pgch_roundtrip              |              pgch_roundtrip              |                                pgch_roundtrip                                 |                                 pgch_roundtrip                                 
+-----------------------------------------+------------------------------------------+-------------------------------------------------------------------------------+--------------------------------------------------------------------------------
+ 170141183460469231731687303715884105727 | -170141183460469231731687303715884105728 | 57896044618658097711785492504343953926634992332820282019728792003956564819967 | -57896044618658097711785492504343953926634992332820282019728792003956564819968
+(1 row)
+
+-- Unsigned columns wrap a negative value, as ClickHouse toUInt64 does
+SELECT pgch_roundtrip('UInt64', (-1)::numeric),
+       pgch_roundtrip('UInt64', (-1)::int8);
+    pgch_roundtrip    |    pgch_roundtrip    
+----------------------+----------------------
+ 18446744073709551615 | 18446744073709551615
+(1 row)
+
+-- Narrower PostgreSQL integers reach a wide column through a cast, elements too
+SELECT pgch_roundtrip('Int256', 7::int8),
+       pgch_roundtrip('Array(Int128)', ARRAY[1, -2]::int4[]);
+ pgch_roundtrip | pgch_roundtrip 
+----------------+----------------
+ 7              | {1,-2}
+(1 row)
+
+-- Fractional digits fall away, as ClickHouse truncates toward zero
+SELECT pgch_roundtrip('UInt64', 1.75::numeric),
+       pgch_roundtrip('Int128', (-1.75)::numeric);
+ pgch_roundtrip | pgch_roundtrip 
+----------------+----------------
+ 1              | -1
 (1 row)
 
 SELECT pgch_roundtrip('Bool', true), pgch_roundtrip('Bool', false);

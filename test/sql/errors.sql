@@ -12,8 +12,7 @@ SELECT pgch_roundtrip('Array(Int32)', 1::int4);
 SELECT pgch_roundtrip('Array(Int32)', ARRAY['x']::text[]);
 SELECT pgch_roundtrip('IPv4', '::1'::inet);
 
--- Reject missing scalar and element casts
-SELECT pgch_roundtrip('Array(Int128)', ARRAY[1]::int4[]);
+-- Reject missing scalar casts
 SELECT pgch_roundtrip('Int32', '(1,2)'::point);
 
 -- Reject values outside destination domain
@@ -25,6 +24,7 @@ SELECT pgch_roundtrip('Decimal(18,0)', 99999999999999999999::numeric);
 -- Reject unsupported encoder types
 SELECT pgch_encode('Tuple(Int32)', ROW(1)::record);
 SELECT pgch_encode('LowCardinality(Int32)', 1::int4);
+SELECT pgch_encode('Array(Dynamic)', ARRAY[1]::int4[]);
 
 -- Reject Tuple targets with incompatible shape
 CREATE TYPE twofields AS (a int, b text);
@@ -55,7 +55,7 @@ SELECT pgch_encode('Map(String, Int64)', ARRAY[['a', 'x']]::text[]);
 SELECT pgch_encode('Map(String, Int64)', NULL::text[]);
 
 -- Reject types without PostgreSQL mapping
-SELECT pgch_pgtype('Int128');
+SELECT pgch_pgtype('Dynamic');
 SELECT pgch_pgtype('Nonsense');
 
 -- Reject unsupported types before reading rows, including nested types
@@ -63,17 +63,24 @@ SELECT pgch_decode(pgch_block('Tuple()', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('Map(String)', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('Array(Nothing)', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('LowCardinality(Int32)', 0, ''::bytea));
-SELECT pgch_decode(pgch_block('Array(Int128)', 1, '\x0000000000000000'::bytea));
-SELECT pgch_decode(pgch_block('Tuple(Int32, Map(String, Int128))', 0, ''::bytea));
+SELECT pgch_decode(pgch_block('Array(Dynamic)', 0, ''::bytea));
+SELECT pgch_decode(pgch_block('Tuple(Int32, Map(String, Dynamic))', 0, ''::bytea));
 -- Identify unnamed columns by position
-SELECT pgch_decode('\x01000006'::bytea || convert_to('Int128', 'UTF8'));
+SELECT pgch_decode('\x01000007'::bytea || convert_to('Dynamic', 'UTF8'));
 
 -- Accept supported LowCardinality String forms
 SELECT pgch_decode(pgch_block('LowCardinality(String)', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('LowCardinality(Nullable(String))', 0, ''::bytea));
 
--- Reject UInt64 values outside bigint range
-SELECT pgch_decode(pgch_block('UInt64', 1, '\xffffffffffffffff'::bytea));
+-- Reject UInt64 values a bigint target cannot hold
+SELECT pgch_decode_as(pgch_block('UInt64', 1, '\xffffffffffffffff'::bytea),
+                      NULL::int8);
+
+-- Reject integers wider than the ClickHouse column
+SELECT pgch_roundtrip('UInt64', 18446744073709551616::numeric);
+SELECT pgch_roundtrip('Int128', 170141183460469231731687303715884105728::numeric);
+SELECT pgch_roundtrip('UInt256',
+    115792089237316195423570985008687907853269984665640564039457584007913129639936::numeric);
 
 -- Reject DateTime64 outside timestamp range
 SELECT pgch_decode(pgch_block('DateTime64(0)', 1, '\x0000000000000080'::bytea));

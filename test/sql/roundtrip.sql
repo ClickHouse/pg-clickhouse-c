@@ -7,6 +7,7 @@ SET IntervalStyle = 'postgres';
 SELECT t, pgch_pgtype(t) FROM unnest(ARRAY[
     'Int8', 'Int16', 'Int32', 'Int64',
     'UInt8', 'UInt16', 'UInt32', 'UInt64',
+    'Int128', 'Int256', 'UInt128', 'UInt256',
     'Bool', 'Float32', 'Float64', 'BFloat16',
     'Decimal(9,2)', 'Decimal(38,10)',
     'String', 'FixedString(5)', 'Enum8(''a'' = 1)',
@@ -28,6 +29,32 @@ SELECT pgch_roundtrip('UInt8', 255::int2),
        pgch_roundtrip('UInt16', 65535::int4),
        pgch_roundtrip('UInt32', 4294967295::int8),
        pgch_roundtrip('UInt64', 9223372036854775807::int8);
+
+-- Test wide integer extremes represented as numeric
+SELECT pgch_roundtrip('UInt64', 18446744073709551615::numeric),
+       pgch_roundtrip('UInt128',
+           340282366920938463463374607431768211455::numeric),
+       pgch_roundtrip('UInt256',
+           115792089237316195423570985008687907853269984665640564039457584007913129639935::numeric);
+
+SELECT pgch_roundtrip('Int128', 170141183460469231731687303715884105727::numeric),
+       pgch_roundtrip('Int128', (-170141183460469231731687303715884105728)::numeric),
+       pgch_roundtrip('Int256',
+           57896044618658097711785492504343953926634992332820282019728792003956564819967::numeric),
+       pgch_roundtrip('Int256',
+           (-57896044618658097711785492504343953926634992332820282019728792003956564819968)::numeric);
+
+-- Unsigned columns wrap a negative value, as ClickHouse toUInt64 does
+SELECT pgch_roundtrip('UInt64', (-1)::numeric),
+       pgch_roundtrip('UInt64', (-1)::int8);
+
+-- Narrower PostgreSQL integers reach a wide column through a cast, elements too
+SELECT pgch_roundtrip('Int256', 7::int8),
+       pgch_roundtrip('Array(Int128)', ARRAY[1, -2]::int4[]);
+
+-- Fractional digits fall away, as ClickHouse truncates toward zero
+SELECT pgch_roundtrip('UInt64', 1.75::numeric),
+       pgch_roundtrip('Int128', (-1.75)::numeric);
 
 SELECT pgch_roundtrip('Bool', true), pgch_roundtrip('Bool', false);
 

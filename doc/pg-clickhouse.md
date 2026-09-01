@@ -67,6 +67,8 @@ translation unit also defines `CHC_IMPLEMENTATION`.
 extern const Oid pgch_kind_oids[CHC_KIND_COUNT];
 extern const int64_t pgch_pow10[10];
 
+bool pgch_kind_is_unsigned(chc_kind kind);
+
 Interval pgch_interval_unit_of(const chc_type *type);
 
 Oid pgch_datum_oid(const chc_type *type);
@@ -77,7 +79,12 @@ const chc_type *pgch_unwrap(const chc_type *type, bool *out_nullable);
 ```
 
 `pgch_kind_oids` maps scalar `chc_kind` values to PostgreSQL OIDs. Wrapper and
-unsupported kinds contain `InvalidOid`.
+unsupported kinds contain `InvalidOid`. The 128-bit and 256-bit integers map to
+`numeric`, PostgreSQL having no integer type that wide. `UInt64` maps to
+`PGCH_UINT64_OID`, which is `oid8` from PostgreSQL 19 and `numeric` before it.
+
+`pgch_kind_is_unsigned` reports the unsigned integer kinds, telling a caller
+whether the top bit of a wide value carries a sign.
 
 `pgch_datum_oid` returns OID produced by `pgch_read_value`:
 

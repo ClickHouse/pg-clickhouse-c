@@ -47,7 +47,7 @@ freeing writer or deleting parent releases writer state.
 
 `pgch_writer_new` raises `ERRCODE_FDW_INVALID_DATA_TYPE` when any ClickHouse
 type cannot be encoded. Supported composite output is `Array`, `Tuple`, `Map`,
-and the geometric types built over them; `Int128`, `Int256`, and unsupported
+and the geometric types built over them; `Dynamic`, `Variant`, and unsupported
 `LowCardinality` forms are rejected.
 
 ## Append PostgreSQL Datums

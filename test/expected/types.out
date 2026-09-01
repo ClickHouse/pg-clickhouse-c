@@ -106,7 +106,7 @@ FROM (SELECT d, pgch_chtype(d, true) AS c FROM unnest(ARRAY[
  int4          | Int32                                  | integer
  int8          | Int64                                  | bigint
  oid           | UInt32                                 | bigint
- xid8          | UInt64                                 | bigint
+ xid8          | UInt64                                 | numeric
  float4        | Float32                                | real
  float8        | Float64                                | double precision
  numeric(12,6) | Decimal(12,6)                          | numeric

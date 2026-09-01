@@ -16,25 +16,25 @@ SELECT pgch_roundtrip('Array(Int32)', ARRAY['x']::text[]);
 ERROR:  pgch: cannot encode text into ClickHouse Array(Int32) (column "c")
 SELECT pgch_roundtrip('IPv4', '::1'::inet);
 ERROR:  pgch: inet family mismatch for column "c"
--- Reject missing scalar and element casts
-SELECT pgch_roundtrip('Array(Int128)', ARRAY[1]::int4[]);
-ERROR:  pgch: unsupported column type "Int128" (column "c")
+-- Reject missing scalar casts
 SELECT pgch_roundtrip('Int32', '(1,2)'::point);
 ERROR:  pgch: cannot encode point into ClickHouse Int32 (column "c")
 -- Reject values outside destination domain
 SELECT pgch_roundtrip('Decimal(9,2)', 'NaN'::numeric);
-ERROR:  pgch: cannot encode "NaN" as ClickHouse Decimal
+ERROR:  pgch: cannot encode "NaN" as ClickHouse Decimal(9,2)
 SELECT pgch_roundtrip('Enum8('' a'' = 1)', 'z'::text);
 ERROR:  pgch: enum value 'z' not found
 SELECT pgch_roundtrip('Decimal(9,2)', 1000000000::numeric);
-ERROR:  pgch: value "1000000000" out of range for ClickHouse Decimal32
+ERROR:  pgch: value "1000000000" out of range for ClickHouse Decimal(9,2)
 SELECT pgch_roundtrip('Decimal(18,0)', 99999999999999999999::numeric);
-ERROR:  pgch: value "99999999999999999999" out of range for ClickHouse Decimal64
+ERROR:  pgch: value "99999999999999999999" out of range for ClickHouse Decimal(18,0)
 -- Reject unsupported encoder types
 SELECT pgch_encode('Tuple(Int32)', ROW(1)::record);
 ERROR:  pgch: cannot encode record into ClickHouse Tuple(Int32) (column "c")
 SELECT pgch_encode('LowCardinality(Int32)', 1::int4);
 ERROR:  pgch: unsupported LowCardinality variant: Int32
+SELECT pgch_encode('Array(Dynamic)', ARRAY[1]::int4[]);
+ERROR:  pgch: unsupported column type: Dynamic
 -- Reject Tuple targets with incompatible shape
 CREATE TYPE twofields AS (a int, b text);
 SELECT pgch_decode_as(pgch_block('Tuple(Int32)', 1, '\x2a000000'::bytea), NULL::int);
@@ -73,8 +73,8 @@ ERROR:  invalid input syntax for type bigint: "x"
 SELECT pgch_encode('Map(String, Int64)', NULL::text[]);
 ERROR:  pgch: cannot append NULL to NOT NULL Map(String, Int64) column "c"
 -- Reject types without PostgreSQL mapping
-SELECT pgch_pgtype('Int128');
-ERROR:  pgch: unsupported column type "Int128"
+SELECT pgch_pgtype('Dynamic');
+ERROR:  pgch: unsupported column type "Dynamic"
 SELECT pgch_pgtype('Nonsense');
 ERROR:  pgch: unknown type: Nonsense
 -- Reject unsupported types before reading rows, including nested types
@@ -86,13 +86,13 @@ SELECT pgch_decode(pgch_block('Array(Nothing)', 0, ''::bytea));
 ERROR:  decode: no PG array type for column type "Nothing" (column "c")
 SELECT pgch_decode(pgch_block('LowCardinality(Int32)', 0, ''::bytea));
 ERROR:  decode: unsupported LowCardinality inner type (column "c")
-SELECT pgch_decode(pgch_block('Array(Int128)', 1, '\x0000000000000000'::bytea));
-ERROR:  decode: unsupported column type "Int128" (column "c")
-SELECT pgch_decode(pgch_block('Tuple(Int32, Map(String, Int128))', 0, ''::bytea));
-ERROR:  decode: unsupported column type "Int128" (column "c")
+SELECT pgch_decode(pgch_block('Array(Dynamic)', 0, ''::bytea));
+ERROR:  decode: unsupported column type "Dynamic" (column "c")
+SELECT pgch_decode(pgch_block('Tuple(Int32, Map(String, Dynamic))', 0, ''::bytea));
+ERROR:  decode: unsupported column type "Dynamic" (column "c")
 -- Identify unnamed columns by position
-SELECT pgch_decode('\x01000006'::bytea || convert_to('Int128', 'UTF8'));
-ERROR:  decode: unsupported column type "Int128" (column 1)
+SELECT pgch_decode('\x01000007'::bytea || convert_to('Dynamic', 'UTF8'));
+ERROR:  decode: unsupported column type "Dynamic" (column 1)
 -- Accept supported LowCardinality String forms
 SELECT pgch_decode(pgch_block('LowCardinality(String)', 0, ''::bytea));
  pgch_decode 
@@ -106,9 +106,18 @@ SELECT pgch_decode(pgch_block('LowCardinality(Nullable(String))', 0, ''::bytea))
  {}
 (1 row)
 
--- Reject UInt64 values outside bigint range
-SELECT pgch_decode(pgch_block('UInt64', 1, '\xffffffffffffffff'::bytea));
-ERROR:  pgch: value 18446744073709551615 is out of range of bigint
+-- Reject UInt64 values a bigint target cannot hold
+SELECT pgch_decode_as(pgch_block('UInt64', 1, '\xffffffffffffffff'::bytea),
+                      NULL::int8);
+ERROR:  bigint out of range
+-- Reject integers wider than the ClickHouse column
+SELECT pgch_roundtrip('UInt64', 18446744073709551616::numeric);
+ERROR:  pgch: value "18446744073709551616" out of range for ClickHouse UInt64
+SELECT pgch_roundtrip('Int128', 170141183460469231731687303715884105728::numeric);
+ERROR:  pgch: value "170141183460469231731687303715884105728" out of range for ClickHouse Int128
+SELECT pgch_roundtrip('UInt256',
+    115792089237316195423570985008687907853269984665640564039457584007913129639936::numeric);
+ERROR:  pgch: value "115792089237316195423570985008687907853269984665640564039457584007913129639936" out of range for ClickHouse UInt256
 -- Reject DateTime64 outside timestamp range
 SELECT pgch_decode(pgch_block('DateTime64(0)', 1, '\x0000000000000080'::bytea));
 ERROR:  pgch: DateTime64 value out of range

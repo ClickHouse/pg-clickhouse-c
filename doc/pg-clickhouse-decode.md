@@ -21,8 +21,8 @@ Set incoming `*valtype` to request optional mappings:
 
 - Set `JSONOID` for `JSON` or `Object` to preserve document text as
   PostgreSQL `json`; default is `JSONBOID`
-- On PostgreSQL 19 or later, set `OID8OID` for `UInt64` to support full
-  unsigned range; default is `INT8OID` and values above `2^63 - 1` raise
+- On PostgreSQL 19 or later, set `NUMERICOID` for `UInt64` to return numeric;
+  default is `OID8OID`. Before PostgreSQL 19, `UInt64` returns `NUMERICOID`.
 
 Returned variable-length values are allocated with `palloc`. Unsupported types
 raise `ERRCODE_FDW_INVALID_DATA_TYPE`.
@@ -165,7 +165,7 @@ returned Datum shape, and columns failing `chc_column_validate`. Those failures
 set `reader.error`. Clean end leaves it `NULL`.
 
 Value conversion can still raise PostgreSQL errors, including invalid JSON or
-numeric text, `UInt64` outside selected target range, and payload that
+numeric text, values outside selected target range, and payload that
 contradicts declared type.
 
 `pgch_reader_free` releases current block and clears `reader.error`. Save error

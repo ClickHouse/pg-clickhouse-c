@@ -590,14 +590,25 @@ pgch__append_row_offs(pgch_buf* data, pgch_buf* offs, const void* p, size_t n) {
     pgch__offs_push(offs, data->len);
 }
 
-/* ClickHouse stores Decimal as a scaled, little-endian signed integer */
+/* Decimal and ClickHouse integers outside bigint's range map from numeric */
+static inline bool
+pgch__kind_maps_to_numeric(chc_kind kind) {
+    return (kind >= CHC_DECIMAL32 && kind <= CHC_DECIMAL256) || kind == CHC_UINT64 ||
+           kind == CHC_INT128 || kind == CHC_UINT128 || kind == CHC_INT256 ||
+           kind == CHC_UINT256;
+}
+
+/* ClickHouse stores Decimal and wide integers as little-endian two's complement */
 static void
-pgch__decimal_to_bytes(const char* s, uint32_t scale, size_t width, uint8_t* out) {
+pgch__number_to_bytes(const char* s, const chc_type* type, size_t width, uint8_t* out) {
     const char* input = s;
+    const char* name  = chc_type_name(type, NULL);
+    uint32_t scale    = (uint32_t)chc_type_decimal_scale(type);
+    bool is_signed    = !pgch_kind_is_unsigned(chc_type_kind(type));
     bool neg          = false;
 
     if (!s) {
-        pgch_error(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, "decimal parse failure");
+        pgch_error(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, "numeric parse failure");
     }
     if (*s == '-') {
         neg = true;
@@ -622,8 +633,9 @@ pgch__decimal_to_bytes(const char* s, uint32_t scale, size_t width, uint8_t* out
         if (c < '0' || c > '9') {
             pgch_errorf(
                 ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-                "cannot encode \"%s\" as ClickHouse Decimal",
-                input
+                "cannot encode \"%s\" as ClickHouse %s",
+                input,
+                name
             );
         }
         uint64_t carry = (uint64_t)(c - '0');
@@ -636,13 +648,19 @@ pgch__decimal_to_bytes(const char* s, uint32_t scale, size_t width, uint8_t* out
         }
         spilled |= carry != 0;
     }
-    /* Sign bit set means magnitude no longer fits the signed width */
-    if (spilled || (mag[nwords - 1] & 0x80000000u)) {
+    /* Signed widths spend their top bit on the sign, bar the negative extreme */
+    if (is_signed && (mag[nwords - 1] & 0x80000000u)) {
+        spilled |= !neg || mag[nwords - 1] != 0x80000000u;
+        for (size_t b = 0; !spilled && b + 1 < nwords; b++) {
+            spilled = mag[b] != 0;
+        }
+    }
+    if (spilled) {
         pgch_errorf(
             ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
-            "value \"%s\" out of range for ClickHouse Decimal%zu",
+            "value \"%s\" out of range for ClickHouse %s",
             input,
-            width * 8
+            name
         );
     }
     if (neg) {
@@ -865,20 +883,18 @@ pgch__append_bytes(pgch_writer* w, size_t col, const void* p, size_t n, bool isn
 }
 
 static void
-pgch__append_decimal(pgch_writer* w, size_t col, const char* digits, bool isnull) {
+pgch__append_number(pgch_writer* w, size_t col, const char* digits, bool isnull) {
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
     pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
     pgch_buf* data    = pgch__fixed_data(node);
     size_t width      = node->fixed.elem_size;
     uint8_t raw[32]   = {};
 
-    if (node->kind < CHC_DECIMAL32 || node->kind > CHC_DECIMAL256) {
-        pgch_error(ERRCODE_DATATYPE_MISMATCH, "decimal into non-decimal column");
+    if (!pgch__kind_maps_to_numeric(node->kind)) {
+        pgch_error(ERRCODE_DATATYPE_MISMATCH, "numeric into non-numeric column");
     }
     if (!isnull) {
-        uint32_t scale = (uint32_t)chc_type_decimal_scale(node->type);
-
-        pgch__decimal_to_bytes(digits, scale, width, raw);
+        pgch__number_to_bytes(digits, node->type, width, raw);
     }
     pgch_buf_append(data, raw, width);
     MemoryContextSwitchTo(old);
@@ -1425,7 +1441,7 @@ pgch__append_one(
     case NUMERICOID: {
         char* s = NULL;
 
-        if (kind < CHC_DECIMAL32 || kind > CHC_DECIMAL256) {
+        if (!pgch__kind_maps_to_numeric(kind)) {
             goto type_mismatch;
         }
         if (!isnull) {
@@ -1436,7 +1452,7 @@ pgch__append_one(
                 pfree(num);
             }
         }
-        pgch__append_decimal(w, col, s, isnull);
+        pgch__append_number(w, col, s, isnull);
         if (s) {
             pfree(s);
         }
