@@ -243,6 +243,7 @@ pgch_buf_io(pgch_buf* b, chc_io* out_io);
 #include <string.h>
 
 #include "catalog/pg_type_d.h"
+#include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "port/pg_bswap.h"
 #include "utils/date.h"
@@ -325,6 +326,23 @@ pgch_in_alloc(void) {
     return palloc0(sizeof(chc_in));
 }
 #endif
+
+/* ---- casts ---------------------------------------------------------- */
+
+/*
+ * PostgreSQL cast functions accept a value, optional type modifier, and
+ * optional flag indicating an explicit cast
+ */
+static inline Datum
+pgch__cast_call(FmgrInfo* fn, Datum val, int32 typmod, bool is_explicit) {
+    if (fn->fn_nargs > 2) {
+        return FunctionCall3(fn, val, Int32GetDatum(typmod), BoolGetDatum(is_explicit));
+    }
+    if (fn->fn_nargs > 1) {
+        return FunctionCall2(fn, val, Int32GetDatum(typmod));
+    }
+    return FunctionCall1(fn, val);
+}
 
 /* ---- type mapping --------------------------------------------------- */
 

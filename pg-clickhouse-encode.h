@@ -1509,7 +1509,8 @@ pgch__cast_value(
         *out = InputFunctionCall(&cast->infn, s, cast->ioparam, -1);
         pfree(s);
     } else {
-        *out = FunctionCall1(&cast->flinfo, val);
+        /* ClickHouse types have no PostgreSQL type modifier */
+        *out = pgch__cast_call(&cast->flinfo, val, -1, true);
     }
     return true;
 }

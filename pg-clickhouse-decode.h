@@ -1624,15 +1624,10 @@ static inline Datum
 pgch__convert_generic(pgch_convert_state* state, Datum val) {
     if (state->ctype == COERCION_PATH_FUNC) {
         Assert(OidIsValid(state->flinfo.fn_oid));
-        val = FunctionCall1(&state->flinfo, val);
+        val = pgch__cast_call(&state->flinfo, val, state->typmod, false);
     }
-    /* Length functions accept an explicit-cast flag, precision functions do not */
     if (OidIsValid(state->tmflinfo.fn_oid)) {
-        Datum tm = Int32GetDatum(state->typmod);
-
-        val = state->tmflinfo.fn_nargs > 2
-                  ? FunctionCall3(&state->tmflinfo, val, tm, BoolGetDatum(false))
-                  : FunctionCall2(&state->tmflinfo, val, tm);
+        val = pgch__cast_call(&state->tmflinfo, val, state->typmod, false);
     }
 
     return val;
@@ -2319,6 +2314,10 @@ pgch__convert_init(
             switch (state->ctype) {
             case COERCION_PATH_FUNC:
                 fmgr_info(castfunc, &state->flinfo);
+                /* Cast function accepts target typmod, skip separate coercion */
+                if (state->flinfo.fn_nargs > 1) {
+                    return state;
+                }
                 break;
             case COERCION_PATH_COERCEVIAIO: {
                 Oid typinput;
