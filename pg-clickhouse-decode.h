@@ -16,8 +16,7 @@ extern "C" {
 
 /*
  * Decode one value and store returned Datum type in *valtype
- * Set *valtype to JSONOID to preserve JSON text, or to NUMERICOID to read
- * UInt64 as numeric where oid8 is the default
+ * Set *valtype to JSONOID to preserve JSON text
  */
 extern Datum
 pgch_read_value(
@@ -1026,15 +1025,6 @@ pgch_read_value(
             pgch__rd_i64((const uint8_t*)chc_column_fixed_data(col, NULL), row)
         );
     case CHC_UINT64:
-#if PG_VERSION_NUM >= 190000
-        if (want != NUMERICOID) {
-            return ObjectId8GetDatum(
-                pgch__rd_u64((const uint8_t*)chc_column_fixed_data(col, NULL), row)
-            );
-        }
-        *valtype = NUMERICOID;
-#endif
-        /* fall through */
     case CHC_INT128:
     case CHC_UINT128:
     case CHC_INT256:

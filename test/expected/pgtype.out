@@ -21,11 +21,11 @@ SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
  UInt8                     | smallint                 |     0 | f        | t
  UInt16                    | integer                  |     0 | f        | t
  UInt32                    | bigint                   |     0 | f        | t
- UInt64                    | numeric                  |     0 | f        | t
- Int128                    | numeric                  |     0 | f        | t
- Int256                    | numeric                  |     0 | f        | t
- UInt128                   | numeric                  |     0 | f        | t
- UInt256                   | numeric                  |     0 | f        | t
+ UInt64                    | numeric(20,0)            |     0 | f        | t
+ Int128                    | numeric(39,0)            |     0 | f        | t
+ Int256                    | numeric(77,0)            |     0 | f        | t
+ UInt128                   | numeric(39,0)            |     0 | f        | t
+ UInt256                   | numeric(78,0)            |     0 | f        | t
  Bool                      | boolean                  |     0 | f        | t
  Float32                   | real                     |     0 | f        | t
  Float64                   | double precision         |     0 | f        | t

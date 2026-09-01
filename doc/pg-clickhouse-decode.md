@@ -21,8 +21,6 @@ Set incoming `*valtype` to request optional mappings:
 
 - Set `JSONOID` for `JSON` or `Object` to preserve document text as
   PostgreSQL `json`; default is `JSONBOID`
-- On PostgreSQL 19 or later, set `NUMERICOID` for `UInt64` to return numeric;
-  default is `OID8OID`. Before PostgreSQL 19, `UInt64` returns `NUMERICOID`.
 
 Returned variable-length values are allocated with `palloc`. Unsupported types
 raise `ERRCODE_FDW_INVALID_DATA_TYPE`.

@@ -592,7 +592,6 @@ static const type_doc type_docs[] = {
     { "String", NULL, NULL, NULL, "Also reads into bytea" },
     { "Time64", "P", "3", "time(P) without time zone", "P over 6 caps at 6" },
     { "Tuple", "...", "Int32, String", NULL, "Pseudo type, no column takes it" },
-    { "UInt64", NULL, NULL, "numeric", "oid8 for PG19+" },
     { "Variant", NULL, "Int32, String" },
 };
 
