@@ -70,19 +70,6 @@ pgch_in_alloc(void);
 
 /* ---- type mapping --------------------------------------------------- */
 
-/*
- * PostgreSQL 19 oid8 represents UInt64 exactly, earlier versions use numeric
- * Wider ClickHouse integers map to numeric on every PostgreSQL version
- * Predefine PGCH_UINT64_OID to override
- */
-#ifndef PGCH_UINT64_OID
-#if PG_VERSION_NUM >= 190000
-#define PGCH_UINT64_OID OID8OID
-#else
-#define PGCH_UINT64_OID NUMERICOID
-#endif
-#endif
-
 /* Map scalar ClickHouse kinds to PostgreSQL type OIDs */
 extern const Oid pgch_kind_oids[CHC_KIND_COUNT];
 
@@ -358,7 +345,7 @@ const Oid pgch_kind_oids[CHC_KIND_COUNT] = {
     [CHC_FLOAT32]      = FLOAT4OID,
     [CHC_BFLOAT16]     = FLOAT4OID,
     [CHC_FLOAT64]      = FLOAT8OID,
-    [CHC_UINT64]       = PGCH_UINT64_OID,
+    [CHC_UINT64]       = NUMERICOID,
     [CHC_INT128]       = NUMERICOID,
     [CHC_UINT128]      = NUMERICOID,
     [CHC_INT256]       = NUMERICOID,
@@ -536,6 +523,12 @@ pgch_unwrap(const chc_type* type, bool* out_nullable) {
     return type;
 }
 
+/* Pack numeric precision and scale, scale holding the low 11 bits */
+static inline int32
+pgch__make_numeric_typmod(int precision, int scale) {
+    return (int32)(((precision << 16) | (scale & 0x7ff)) + VARHDRSZ);
+}
+
 pgch_pg_type
 pgch_pg_type_for(const chc_type* type, const char* what) {
     pgch_pg_type out = {
@@ -554,9 +547,23 @@ pgch_pg_type_for(const chc_type* type, const char* what) {
     case CHC_DECIMAL64:
     case CHC_DECIMAL128:
     case CHC_DECIMAL256:
-        out.typmod = (int32)(((chc_type_decimal_precision(leaf) << 16) |
-                              chc_type_decimal_scale(leaf)) +
-                             VARHDRSZ);
+        out.typmod = pgch__make_numeric_typmod(
+            chc_type_decimal_precision(leaf), chc_type_decimal_scale(leaf)
+        );
+        break;
+    /* Integers wider than bigint take the fewest digits spanning their range */
+    case CHC_UINT64:
+        out.typmod = pgch__make_numeric_typmod(20, 0);
+        break;
+    case CHC_INT128:
+    case CHC_UINT128:
+        out.typmod = pgch__make_numeric_typmod(39, 0);
+        break;
+    case CHC_INT256:
+        out.typmod = pgch__make_numeric_typmod(77, 0);
+        break;
+    case CHC_UINT256:
+        out.typmod = pgch__make_numeric_typmod(78, 0);
         break;
     case CHC_DATETIME64:
         out.typmod    = Min(chc_type_datetime64_scale(leaf), MAX_TIMESTAMP_PRECISION);

@@ -79,9 +79,9 @@ const chc_type *pgch_unwrap(const chc_type *type, bool *out_nullable);
 ```
 
 `pgch_kind_oids` maps scalar `chc_kind` values to PostgreSQL OIDs. Wrapper and
-unsupported kinds contain `InvalidOid`. The 128-bit and 256-bit integers map to
-`numeric`, PostgreSQL having no integer type that wide. `UInt64` maps to
-`PGCH_UINT64_OID`, which is `oid8` from PostgreSQL 19 and `numeric` before it.
+unsupported kinds contain `InvalidOid`. `UInt64` and the 128-bit and 256-bit
+integers map to `numeric`, PostgreSQL having no integer type that wide.
+`pgch_pg_type_for` constrains them to the fewest digits.
 
 `pgch_kind_is_unsigned` reports the unsigned integer kinds, telling a caller
 whether the top bit of a wide value carries a sign.
