@@ -725,16 +725,16 @@ cmp_type_row(const void* a, const void* b) {
 /* Probe every type name the parser resolves */
 static type_scan
 scan_types(void) {
-    int cap     = CHC__NAME_TABLE_M + lengthof(type_docs);
+    int cap     = lengthof(chc__name_rows) + lengthof(type_docs);
     type_scan s = {
         .rows    = palloc0(cap * sizeof(char*)),
         .omitted = palloc0(cap * sizeof(char*)),
     };
 
-    for (unsigned i = 0; i < CHC__NAME_TABLE_M; i++) {
-        if (chc__name_table[i].name) {
-            scan_type(&s, chc__name_table[i].name);
-        }
+    for (unsigned i = 0; i < lengthof(chc__name_rows); i++) {
+        const struct chc__name_row* row = &chc__name_rows[i];
+
+        scan_type(&s, pnstrdup(chc__name_blob + row->off, row->len));
     }
     for (unsigned i = 0; i < lengthof(type_docs); i++) {
         const char* name = type_docs[i].name;
