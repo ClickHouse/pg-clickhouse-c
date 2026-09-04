@@ -152,7 +152,7 @@ with its escaping.
 
 ## Integration
 
-PG13+. One TU defines `PGCH_IMPLEMENTATION` before including.
+PG14+. One TU defines `PGCH_IMPLEMENTATION` before including.
 
 clickhouse-c is vendored here at `clickhouse-c/`, pinned to a commit these
 headers compile against. It has no stable API, so take that pin rather than a
