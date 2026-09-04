@@ -202,6 +202,7 @@ Conversion supports:
   matching key and value types receives it
 - ClickHouse `String` values through PostgreSQL target input function
 - Explicit PostgreSQL casts between scalar types
+- `numeric` to `xid8` and `oid8`
 - Per-element conversion when source and target array element types differ, or
   when the target array carries a type modifier
 
