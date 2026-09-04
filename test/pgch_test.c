@@ -356,9 +356,9 @@ decode_reader(pgch_reader* r, Oid outtype, int32 outtypmod, bool from_type) {
 
     if (OidIsValid(outtype)) {
         Oid outfuncid;
-        bool varlena;
+        bool typisvarlena;
 
-        getTypeOutputInfo(outtype, &outfuncid, &varlena);
+        getTypeOutputInfo(outtype, &outfuncid, &typisvarlena);
         fmgr_info(outfuncid, &outfn);
     }
 
@@ -904,7 +904,7 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
     for (int i = 0; i < desc->natts; i++) {
         Form_pg_attribute a = TupleDescAttr(desc, i);
         Oid outfunc;
-        bool varlena;
+        bool typisvarlena;
 
         if (!pgch_attr_is_streamed(a)) {
             continue;
@@ -912,7 +912,7 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
         targets[j] = a->atttypid;
         typmods[j] = a->atttypmod;
         dest[j]    = i;
-        getTypeOutputInfo(a->atttypid, &outfunc, &varlena);
+        getTypeOutputInfo(a->atttypid, &outfunc, &typisvarlena);
         fmgr_info(outfunc, &out[j]);
         j++;
     }

@@ -2331,14 +2331,14 @@ pgch__convert_init(
             case COERCION_PATH_COERCEVIAIO: {
                 Oid typinput;
                 Oid typoutput;
-                bool varlena;
+                bool typisvarlena;
 
                 if (composite) {
                     goto no_cast;
                 }
                 /* Domain supplies its own type modifier */
                 Oid baseTypeId = getBaseTypeAndTypmod(outtype, &state->typmod);
-                getTypeOutputInfo(intype, &typoutput, &varlena);
+                getTypeOutputInfo(intype, &typoutput, &typisvarlena);
                 fmgr_info(typoutput, &state->outflinfo);
                 getTypeInputInfo(baseTypeId, &typinput, &state->typioparam);
                 fmgr_info(typinput, &state->flinfo);
@@ -2435,7 +2435,7 @@ pgch_convert_free(void* state) {
 char*
 pgch_value_to_cstring(Oid coltype, Datum value) {
     Oid out_func;
-    bool varlena;
+    bool typisvarlena;
 
     if (coltype == ANYARRAYOID) {
         pgch_array* slot = (pgch_array*)DatumGetPointer(value);
@@ -2447,7 +2447,7 @@ pgch_value_to_cstring(Oid coltype, Datum value) {
         void* state    = pgch_convert_init(value, ANYARRAYOID, array_type, -1);
         Datum arr      = pgch_convert(state, value);
 
-        getTypeOutputInfo(array_type, &out_func, &varlena);
+        getTypeOutputInfo(array_type, &out_func, &typisvarlena);
         if (state) {
             pgch_convert_free(state);
         }
@@ -2471,7 +2471,7 @@ pgch_value_to_cstring(Oid coltype, Datum value) {
         return TextDatumGetCString(value);
     }
 
-    getTypeOutputInfo(coltype, &out_func, &varlena);
+    getTypeOutputInfo(coltype, &out_func, &typisvarlena);
     return OidOutputFunctionCall(out_func, value);
 }
 
