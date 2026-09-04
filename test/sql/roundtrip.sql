@@ -106,6 +106,17 @@ SELECT pgch_roundtrip('String', 'hello'::text),
 SELECT pgch_encode('String', '\x00ff'::bytea),
        pgch_encode('FixedString(5)', 'abc'::text);
 
+-- Read binary String data back, bytea keeping every FixedString byte
+SELECT pgch_roundtrip_as('String', '\x00ff'::bytea),
+       pgch_roundtrip_as('FixedString(5)', '\x0001ff'::bytea),
+       pgch_roundtrip_as('FixedString(4)', '\x01020300'::bytea);
+
+-- Drop FixedString padding for text, which only declared type explains
+SELECT pgch_decode_typed(pgch_block('FixedString(4)', 1, '\x66730000'::bytea),
+                         NULL::text) AS padded,
+       pgch_decode_typed(pgch_block('FixedString(4)', 1, '\x66730000'::bytea),
+                         NULL::bytea) AS binary;
+
 SELECT pgch_roundtrip('Enum8(''red'' = 1, ''green'' = 2)', 'green'::text),
        pgch_roundtrip('Enum16(''a'' = -300, ''b'' = 300)', 'a'::text);
 
@@ -159,6 +170,13 @@ SELECT pgch_roundtrip('UUID', '11111111-2222-3333-4444-555555555555'::uuid),
        pgch_roundtrip('IPv6', '2001:db8::1'::inet);
 
 SELECT pgch_roundtrip('JSON', '{"a": [1, 2], "b": null}'::jsonb);
+
+-- Document text reaches json, text and bytea unparsed, jsonb normalizing it
+SELECT pgch_decode_as(j, NULL::json) AS json, pgch_decode_as(j, NULL::text) AS text,
+       pgch_decode_as(j, NULL::jsonb) AS jsonb, pgch_decode_as(j, NULL::bytea) AS bytea
+  FROM (SELECT pgch_encode('JSON', '{"b": 1, "a": 2}'::json)) AS t(j);
+SELECT pgch_decode_typed(pgch_encode('Array(JSON)', ARRAY['{"b": 1}']::jsonb[]),
+                         NULL::bytea[]);
 
 -- Round-trip nullable values and LowCardinality nulls
 SELECT pgch_roundtrip('Nullable(Int32)', NULL::int4) IS NULL AS null_int,
@@ -261,7 +279,7 @@ SELECT pgch_roundtrip('String', 'vc'::varchar),
        pgch_roundtrip('String', 'bp'::bpchar),
        pgch_roundtrip('String', 'nm'::name),
        pgch_roundtrip('String', 'c'::"char"),
-       pgch_roundtrip('FixedString(4)', 'fs'::varchar),
+       pgch_roundtrip('FixedString(2)', 'fs'::varchar),
        pgch_roundtrip('Enum8(''1 day'' = 1)', '1 day'::interval);
 
 -- Apply PostgreSQL casts to array elements

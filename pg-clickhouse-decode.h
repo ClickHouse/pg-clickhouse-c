@@ -14,10 +14,7 @@
 extern "C" {
 #endif
 
-/*
- * Decode one value and store returned Datum type in *valtype
- * Set *valtype to JSONOID to preserve JSON text
- */
+/* Decode one value and store returned Datum type in *valtype */
 extern Datum
 pgch_read_value(
     const chc_column* col,
@@ -63,7 +60,7 @@ typedef struct pgch_chunk_source {
 typedef struct pgch_reader {
     pgch_block_source src;
 
-    Oid* coltypes; /* Returned Datum OIDs, caller may override JSON and UInt64 */
+    Oid* coltypes; /* Returned Datum OIDs */
     char** colshapes;
     Datum* values;
     bool* nulls;
@@ -175,6 +172,7 @@ pgch_value_to_cstring(Oid coltype, Datum value);
 #include "fmgr.h"
 #include "funcapi.h"
 #include "lib/stringinfo.h"
+#include "mb/pg_wchar.h"
 #include "parser/parse_coerce.h"
 #include "port/pg_bswap.h"
 #include "utils/array.h"
@@ -396,22 +394,29 @@ pgch__read_wide_int(const chc_column* col, chc_kind kind, uint64_t row) {
 }
 
 static Datum
+pgch__bytes_datum(const char* p, size_t len) {
+    bytea* out = (bytea*)palloc(VARHDRSZ + len);
+
+    SET_VARSIZE(out, VARHDRSZ + len);
+    memcpy(VARDATA(out), p, len);
+    return PointerGetDatum(out);
+}
+
+static Datum
 pgch__read_string(const chc_column* col, uint64_t row) {
     const char* p;
     size_t len;
 
     pgch__slice_str(col, row, &p, &len);
-    return PointerGetDatum(cstring_to_text_with_len(p, len));
+    return pgch__bytes_datum(p, len);
 }
 
 static Datum
 pgch__read_fixedstring(const chc_column* col, uint64_t row) {
     size_t width;
-    const uint8_t* base = chc_column_fixed_data(col, &width);
+    const char* p = (const char*)chc_column_fixed_data(col, &width) + row * width;
 
-    return PointerGetDatum(
-        cstring_to_text_with_len((const char*)base + row * width, width)
-    );
+    return pgch__bytes_datum(p, width);
 }
 
 static Datum
@@ -622,25 +627,10 @@ pgch__read_enum(const chc_column* col, const chc_type* type, uint64_t row) {
 
         chc_type_enum_at(type, i, &en, &el, &ev);
         if (ev == v) {
-            return PointerGetDatum(cstring_to_text_with_len(en ? en : "", el));
+            return pgch__bytes_datum(en ? en : "", el);
         }
     }
-    return PointerGetDatum(cstring_to_text_with_len("", 0));
-}
-
-/* PGCH_NATIVE_SETTINGS makes ClickHouse serialize JSON as document text */
-static Datum
-pgch__read_json(const chc_column* col, uint64_t row, Oid valtype) {
-    const char* p;
-    size_t len;
-
-    pgch__slice_str(col, row, &p, &len);
-    char* cstr = pnstrdup(p, len);
-    Datum ret  = DirectFunctionCall1(
-        valtype == JSONOID ? json_in : jsonb_in, CStringGetDatum(cstr)
-    );
-    pfree(cstr);
-    return ret;
+    return pgch__bytes_datum("", 0);
 }
 
 /* Nullable LowCardinality reserves dictionary entry zero for NULL */
@@ -689,14 +679,14 @@ pgch__read_lc(
         const uint8_t* dnm = chc_column_null_map(dict);
 
         if (dnm && dnm[k]) {
-            *valtype = TEXTOID;
+            *valtype = BYTEAOID;
             *is_null = true;
             return (Datum)0;
         }
         dict = chc_column_nullable_inner(dict);
     }
 
-    *valtype = TEXTOID;
+    *valtype = BYTEAOID;
     *is_null = false;
     if (chc_column_layout(dict) != CHC_COL_STRING) {
         pgch_error(
@@ -901,6 +891,7 @@ pgch__read_tuple(
     slot->datums       = (Datum*)palloc(sizeof(Datum) * n);
     slot->nulls        = (bool*)palloc0(sizeof(bool) * n);
     slot->types        = (Oid*)palloc0(sizeof(Oid) * n);
+    slot->native_types = (Oid*)palloc(sizeof(Oid) * n);
     slot->len          = n;
     slot->ch_type_name = chc_type_name(type, NULL);
 
@@ -908,6 +899,7 @@ pgch__read_tuple(
         const chc_type* ft   = chc_type_child(type, i);
         const chc_column* fc = chc_column_tuple_child(col, i);
 
+        slot->native_types[i] = pgch_native_oid(ft);
         slot->datums[i] =
             pgch_read_value(fc, ft, row, &slot->types[i], &slot->nulls[i]);
     }
@@ -979,7 +971,6 @@ pgch_read_value(
     }
 
     chc_kind kind = chc_type_kind(type);
-    Oid want      = *valtype;
 
     *valtype = pgch_kind_oids[kind];
     *is_null = false;
@@ -1044,17 +1035,14 @@ pgch_read_value(
     case CHC_DECIMAL128:
     case CHC_DECIMAL256:
         return pgch__read_decimal(col, type, row);
+    /* PGCH_NATIVE_SETTINGS makes ClickHouse serialize JSON as document text */
+    case CHC_JSON:
+    case CHC_OBJECT:
     case CHC_STRING:
         return pgch__read_string(col, row);
     case CHC_ENUM8:
     case CHC_ENUM16:
         return pgch__read_enum(col, type, row);
-    case CHC_JSON:
-    case CHC_OBJECT:
-        if (want == JSONOID) {
-            *valtype = JSONOID;
-        }
-        return pgch__read_json(col, row, *valtype);
     case CHC_FIXED_STRING:
         return pgch__read_fixedstring(col, row);
     case CHC_DATE:
@@ -1187,7 +1175,7 @@ pgch__append_shape(StringInfo buf, const chc_type* type) {
     /* Map reads as Array(Tuple(K, V)), so it shares that shape */
     case CHC_MAP:
         appendStringInfoChar(buf, 'a');
-        /* fall through */
+        CHC_FALLTHROUGH;
     case CHC_TUPLE: {
         size_t n = chc_type_n_children(type);
 
@@ -1259,7 +1247,7 @@ pgch__check_type(const chc_type* type) {
         if (chc_type_n_children(type) != 2) {
             return "returned map wants key and value";
         }
-        /* fall through */
+        CHC_FALLTHROUGH;
     case CHC_TUPLE: {
         size_t n = chc_type_n_children(type);
 
@@ -1944,10 +1932,28 @@ pgch__convert_lseg(pgch_convert_state* state, Datum val) {
     return LsegPGetDatum(lseg);
 }
 
+/* Reject invalid bytes in database encoding, and drop trailing NUL padding. */
 static Datum
-pgch__convert_from_text(pgch_convert_state* state, Datum val) {
+pgch__convert_text(pgch_convert_state* state pg_attribute_unused(), Datum val) {
+    bytea* b      = DatumGetByteaPP(val);
+    const char* p = VARDATA_ANY(b);
+    size_t width  = VARSIZE_ANY_EXHDR(b);
+    size_t len    = width;
+
+    while (len > 0 && p[len - 1] == 0) {
+        len--;
+    }
+    pg_verifymbstr(p, (int)len, false);
+    return len == width ? val : pgch__bytes_datum(p, len);
+}
+
+static Datum
+pgch__convert_from_bytes(pgch_convert_state* state, Datum val) {
     return InputFunctionCall(
-        &state->flinfo, TextDatumGetCString(val), state->typioparam, state->typmod
+        &state->flinfo,
+        TextDatumGetCString(pgch__convert_text(state, val)),
+        state->typioparam,
+        state->typmod
     );
 }
 
@@ -2092,9 +2098,6 @@ pgch__convert_init(
             return dom;
         }
     }
-    if (intype == TEXTOID && outtype == BYTEAOID) {
-        return NULL;
-    }
 
     pgch_convert_state* state = palloc0(sizeof(pgch_convert_state));
 
@@ -2118,7 +2121,7 @@ pgch__convert_init(
             int ndim;
 
             state->item_type = pgch__array_item(ct, &leaf, &ndim);
-            state->intype    = pgch_native_oid(ct);
+            state->intype    = get_array_type(state->item_type);
         } else {
             state->item_type = slot->item_type;
             state->intype    = slot->array_type;
@@ -2242,16 +2245,13 @@ pgch__convert_init(
             const chc_type* ft = ct ? chc_type_child(ct, i) : NULL;
             Oid ftype          = ct ? pgch_datum_oid(ft) : slot->types[i];
             bool isnull        = ct ? false : slot->nulls[i];
-            Oid item_type      = ftype;
+            Oid item_type      = ct ? pgch_native_oid(ft) : slot->native_types[i];
             int32 item_typmod  = -1;
 
-            if (ftype == ANYARRAYOID && !isnull) {
-                item_type =
-                    ct ? pgch_native_oid(ft)
-                       : ((pgch_array*)DatumGetPointer(slot->datums[i]))->array_type;
-            }
-            if (state->outdesc && ftype == RECORDOID &&
-                i < (size_t)state->outdesc->natts) {
+            /* Unbuilt and byte fields convert into target type, scalars
+             * must match it, keeping mismatched tuples rejected */
+            if (state->outdesc && i < (size_t)state->outdesc->natts &&
+                (ftype == RECORDOID || ftype == ANYARRAYOID || ftype == BYTEAOID)) {
                 item_type = TupleDescAttr(state->outdesc, i)->atttypid;
             }
             /* Use target field's type modifier only when field types match */
@@ -2292,14 +2292,19 @@ pgch__convert_init(
             state->func = pgch__convert_generic;
         }
 
-        if (intype == TEXTOID) {
+        if (intype == BYTEAOID) {
             /* Domain supplies its own type modifier */
             Oid baseTypeId = getBaseTypeAndTypmod(outtype, &state->typmod);
-            Oid typinput;
 
-            getTypeInputInfo(baseTypeId, &typinput, &state->typioparam);
-            fmgr_info(typinput, &state->flinfo);
-            state->func = pgch__convert_from_text;
+            if (baseTypeId == TEXTOID) {
+                state->func = pgch__convert_text;
+            } else {
+                Oid typinput;
+
+                getTypeInputInfo(baseTypeId, &typinput, &state->typioparam);
+                fmgr_info(typinput, &state->flinfo);
+                state->func = pgch__convert_from_bytes;
+            }
         } else if (outtype == BOOLOID && intype == INT2OID) {
             state->func = pgch__convert_bool;
         } else if (outtype == TIMEOID && intype == TIMESTAMPTZOID) {
@@ -2322,7 +2327,7 @@ pgch__convert_init(
                     goto no_cast;
                 }
                 state->ctype = COERCION_PATH_COERCEVIAIO;
-                /* FALLTHROUGH */
+                CHC_FALLTHROUGH;
             case COERCION_PATH_COERCEVIAIO: {
                 Oid typinput;
                 Oid typoutput;
@@ -2434,8 +2439,11 @@ pgch_value_to_cstring(Oid coltype, Datum value) {
 
     if (coltype == ANYARRAYOID) {
         pgch_array* slot = (pgch_array*)DatumGetPointer(value);
-        /* Anonymous records have no array to build, so render them as text */
-        Oid array_type = slot->item_type == RECORDOID ? TEXTARRAYOID : slot->array_type;
+        /* Anonymous records have no array to build and ClickHouse strings
+         * decode as bytes, so render both as text */
+        Oid array_type = slot->item_type == RECORDOID || slot->item_type == BYTEAOID
+                             ? TEXTARRAYOID
+                             : slot->array_type;
         void* state    = pgch_convert_init(value, ANYARRAYOID, array_type, -1);
         Datum arr      = pgch_convert(state, value);
 
@@ -2454,6 +2462,13 @@ pgch_value_to_cstring(Oid coltype, Datum value) {
             pgch_convert_free(state);
         }
         return TextDatumGetCString(txt);
+    }
+
+    if (coltype == BYTEAOID) {
+        bytea* b = DatumGetByteaPP(value);
+
+        pg_verifymbstr(VARDATA_ANY(b), (int)VARSIZE_ANY_EXHDR(b), false);
+        return TextDatumGetCString(value);
     }
 
     getTypeOutputInfo(coltype, &out_func, &varlena);

@@ -70,7 +70,7 @@ pgch_in_alloc(void);
 
 /* ---- type mapping --------------------------------------------------- */
 
-/* Map scalar ClickHouse kinds to PostgreSQL type OIDs */
+/* Map scalar ClickHouse kinds to decoded Datum OIDs */
 extern const Oid pgch_kind_oids[CHC_KIND_COUNT];
 
 /* Report ClickHouse unsigned integer kinds */
@@ -198,7 +198,8 @@ typedef struct pgch_array {
 typedef struct pgch_tuple {
     Datum* datums;
     bool* nulls;
-    Oid* types;
+    Oid* types;        /* Datum types */
+    Oid* native_types; /* Preferred PostgreSQL field types */
     size_t len;
     const char* ch_type_name;
 } pgch_tuple;
@@ -354,12 +355,12 @@ const Oid pgch_kind_oids[CHC_KIND_COUNT] = {
     [CHC_DECIMAL64]    = NUMERICOID,
     [CHC_DECIMAL128]   = NUMERICOID,
     [CHC_DECIMAL256]   = NUMERICOID,
-    [CHC_STRING]       = TEXTOID,
-    [CHC_FIXED_STRING] = TEXTOID,
-    [CHC_ENUM8]        = TEXTOID,
-    [CHC_ENUM16]       = TEXTOID,
-    [CHC_JSON]         = JSONBOID,
-    [CHC_OBJECT]       = JSONBOID,
+    [CHC_STRING]       = BYTEAOID,
+    [CHC_FIXED_STRING] = BYTEAOID,
+    [CHC_ENUM8]        = BYTEAOID,
+    [CHC_ENUM16]       = BYTEAOID,
+    [CHC_JSON]         = BYTEAOID,
+    [CHC_OBJECT]       = BYTEAOID,
     [CHC_DATE]         = DATEOID,
     [CHC_DATE32]       = DATEOID,
     [CHC_DATETIME]     = TIMESTAMPTZOID,
@@ -453,6 +454,18 @@ pgch_native_oid_for(const chc_type* type, const char* what) {
     chc_kind kind = chc_type_kind(type);
     Oid oid       = pgch_kind_oids[kind];
 
+    switch (kind) {
+    case CHC_STRING:
+    case CHC_FIXED_STRING:
+    case CHC_ENUM8:
+    case CHC_ENUM16:
+        return TEXTOID;
+    case CHC_JSON:
+    case CHC_OBJECT:
+        return JSONBOID;
+    default:
+        break;
+    }
     if (OidIsValid(oid)) {
         return oid;
     }

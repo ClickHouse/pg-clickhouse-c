@@ -78,10 +78,11 @@ Oid pgch_native_oid_for(const chc_type *type, const char *what);
 const chc_type *pgch_unwrap(const chc_type *type, bool *out_nullable);
 ```
 
-`pgch_kind_oids` maps scalar `chc_kind` values to PostgreSQL OIDs. Wrapper and
-unsupported kinds contain `InvalidOid`. `UInt64` and the 128-bit and 256-bit
-integers map to `numeric`, PostgreSQL having no integer type that wide.
-`pgch_pg_type_for` constrains them to the fewest digits.
+`pgch_kind_oids` maps scalar `chc_kind` values to decoded Datum OIDs. Wrapper
+and unsupported kinds contain `InvalidOid`. ClickHouse string and JSON kinds
+map to `bytea`, preserving bytes outside PostgreSQL database encoding. `UInt64` and
+the 128-bit and 256-bit integers map to `numeric`, PostgreSQL having no integer
+type that wide. `pgch_pg_type_for` constrains them to the fewest digits.
 
 `pgch_kind_is_unsigned` reports the unsigned integer kinds, telling a caller
 whether the top bit of a wide value carries a sign.
@@ -89,6 +90,9 @@ whether the top bit of a wide value carries a sign.
 `pgch_datum_oid` returns OID produced by `pgch_read_value`:
 
 - Scalar types return mapped scalar OID
+- `String`, `FixedString`, `Enum8`, `Enum16`, `JSON` and `Object` return
+  `BYTEAOID`, ClickHouse has no guarantee of compatibility with PostgreSQL
+  database encoding
 - `Array` returns `ANYARRAYOID`, representing `pgch_array *`
 - `Tuple` returns `RECORDOID`, representing `pgch_tuple *`
 - `Map` returns `ANYARRAYOID` over `pgch_tuple *` pairs, as ClickHouse stores

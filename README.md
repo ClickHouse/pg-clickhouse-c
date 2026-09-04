@@ -78,8 +78,10 @@ pgch_reader_free(&r);
 
 `r.values[i]` typed by `r.coltypes[i]`, which is OID `pgch_datum_oid` assigns
 to column's CH type. Array and Tuple columns arrive as intermediate
-representations rather than PG values: `pgch_convert` turns those into a real
-PG array or record once you know target type.
+representations rather than PG values, and String, FixedString, Enum and JSON
+arrive as `bytea`: `pgch_convert` turns those into a real PG array, record,
+text or document once target type known. `text` targets are verified against
+database encoding, and `text` from `FixedString` drops trailing NULs.
 
 ```c
 /* Build conversion state outside row context */
@@ -235,7 +237,7 @@ name the parser resolves reaches this table or the omitted list `test/sql/type_t
 | IntervalSecond      | interval                    |                                  |
 | IntervalWeek        | interval                    |                                  |
 | IntervalYear        | interval                    |                                  |
-| JSON                | jsonb                       | Also reads into json             |
+| JSON                | jsonb                       |                                  |
 | LineString          | path                        |                                  |
 | LowCardinality(T)   | T                           |                                  |
 | Map(K,V)            | record[]                    | One record per pair              |
@@ -245,7 +247,7 @@ name the parser resolves reaches this table or the omitted list `test/sql/type_t
 | Point               | point                       |                                  |
 | Polygon             | polygon[]                   |                                  |
 | Ring                | polygon                     |                                  |
-| String              | text                        | Also reads into bytea            |
+| String              | text                        |                                  |
 | Time                | time without time zone      |                                  |
 | Time64(P)           | time(P) without time zone   | P over 6 caps at 6               |
 | Tuple(...)          | record                      | Pseudo type, no column takes it  |
