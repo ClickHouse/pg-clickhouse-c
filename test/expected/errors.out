@@ -177,3 +177,59 @@ ERROR:  decode: block column 1 type changed
 SELECT pgch_decode_chunks(substring(pgch_encode_rows('Int32', ARRAY[1, 2]::int4[])
                                     FROM 1 FOR 12), 4);
 ERROR:  decode: short read
+-- Report status instead of message, which names the database encoding
+CREATE FUNCTION decode_status(data bytea, target text) RETURNS text
+    LANGUAGE plpgsql AS $$
+BEGIN
+    EXECUTE format('SELECT pgch_decode_as($1, NULL::%s)', target) USING data;
+    RETURN 'ok';
+EXCEPTION WHEN character_not_in_repertoire THEN
+    RETURN 'invalid encoding';
+WHEN invalid_text_representation THEN
+    RETURN 'invalid document';
+END $$;
+-- Reject ClickHouse bytes PostgreSQL cannot read as text, bytea taking them as they are
+SELECT decode_status(s, 'text') AS text, decode_status(s, 'bytea') AS bytea
+  FROM (SELECT pgch_block('String', 1, '\x0361006e'::bytea)) AS t(s);
+       text       | bytea 
+------------------+-------
+ invalid encoding | ok
+(1 row)
+
+SELECT decode_status(a, 'text[]') AS text, decode_status(a, 'bytea[]') AS bytea
+  FROM (SELECT pgch_block('Array(String)', 1,
+                          '\x0100000000000000'::bytea ||
+                          '\x0361006e'::bytea)) AS t(a);
+       text       | bytea 
+------------------+-------
+ invalid encoding | ok
+(1 row)
+
+SELECT decode_status(j, 'jsonb') AS valid,
+       decode_status(set_byte(j, octet_length(j) - 3, 0), 'jsonb') AS embedded_nul,
+       decode_status(set_byte(j, octet_length(j) - 3, 0), 'bytea') AS nul_bytea
+  FROM (SELECT pgch_encode('JSON', '{"a": "b"}'::jsonb)) AS t(j);
+ valid |   embedded_nul   | nul_bytea 
+-------+------------------+-----------
+ ok    | invalid encoding | ok
+(1 row)
+
+-- Parse the document only for a target that stores JSON
+SELECT decode_status(d, 'bytea') AS bytea, decode_status(d, 'text') AS text,
+       decode_status(d, 'jsonb') AS jsonb
+  FROM (SELECT set_byte(j, octet_length(j) - 1, 120)
+          FROM (SELECT pgch_encode('JSON', '{"a": "b"}'::jsonb)) AS s(j)) AS t(d);
+ bytea | text |      jsonb       
+-------+------+------------------
+ ok    | ok   | invalid document
+(1 row)
+
+-- Drop trailing NUL padding without declared ClickHouse type
+SELECT decode_status(f, 'text') AS text, decode_status(f, 'bytea') AS bytea
+  FROM (SELECT pgch_block('FixedString(4)', 1, '\x66730000'::bytea)) AS t(f);
+ text | bytea 
+------+-------
+ ok   | ok
+(1 row)
+
+DROP FUNCTION decode_status;

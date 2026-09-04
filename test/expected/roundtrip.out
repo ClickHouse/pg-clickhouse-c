@@ -228,6 +228,25 @@ SELECT pgch_encode('String', '\x00ff'::bytea),
  \x0101016306537472696e670200ff | \x010101630e4669786564537472696e672835296162630000
 (1 row)
 
+-- Read binary String data back, bytea keeping every FixedString byte
+SELECT pgch_roundtrip_as('String', '\x00ff'::bytea),
+       pgch_roundtrip_as('FixedString(5)', '\x0001ff'::bytea),
+       pgch_roundtrip_as('FixedString(4)', '\x01020300'::bytea);
+ pgch_roundtrip_as | pgch_roundtrip_as | pgch_roundtrip_as 
+-------------------+-------------------+-------------------
+ \x00ff            | \x0001ff0000      | \x01020300
+(1 row)
+
+-- Drop FixedString padding for text, which only declared type explains
+SELECT pgch_decode_typed(pgch_block('FixedString(4)', 1, '\x66730000'::bytea),
+                         NULL::text) AS padded,
+       pgch_decode_typed(pgch_block('FixedString(4)', 1, '\x66730000'::bytea),
+                         NULL::bytea) AS binary;
+ padded |     binary      
+--------+-----------------
+ {fs}   | {"\\x66730000"}
+(1 row)
+
 SELECT pgch_roundtrip('Enum8(''red'' = 1, ''green'' = 2)', 'green'::text),
        pgch_roundtrip('Enum16(''a'' = -300, ''b'' = 300)', 'a'::text);
  pgch_roundtrip | pgch_roundtrip 
@@ -330,6 +349,22 @@ SELECT pgch_roundtrip('JSON', '{"a": [1, 2], "b": null}'::jsonb);
       pgch_roundtrip      
 --------------------------
  {"a": [1, 2], "b": null}
+(1 row)
+
+-- Document text reaches json, text and bytea unparsed, jsonb normalizing it
+SELECT pgch_decode_as(j, NULL::json) AS json, pgch_decode_as(j, NULL::text) AS text,
+       pgch_decode_as(j, NULL::jsonb) AS jsonb, pgch_decode_as(j, NULL::bytea) AS bytea
+  FROM (SELECT pgch_encode('JSON', '{"b": 1, "a": 2}'::json)) AS t(j);
+           json           |           text           |          jsonb           |                  bytea                  
+--------------------------+--------------------------+--------------------------+-----------------------------------------
+ {"{\"b\": 1, \"a\": 2}"} | {"{\"b\": 1, \"a\": 2}"} | {"{\"a\": 2, \"b\": 1}"} | {"\\x7b2262223a20312c202261223a20327d"}
+(1 row)
+
+SELECT pgch_decode_typed(pgch_encode('Array(JSON)', ARRAY['{"b": 1}']::jsonb[]),
+                         NULL::bytea[]);
+        pgch_decode_typed        
+---------------------------------
+ {"{\"\\\\x7b2262223a20317d\"}"}
 (1 row)
 
 -- Round-trip nullable values and LowCardinality nulls
@@ -489,7 +524,7 @@ SELECT pgch_roundtrip('String', 'vc'::varchar),
        pgch_roundtrip('String', 'bp'::bpchar),
        pgch_roundtrip('String', 'nm'::name),
        pgch_roundtrip('String', 'c'::"char"),
-       pgch_roundtrip('FixedString(4)', 'fs'::varchar),
+       pgch_roundtrip('FixedString(2)', 'fs'::varchar),
        pgch_roundtrip('Enum8(''1 day'' = 1)', '1 day'::interval);
  pgch_roundtrip | pgch_roundtrip | pgch_roundtrip | pgch_roundtrip | pgch_roundtrip | pgch_roundtrip 
 ----------------+----------------+----------------+----------------+----------------+----------------

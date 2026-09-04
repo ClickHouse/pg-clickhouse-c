@@ -66,7 +66,7 @@ SELECT r[1] AS "ClickHouse", r[2] AS "PostgreSQL", r[3] AS "Notes"
 | IntervalSecond      | interval                    |                                  |
 | IntervalWeek        | interval                    |                                  |
 | IntervalYear        | interval                    |                                  |
-| JSON                | jsonb                       | Also reads into json             |
+| JSON                | jsonb                       |                                  |
 | LineString          | path                        |                                  |
 | LowCardinality(T)   | T                           |                                  |
 | Map(K,V)            | record[]                    | One record per pair              |
@@ -76,7 +76,7 @@ SELECT r[1] AS "ClickHouse", r[2] AS "PostgreSQL", r[3] AS "Notes"
 | Point               | point                       |                                  |
 | Polygon             | polygon[]                   |                                  |
 | Ring                | polygon                     |                                  |
-| String              | text                        | Also reads into bytea            |
+| String              | text                        |                                  |
 | Time                | time without time zone      |                                  |
 | Time64(P)           | time(P) without time zone   | P over 6 caps at 6               |
 | Tuple(...)          | record                      | Pseudo type, no column takes it  |

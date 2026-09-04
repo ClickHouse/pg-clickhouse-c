@@ -17,10 +17,8 @@ Pass wire column, matching ClickHouse type, and row index. Function returns
 PostgreSQL Datum, writes returned type OID to `*valtype`, and sets
 `*is_null`.
 
-Set incoming `*valtype` to request optional mappings:
-
-- Set `JSONOID` for `JSON` or `Object` to preserve document text as
-  PostgreSQL `json`; default is `JSONBOID`
+`String`, `FixedString`, `Enum`, `JSON` and `Object` decode to `bytea`, leaving
+text and document parsing to `pgch_convert`.
 
 Returned variable-length values are allocated with `palloc`. Unsupported types
 raise `ERRCODE_FDW_INVALID_DATA_TYPE`.
@@ -132,17 +130,6 @@ Initialization reads first block and sets `ncols` and `coltypes`. Empty stream,
 zero columns, unsupported schema, or source failure leaves reader done. Check
 `reader.error` after initialization.
 
-Override optional column mappings before first row:
-
-```c
-pgch_reader_init(&reader, &source);
-
-for (size_t i = 0; i < reader.ncols; i++) {
-    if (reader.coltypes[i] == JSONBOID && want_json)
-        reader.coltypes[i] = JSONOID;
-}
-```
-
 Call `pgch_reader_next` until false. Each successful call fills `values` and
 `nulls`, both `ncols` long. Consume row before next call. Reader advances
 across blocks and presents one continuous row stream.
@@ -163,8 +150,8 @@ returned Datum shape, and columns failing `chc_column_validate`. Those failures
 set `reader.error`. Clean end leaves it `NULL`.
 
 Value conversion can still raise PostgreSQL errors, including invalid JSON or
-numeric text, values outside selected target range, and payload that
-contradicts declared type.
+numeric text, text outside database encoding, values outside selected target
+range, and payload that contradicts declared type.
 
 `pgch_reader_free` releases current block and clears `reader.error`. Save error
 pointer first when it must survive that call; storage remains valid until
@@ -200,7 +187,12 @@ Conversion supports:
   `path` or `polygon` of two points to `lseg`, none of which PostgreSQL casts
 - `Map` as an array of two-field composites, so a target composite array with
   matching key and value types receives it
-- ClickHouse `String` values through PostgreSQL target input function
+- ClickHouse strings and JSON documents, which reach `bytea` unchanged and any
+  other target through its input function, after `pg_verifymbstr` rejects bytes
+  PostgreSQL cannot read in database encoding. A `json` or `text` target keeps
+  document text as ClickHouse wrote it, where `jsonb` normalizes it
+- Trailing NUL padding, dropped whenever ClickHouse string converts into
+  non-binary PostgreSQL target
 - Explicit PostgreSQL casts between scalar types
 - `numeric` to `xid8` and `oid8`
 - Per-element conversion when source and target array element types differ, or
@@ -280,8 +272,9 @@ char *pgch_value_to_cstring(Oid coltype, Datum value);
 ```
 
 Return palloc'd text representation for decoded value. Function also handles
-`pgch_array` and `pgch_tuple` intermediate representations. Use Datum path
-instead when String or FixedString may contain NUL bytes.
+`pgch_array` and `pgch_tuple` intermediate representations. It renders every
+ClickHouse string as text, so it raises on bytes PostgreSQL cannot read in
+database encoding. Convert to `bytea` to keep those bytes.
 
 ## Complete reader example
 
