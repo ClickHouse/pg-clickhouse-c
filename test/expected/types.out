@@ -181,6 +181,27 @@ FROM (VALUES
  mood     | ok                      | {ok,sad}
 (16 rows)
 
+-- Test invalid byte sequences
+SELECT rt('E''\x80''', 'text', 'String');
+ERROR:  invalid byte sequence for encoding "UTF8": 0x80
+CONTEXT:  SQL statement "SELECT pgch_roundtrip_as('String', E'\x80'::text)"
+PL/pgSQL function rt(text,text,text) line 4 at EXECUTE
+SELECT rt('E''\x80''', 'text', 'FixedString');
+ERROR:  invalid byte sequence for encoding "UTF8": 0x80
+CONTEXT:  SQL statement "SELECT pgch_roundtrip_as('FixedString', E'\x80'::text)"
+PL/pgSQL function rt(text,text,text) line 4 at EXECUTE
+SELECT rt('E''\x80''', 'mood', 'String');
+ERROR:  invalid byte sequence for encoding "UTF8": 0x80
+CONTEXT:  SQL statement "SELECT pgch_roundtrip_as('String', E'\x80'::mood)"
+PL/pgSQL function rt(text,text,text) line 4 at EXECUTE
+SELECT rt('E''"\x80"''', 'json', 'JSON');
+ERROR:  invalid byte sequence for encoding "UTF8": 0x80
+CONTEXT:  SQL statement "SELECT pgch_roundtrip_as('JSON', E'"\x80"'::json)"
+PL/pgSQL function rt(text,text,text) line 4 at EXECUTE
+SELECT rt('E''"\x80"''', 'json', 'JSONB');
+ERROR:  invalid byte sequence for encoding "UTF8": 0x80
+CONTEXT:  SQL statement "SELECT pgch_roundtrip_as('JSONB', E'"\x80"'::json)"
+PL/pgSQL function rt(text,text,text) line 4 at EXECUTE
 -- Prepare conversion from schema before nullable rows
 SELECT pgch_decode_typed(pgch_encode_rows('Nullable(String)',
                                           ARRAY[NULL, '1 day']::text[]),

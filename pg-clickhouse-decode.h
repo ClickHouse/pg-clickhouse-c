@@ -404,6 +404,7 @@ pgch__read_string(const chc_column* col, uint64_t row) {
     size_t len;
 
     pgch__slice_str(col, row, &p, &len);
+    pg_verifymbstr(p, (int)len, false);
     return PointerGetDatum(cstring_to_text_with_len(p, len));
 }
 
@@ -411,6 +412,7 @@ static Datum
 pgch__read_fixedstring(const chc_column* col, uint64_t row) {
     size_t width;
     const uint8_t* base = chc_column_fixed_data(col, &width);
+    pg_verifymbstr((const char*)base, (int)strnlen((const char*)base, width), false);
 
     return PointerGetDatum(
         cstring_to_text_with_len((const char*)base + row * width, width)
@@ -624,6 +626,7 @@ pgch__read_enum(const chc_column* col, const chc_type* type, uint64_t row) {
         int64_t ev;
 
         chc_type_enum_at(type, i, &en, &el, &ev);
+        pg_verifymbstr(en, (int)el, false);
         if (ev == v) {
             return PointerGetDatum(cstring_to_text_with_len(en ? en : "", el));
         }
@@ -638,6 +641,7 @@ pgch__read_json(const chc_column* col, uint64_t row, Oid valtype) {
     size_t len;
 
     pgch__slice_str(col, row, &p, &len);
+    pg_verifymbstr(p, (int)len, false);
     char* cstr = pnstrdup(p, len);
     Datum ret  = DirectFunctionCall1(
         valtype == JSONOID ? json_in : jsonb_in, CStringGetDatum(cstr)
@@ -1191,6 +1195,7 @@ pgch__append_shape(StringInfo buf, const chc_type* type) {
     case CHC_MAP:
         appendStringInfoChar(buf, 'a');
         /* fall through */
+        CHC_FALLTHROUGH;
     case CHC_TUPLE: {
         size_t n = chc_type_n_children(type);
 
@@ -1263,6 +1268,7 @@ pgch__check_type(const chc_type* type) {
             return "returned map wants key and value";
         }
         /* fall through */
+        CHC_FALLTHROUGH;
     case CHC_TUPLE: {
         size_t n = chc_type_n_children(type);
 
@@ -2326,6 +2332,7 @@ pgch__convert_init(
                 }
                 state->ctype = COERCION_PATH_COERCEVIAIO;
                 /* FALLTHROUGH */
+                CHC_FALLTHROUGH;
             case COERCION_PATH_COERCEVIAIO: {
                 Oid typinput;
                 Oid typoutput;

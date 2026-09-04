@@ -17,6 +17,7 @@
 
 #include "access/tupdesc.h"
 #include "datatype/timestamp.h"
+#include "mb/pg_wchar.h"
 #include "utils/palloc.h"
 
 #include "clickhouse.h"

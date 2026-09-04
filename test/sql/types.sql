@@ -73,6 +73,14 @@ FROM (VALUES
     ('''ok''',                  'ARRAY[''ok'', ''sad'']',             'mood',     'LowCardinality(String)')
 ) v(lit, arr, typ, ch);
 
+-- Test invalid byte sequences
+SELECT rt('E''\x80''', 'text', 'String');
+SELECT rt('E''\x80''', 'text', 'FixedString');
+SELECT rt('E''\x80''', 'mood', 'String');
+SELECT rt('E''"\x80"''', 'json', 'JSON');
+SELECT rt('E''"\x80"''', 'json', 'JSONB');
+
+
 -- Prepare conversion from schema before nullable rows
 SELECT pgch_decode_typed(pgch_encode_rows('Nullable(String)',
                                           ARRAY[NULL, '1 day']::text[]),
