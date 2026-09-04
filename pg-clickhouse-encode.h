@@ -1478,7 +1478,7 @@ pgch__cast_value(
             break;
         case COERCION_PATH_COERCEVIAIO: {
             Oid outfunc, infunc;
-            bool varlena;
+            bool typisvarlena;
 
             /* Convert text array items with each Tuple field's input function
              * Array items share one PostgreSQL type, but Tuple fields can differ */
@@ -1486,7 +1486,7 @@ pgch__cast_value(
                 cast->from = InvalidOid;
                 return false;
             }
-            getTypeOutputInfo(from, &outfunc, &varlena);
+            getTypeOutputInfo(from, &outfunc, &typisvarlena);
             getTypeInputInfo(to, &infunc, &cast->ioparam);
             fmgr_info_cxt(outfunc, &cast->flinfo, w->cxt);
             fmgr_info_cxt(infunc, &cast->infn, w->cxt);
