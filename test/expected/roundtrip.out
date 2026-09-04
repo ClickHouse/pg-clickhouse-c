@@ -136,6 +136,23 @@ SELECT pgch_decode_as(pgch_encode('UInt256',
  {115792089237316195423570985008687907853269984665640564039457584007913129639935}
 (1 row)
 
+-- PostgreSQL unsigned 64 bit types read back through their input function
+SELECT pgch_roundtrip_as('UInt64', '18446744073709551615'::xid8),
+       pgch_roundtrip_as('UInt64', '0'::xid8),
+       pgch_roundtrip_as('Array(UInt64)',
+           ARRAY['18446744073709551615', '0']::xid8[]);
+  pgch_roundtrip_as   | pgch_roundtrip_as |    pgch_roundtrip_as     
+----------------------+-------------------+--------------------------
+ 18446744073709551615 | 0                 | {18446744073709551615,0}
+(1 row)
+
+-- Unsigned targets wrap a negative value, as their input function does
+SELECT pgch_decode_as(pgch_encode('Int128', (-1)::numeric), NULL::xid8);
+     pgch_decode_as     
+------------------------
+ {18446744073709551615}
+(1 row)
+
 -- Unsigned columns wrap a negative value, as ClickHouse toUInt64 does
 SELECT pgch_roundtrip('UInt64', (-1)::numeric),
        pgch_roundtrip('UInt64', (-1)::int8);

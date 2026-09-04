@@ -2059,6 +2059,17 @@ pgch__spread_type(const chc_type* ct, const pgch_tuple* slot, Oid elem) {
     return get_array_type(elem);
 }
 
+/* PostgreSQL doesn't support coercion from numeric to its unsigned 64 bit types */
+static inline bool
+pgch__uint64_type(Oid typid) {
+#if PG_VERSION_NUM >= 190000
+    if (typid == OID8OID) {
+        return true;
+    }
+#endif
+    return typid == XID8OID;
+}
+
 static pgch_convert_state*
 pgch__convert_init(
     const chc_type* ct,
@@ -2309,6 +2320,12 @@ pgch__convert_init(
                     return state;
                 }
                 break;
+            case COERCION_PATH_NONE:
+                if (intype != NUMERICOID || !pgch__uint64_type(outtype)) {
+                    goto no_cast;
+                }
+                state->ctype = COERCION_PATH_COERCEVIAIO;
+                /* FALLTHROUGH */
             case COERCION_PATH_COERCEVIAIO: {
                 Oid typinput;
                 Oid typoutput;

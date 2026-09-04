@@ -19,6 +19,9 @@ FROM unnest(ARRAY[
     'polygon[]', 'box[]'
 ]) AS d;
 
+-- Postgres 19 added oid8, which declares like xid8
+SELECT pgch_chtype(coalesce(to_regtype('oid8'), 'xid8'::regtype)::text, true) AS oid8;
+
 -- Verify optional JSON, LowCardinality, and numeric mappings
 SELECT pgch_chtype('jsonb', json_as_json => true) AS json_null,
        pgch_chtype('jsonb', true, json_as_json => true) AS json_notnull,
