@@ -351,7 +351,6 @@ pgch__read_decimal(const chc_column* col, const chc_type* type, uint64_t row) {
     uint32_t scale   = (uint32_t)chc_type_decimal_scale(type);
     char buf[80];
 
-#if PG_VERSION_NUM >= 140000
     if (es == 4) {
         return NumericGetDatum(
             int64_div_fast_to_numeric(pgch__rd_i32(p, row), (int)scale)
@@ -362,7 +361,6 @@ pgch__read_decimal(const chc_column* col, const chc_type* type, uint64_t row) {
             int64_div_fast_to_numeric(pgch__rd_i64(p, row), (int)scale)
         );
     }
-#endif
 
     if (pgch__format_int(p + row * es, es, scale, true, buf, sizeof(buf)) < 0) {
         pgch_error(ERRCODE_FDW_ERROR, "decimal too wide");
@@ -379,7 +377,6 @@ pgch__read_wide_int(const chc_column* col, chc_kind kind, uint64_t row) {
     const uint8_t* p = (const uint8_t*)chc_column_fixed_data(col, &width);
     char buf[80];
 
-#if PG_VERSION_NUM >= 140000
     if (kind == CHC_UINT64) {
         uint64_t v = pgch__rd_u64(p, row);
 
@@ -387,7 +384,7 @@ pgch__read_wide_int(const chc_column* col, chc_kind kind, uint64_t row) {
             return NumericGetDatum(int64_to_numeric((int64)v));
         }
     }
-#endif
+
     if (pgch__format_int(
             p + row * width, width, 0, !pgch_kind_is_unsigned(kind), buf, sizeof(buf)
         ) < 0) {
