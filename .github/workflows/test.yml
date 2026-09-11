@@ -32,6 +32,13 @@ jobs:
           sudo make -C test install PG_CONFIG="$PG_CONFIG"
           make -C test installcheck
 
+      - name: Run regression tests with EUC_KR
+        env: { PGDATABASE: test_non_utf8 }
+        run: |
+          set -euo pipefail
+          createdb --encoding sqlascii --template template0
+          make -C test installcheck
+
       - name: Upload regression output on failure
         if: failure()
         uses: actions/upload-artifact@v7

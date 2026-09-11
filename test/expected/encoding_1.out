@@ -18,8 +18,8 @@ FROM (VALUES
      ('invalid 3nd in 4-octet sequence', '\x61 63 6e  f0 90 28 bc  61 63 6e'),
      ('invalid 4th in 4-octet sequence', '\x61 63 6e  f0 28 8c 28  61 63 6e')
 ) x(description, input);  
-           description           | truncate  |   remove   |   replace    
----------------------------------+-----------+------------+--------------
+           description           | truncate  |   remove   |  replace   
+---------------------------------+-----------+------------+------------
  valid                           | {acn}     | {acn}      | {acn}
  nul byte                        | {a}       | {an}       | {an}
  nul & invalid octet             | {a}       | {ano}      | {ano}
