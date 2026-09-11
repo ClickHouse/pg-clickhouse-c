@@ -384,8 +384,9 @@ decode_reader(pgch_reader* r, Oid outtype, int32 outtypmod, bool from_type) {
             );
         } else {
             if (!converted) {
-                convstate =
-                    pgch_convert_init(r->values[0], r->coltypes[0], outtype, outtypmod);
+                convstate = pgch_convert_init(
+                    r->values[0], r->coltypes[0], outtype, outtypmod, r->encoding_check
+                );
                 converted = true;
             }
             val = CStringGetTextDatum(
@@ -497,6 +498,23 @@ pgch_decode_as(PG_FUNCTION_ARGS) {
     PG_RETURN_DATUM(
         decode_column(PG_GETARG_BYTEA_PP(0), outtype, arg_typmod(fcinfo, 1), false)
     );
+}
+
+PG_FUNCTION_INFO_V1(pgch_decode_text);
+
+/* Decode rows into PostgreSQL text */
+Datum
+pgch_decode_text(PG_FUNCTION_ARGS) {
+    bytes_source src;
+    pgch_reader r;
+
+    if (PG_ARGISNULL(0)) {
+        PG_RETURN_NULL();
+    }
+
+    reader_from_bytea(&r, &src, PG_GETARG_BYTEA_PP(0));
+    r.encoding_check = (pgch_encoding_check)PG_GETARG_INT32(1);
+    PG_RETURN_DATUM(decode_reader(&r, TEXTOID, 0, false));
 }
 
 PG_FUNCTION_INFO_V1(pgch_decode_typed);

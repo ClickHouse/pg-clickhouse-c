@@ -169,8 +169,8 @@ conversion state across independently managed block streams.
 ## Convert into target PostgreSQL types
 
 ```c
-void *pgch_convert_init(Datum val, Oid intype, Oid outtype, int32 outtypmod);
-void *pgch_convert_init_type(const chc_type *in, Oid outtype, int32 outtypmod);
+void *pgch_convert_init(Datum val, Oid intype, Oid outtype, int32 outtypmod, pgch_encoding_check encoding_check);
+void *pgch_convert_init_type(const chc_type *in, Oid outtype, int32 outtypmod, pgch_encoding_check encoding_check);
 void *pgch_reader_convert_init(const pgch_reader *r,
                                size_t col, Oid outtype, int32 outtypmod);
 
@@ -188,9 +188,10 @@ Conversion supports:
 - `Map` as an array of two-field composites, so a target composite array with
   matching key and value types receives it
 - ClickHouse strings and JSON documents, which reach `bytea` unchanged and any
-  other target through its input function, after `pg_verifymbstr` rejects bytes
-  PostgreSQL cannot read in database encoding. A `json` or `text` target keeps
-  document text as ClickHouse wrote it, where `jsonb` normalizes it
+  other target through its input function. The `pgch_encoding_check` parameter
+  or field of `pgch_reader` determines the handling of bytes that PostgreSQL
+  cannot read in database encoding. A `json` or `text` target keeps document
+  text as ClickHouse wrote it, where `jsonb` normalizes it
 - Trailing NUL padding, dropped whenever ClickHouse string converts into
   non-binary PostgreSQL target
 - Explicit PostgreSQL casts between scalar types

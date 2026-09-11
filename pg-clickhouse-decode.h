@@ -54,6 +54,22 @@ typedef struct pgch_chunk_source {
 } pgch_chunk_source;
 
 /*
+ * Per-query parameter determining how to handle invalid character encodings.
+ * CHC_ENC_FAIL is the default, meaning an error will be raised when text
+ * returned from ClickHouse cannot be converted to the database encoding.
+ * CHC_ENC_TRUNCATE truncates text at the first invalid byte. CHC_ENC_REPLACE
+ * replaces invalid byte sequences with the Unicode placeholder character, but
+ * only if the database encoding is Unicode. Otherwise it behaves the same as
+ * CHC_ENC_REMOVE, which removes invalid bytes.
+ */
+typedef enum pgch_encoding_check {
+    CHC_ENC_FAIL     = 0,
+    CHC_ENC_TRUNCATE = 1,
+    CHC_ENC_REMOVE   = 2,
+    CHC_ENC_REPLACE  = 3,
+} pgch_encoding_check;
+
+/*
  * Read rows from block stream
  * Consume values before next pgch_reader_next call
  */
@@ -71,6 +87,7 @@ typedef struct pgch_reader {
     MemoryContext cxt;
     char* error;
     bool done;
+    pgch_encoding_check encoding_check;
 } pgch_reader;
 
 /*
@@ -116,14 +133,25 @@ pgch_reader_free(pgch_reader* r);
  * Allocate state in CurrentMemoryContext
  */
 extern void*
-pgch_convert_init(Datum val, Oid intype, Oid outtype, int32 outtypmod);
+pgch_convert_init(
+    Datum val,
+    Oid intype,
+    Oid outtype,
+    int32 outtypmod,
+    pgch_encoding_check encoding_check
+);
 
 /*
  * Prepare conversion from ClickHouse column type
  * Use pgch_reader_convert_init to read type and valtype override from reader
  */
 extern void*
-pgch_convert_init_type(const chc_type* in, Oid outtype, int32 outtypmod);
+pgch_convert_init_type(
+    const chc_type* in,
+    Oid outtype,
+    int32 outtypmod,
+    pgch_encoding_check encoding_check
+);
 
 extern void*
 pgch_reader_convert_init(
@@ -172,6 +200,7 @@ pgch_value_to_cstring(Oid coltype, Datum value);
 #include "fmgr.h"
 #include "funcapi.h"
 #include "lib/stringinfo.h"
+#include "libpq/pqformat.h"
 #include "mb/pg_wchar.h"
 #include "parser/parse_coerce.h"
 #include "port/pg_bswap.h"
@@ -1593,6 +1622,7 @@ struct pgch_convert_state {
     Oid typioparam;
 
     CoercionPathType ctype;
+    pgch_encoding_check encoding_check;
 };
 
 static inline Datum
@@ -1624,7 +1654,11 @@ pgch__convert_record(pgch_convert_state* state, Datum val) {
             Form_pg_attribute att = TupleDescAttr(state->indesc, i);
 
             s = pgch_convert_init(
-                slot->datums[i], RECORDOID, att->atttypid, att->atttypmod
+                slot->datums[i],
+                RECORDOID,
+                att->atttypid,
+                att->atttypmod,
+                state->encoding_check
             );
             MemoryContextSwitchTo(oldcxt);
             state->field_states[i] = s;
@@ -1932,6 +1966,8 @@ pgch__convert_lseg(pgch_convert_state* state, Datum val) {
     return LsegPGetDatum(lseg);
 }
 
+#define REPLACEMENT_CHARACTER_UTF8 "\xEF\xBF\xBD"
+
 /* Reject invalid bytes in database encoding, and drop trailing NUL padding. */
 static Datum
 pgch__convert_text(pgch_convert_state* state pg_attribute_unused(), Datum val) {
@@ -1939,12 +1975,45 @@ pgch__convert_text(pgch_convert_state* state pg_attribute_unused(), Datum val) {
     const char* p = VARDATA_ANY(b);
     size_t width  = VARSIZE_ANY_EXHDR(b);
     size_t len    = width;
+    int encoding  = GetDatabaseEncoding();
 
     while (len > 0 && p[len - 1] == 0) {
         len--;
     }
-    pg_verifymbstr(p, (int)len, false);
-    return len == width ? val : pgch__bytes_datum(p, len);
+
+    int oklen = pg_encoding_verifymbstr(encoding, p, (int)len);
+    if ((int)len == oklen) {
+        return len == width ? val : pgch__bytes_datum(p, len);
+    }
+
+    switch (state->encoding_check) {
+    case CHC_ENC_TRUNCATE:
+        PG_RETURN_TEXT_P(cstring_to_text_with_len(p, oklen));
+    case CHC_ENC_REMOVE:
+    case CHC_ENC_REPLACE: {
+        char* c      = (char*)p;
+        size_t count = 0;
+        StringInfoData buf;
+        pq_begintypsend(&buf);
+        while (count < len) {
+            if (oklen) {
+                appendBinaryStringInfo(&buf, c, oklen);
+                c += oklen;
+                count += oklen;
+            } else {
+                if (state->encoding_check == CHC_ENC_REPLACE && encoding == PG_UTF8) {
+                    appendStringInfoString(&buf, REPLACEMENT_CHARACTER_UTF8);
+                }
+                ++count;
+                ++c;
+            }
+            oklen = pg_encoding_verifymbstr(encoding, c, len - count);
+        }
+        PG_RETURN_TEXT_P(pq_endtypsend(&buf));
+    }
+    default:
+        report_invalid_encoding(encoding, p + oklen, len - oklen);
+    }
 }
 
 static Datum
@@ -2079,7 +2148,8 @@ pgch__convert_init(
     Datum val,
     Oid intype,
     Oid outtype,
-    int32 outtypmod
+    int32 outtypmod,
+    pgch_encoding_check encoding_check
 ) {
     /* ClickHouse Nothing and Void values are always NULL */
     if (!OidIsValid(intype)) {
@@ -2094,7 +2164,8 @@ pgch__convert_init(
 
             dom->outtype = outtype;
             dom->func    = pgch__convert_domain;
-            dom->inner   = pgch__convert_init(ct, val, intype, base, basetypmod);
+            dom->inner =
+                pgch__convert_init(ct, val, intype, base, basetypmod, encoding_check);
             return dom;
         }
     }
@@ -2104,10 +2175,11 @@ pgch__convert_init(
     if (ct) {
         ct = pgch_unwrap(ct, NULL);
     }
-    state->intype  = intype;
-    state->outtype = outtype;
-    state->typmod  = outtypmod;
-    state->ctype   = COERCION_PATH_NONE;
+    state->intype         = intype;
+    state->outtype        = outtype;
+    state->typmod         = outtypmod;
+    state->ctype          = COERCION_PATH_NONE;
+    state->encoding_check = encoding_check;
 
     if (intype == ANYARRAYOID) {
         pgch_array* slot     = ct ? NULL : (pgch_array*)DatumGetPointer(val);
@@ -2150,7 +2222,7 @@ pgch__convert_init(
                     }
                 }
                 state->elem_state = pgch__convert_init(
-                    leaf, leafval, state->item_type, elem_out, outtypmod
+                    leaf, leafval, state->item_type, elem_out, outtypmod, encoding_check
                 );
                 /* This array builds every dimension at once, so leave the
                  * fields of each Tuple unbuilt */
@@ -2200,7 +2272,9 @@ pgch__convert_init(
                 state->field_states[i] =
                     !ct && slot->nulls[i]
                         ? NULL
-                        : pgch__convert_init(ft, fval, ftype, item, outtypmod);
+                        : pgch__convert_init(
+                              ft, fval, ftype, item, outtypmod, encoding_check
+                          );
             }
             return state;
         }
@@ -2266,7 +2340,8 @@ pgch__convert_init(
                                                   ct ? (Datum)0 : slot->datums[i],
                                                   ftype,
                                                   item_type,
-                                                  item_typmod
+                                                  item_typmod,
+                                                  encoding_check
                                               );
 
             TupleDescInitEntry(
@@ -2377,13 +2452,26 @@ pgch__convert_init(
 }
 
 void*
-pgch_convert_init(Datum val, Oid intype, Oid outtype, int32 outtypmod) {
-    return pgch__convert_init(NULL, val, intype, outtype, outtypmod);
+pgch_convert_init(
+    Datum val,
+    Oid intype,
+    Oid outtype,
+    int32 outtypmod,
+    pgch_encoding_check encoding_check
+) {
+    return pgch__convert_init(NULL, val, intype, outtype, outtypmod, encoding_check);
 }
 
 void*
-pgch_convert_init_type(const chc_type* in, Oid outtype, int32 outtypmod) {
-    return pgch__convert_init(in, (Datum)0, pgch_datum_oid(in), outtype, outtypmod);
+pgch_convert_init_type(
+    const chc_type* in,
+    Oid outtype,
+    int32 outtypmod,
+    pgch_encoding_check encoding_check
+) {
+    return pgch__convert_init(
+        in, (Datum)0, pgch_datum_oid(in), outtype, outtypmod, encoding_check
+    );
 }
 
 void*
@@ -2401,7 +2489,8 @@ pgch_reader_convert_init(
         (Datum)0,
         r->coltypes[col],
         outtype,
-        outtypmod
+        outtypmod,
+        r->encoding_check
     );
 }
 
@@ -2444,8 +2533,9 @@ pgch_value_to_cstring(Oid coltype, Datum value) {
         Oid array_type = slot->item_type == RECORDOID || slot->item_type == BYTEAOID
                              ? TEXTARRAYOID
                              : slot->array_type;
-        void* state    = pgch_convert_init(value, ANYARRAYOID, array_type, -1);
-        Datum arr      = pgch_convert(state, value);
+        void* state =
+            pgch_convert_init(value, ANYARRAYOID, array_type, -1, CHC_ENC_FAIL);
+        Datum arr = pgch_convert(state, value);
 
         getTypeOutputInfo(array_type, &out_func, &typisvarlena);
         if (state) {
@@ -2455,7 +2545,7 @@ pgch_value_to_cstring(Oid coltype, Datum value) {
     }
 
     if (coltype == RECORDOID) {
-        void* state = pgch_convert_init(value, RECORDOID, TEXTOID, -1);
+        void* state = pgch_convert_init(value, RECORDOID, TEXTOID, -1, CHC_ENC_FAIL);
         Datum txt   = pgch_convert(state, value);
 
         if (state) {

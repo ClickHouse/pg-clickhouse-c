@@ -1,0 +1,20 @@
+-- Treat invalid encoding according to flag: truncate, remove, and replace.
+SELECT description,
+       pgch_decode_text(pgch_encode('String',input), 1) AS truncate,
+       pgch_decode_text(pgch_encode('String',input), 2) AS remove,
+       pgch_decode_text(pgch_encode('String',input), 3) AS replace
+FROM (VALUES
+     ('valid'::text, '\x61 63 6e'::bytea),
+     ('nul byte', '\x61   00   6e'),
+     ('nul & invalid octet', '\x61   00   6e   80   6f'),
+     ('invalid octet & nul', '\x61 6e   80   6f   00  '),
+     ('valid 2-octet sequence', '\x 61   c3 b1   6e'),
+     ('invalid 2-octet sequence', '\x61   c3 28   6e'),
+     ('valid 3-octet sequence', '\x 61   e2 82 a1   6e'),
+     ('invalid 2nd in 3-octet sequence', '\x61   e2 28 a1   6e'),
+     ('invalid 3rd in 3-octet sequence', '\x61   e2 82 28   6e'),
+     ('valid 4-octet sequence', '\x61 63 6e   f0 90 8c bc   61 63 6e'),
+     ('invalid 2nd in 4-octet sequence', '\x61 63 6e  f0 28 8c bc  61 63 6e'),
+     ('invalid 3nd in 4-octet sequence', '\x61 63 6e  f0 90 28 bc  61 63 6e'),
+     ('invalid 4th in 4-octet sequence', '\x61 63 6e  f0 28 8c 28  61 63 6e')
+) x(description, input);  

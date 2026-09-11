@@ -81,11 +81,19 @@ to column's CH type. Array and Tuple columns arrive as intermediate
 representations rather than PG values, and String, FixedString, Enum and JSON
 arrive as `bytea`: `pgch_convert` turns those into a real PG array, record,
 text or document once target type known. `text` targets are verified against
-database encoding, and `text` from `FixedString` drops trailing NULs.
+database encoding, with the final argument to `pgch_convert_init()` determines
+how invalid encoding bytes are handled. `text` from `FixedString` drops
+trailing NULs.
 
 ```c
 /* Build conversion state outside row context */
-void *cs = pgch_convert_init(r.values[i], r.coltypes[i], target_oid, target_typmod);
+void *cs = pgch_convert_init(
+    r.values[i],
+    r.coltypes[i],
+    target_oid,
+    target_typmod,
+    CHC_ENC_FAIL
+);
 
 /* Convert each row, NULL state passes Datum through */
 values[i] = pgch_convert(cs, r.values[i]);
