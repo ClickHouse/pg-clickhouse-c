@@ -32,12 +32,11 @@ jobs:
           sudo make -C test install PG_CONFIG="$PG_CONFIG"
           make -C test installcheck
 
+      - name: Run regression tests with SQL_ASCII
+        run: make -C test installcheck REGRESS_OPTS='--no-locale --encoding=SQL_ASCII'
+
       - name: Run regression tests with EUC_KR
-        env: { PGDATABASE: test_non_utf8 }
-        run: |
-          set -euo pipefail
-          createdb --encoding sqlascii --template template0
-          make -C test installcheck
+        run: make -C test installcheck REGRESS_OPTS='--no-locale --encoding=EUC_KR'
 
       - name: Upload regression output on failure
         if: failure()
