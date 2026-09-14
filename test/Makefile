@@ -3,8 +3,10 @@ DATA         = pgch_test--1.0.sql
 MODULE_big   = pgch_test
 OBJS         = pgch_test.o
 REGRESS      = roundtrip types pgtype errors type_table encoding
-REGRESS_OPTS = --inputdir=. --load-extension=$(EXTENSION)
 PG_CONFIG   ?= pg_config
+
+# Append to user-provided options (used for testing alternate encodeings).
+override REGRESS_OPTS += --inputdir=. --load-extension=$(EXTENSION) --dbname=contrib_regression
 
 # Vendored submodule. Override to build against a local clickhouse-c checkout
 CH_C_DIR    ?= ../clickhouse-c

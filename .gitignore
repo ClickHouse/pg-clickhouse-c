@@ -7,3 +7,6 @@ results/
 regression.diffs
 regression.out
 compile_commands.json
+.vsode
+.zed
+.gram
