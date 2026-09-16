@@ -81,7 +81,7 @@ to column's CH type. Array and Tuple columns arrive as intermediate
 representations rather than PG values, and String, FixedString, Enum and JSON
 arrive as `bytea`: `pgch_convert` turns those into a real PG array, record,
 text or document once target type known. `text` targets are verified against
-database encoding, with the final argument to `pgch_convert_init()` determines
+database encoding, with the final argument to `pgch_convert_init()` deciding
 how invalid encoding bytes are handled. `text` from `FixedString` drops
 trailing NULs.
 

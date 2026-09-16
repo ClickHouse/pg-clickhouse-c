@@ -269,13 +269,15 @@ pgch_reader_fill_map(&reader, states, attnums,
 ## Render values as text
 
 ```c
-char *pgch_value_to_cstring(Oid coltype, Datum value);
+char *pgch_value_to_cstring(Oid coltype, Datum value,
+                            pgch_encoding_check encoding_check);
 ```
 
 Return palloc'd text representation for decoded value. Function also handles
 `pgch_array` and `pgch_tuple` intermediate representations. It renders every
-ClickHouse string as text, so it raises on bytes PostgreSQL cannot read in
-database encoding. Convert to `bytea` to keep those bytes.
+ClickHouse string as text, so `encoding_check` decides the handling of bytes
+PostgreSQL cannot read in database encoding. Convert to `bytea` to keep those
+bytes.
 
 ## Complete reader example
 
