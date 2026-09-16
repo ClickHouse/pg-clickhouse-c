@@ -54,13 +54,13 @@ typedef struct pgch_chunk_source {
 } pgch_chunk_source;
 
 /*
- * Per-query parameter determining how to handle invalid character encodings.
- * CHC_ENC_FAIL is the default, meaning an error will be raised when text
- * returned from ClickHouse cannot be converted to the database encoding.
- * CHC_ENC_TRUNCATE truncates text at the first invalid byte. CHC_ENC_REPLACE
- * replaces invalid byte sequences with the Unicode placeholder character, but
- * only if the database encoding is Unicode. Otherwise it behaves the same as
- * CHC_ENC_REMOVE, which removes invalid bytes.
+ * Choose how to handle bytes invalid in database encoding
+ * CHC_ENC_FAIL raises an error, default behavior
+ * CHC_ENC_TRUNCATE discards text starting at first invalid byte
+ * CHC_ENC_REMOVE removes invalid bytes
+ * CHC_ENC_REPLACE replaces each invalid byte with U+FFFD in UTF-8 databases,
+ * otherwise removes invalid bytes
+ * Treat embedded NUL bytes as invalid, PostgreSQL text cannot contain them
  */
 typedef enum pgch_encoding_check {
     CHC_ENC_FAIL     = 0,
@@ -186,7 +186,7 @@ pgch_reader_fill_map(
 
 /* Return decoded value as palloc'd C string */
 extern char*
-pgch_value_to_cstring(Oid coltype, Datum value);
+pgch_value_to_cstring(Oid coltype, Datum value, pgch_encoding_check encoding_check);
 
 #ifdef PGCH_IMPLEMENTATION
 
@@ -1968,9 +1968,22 @@ pgch__convert_lseg(pgch_convert_state* state, Datum val) {
 
 #define REPLACEMENT_CHARACTER_UTF8 "\xEF\xBF\xBD"
 
-/* Reject invalid bytes in database encoding, and drop trailing NUL padding. */
+/*
+ * Return first character's byte length, or -1 if invalid
+ * Match pg_encoding_verifymbstr validation, including rejection of NUL bytes
+ * Check one character at a time to avoid repeatedly scanning remaining text
+ */
+static int
+pgch__mbcharlen(int encoding, const char* p, size_t remaining) {
+    if (!IS_HIGHBIT_SET(*p)) {
+        return *p ? 1 : -1;
+    }
+    return pg_encoding_verifymbchar(encoding, p, (int)remaining);
+}
+
+/* Drop trailing NUL padding, then handle invalid bytes according to check */
 static Datum
-pgch__convert_text(pgch_convert_state* state pg_attribute_unused(), Datum val) {
+pgch__checked_text(pgch_encoding_check check, Datum val) {
     bytea* b      = DatumGetByteaPP(val);
     const char* p = VARDATA_ANY(b);
     size_t width  = VARSIZE_ANY_EXHDR(b);
@@ -1986,34 +1999,41 @@ pgch__convert_text(pgch_convert_state* state pg_attribute_unused(), Datum val) {
         return len == width ? val : pgch__bytes_datum(p, len);
     }
 
-    switch (state->encoding_check) {
+    switch (check) {
     case CHC_ENC_TRUNCATE:
         PG_RETURN_TEXT_P(cstring_to_text_with_len(p, oklen));
     case CHC_ENC_REMOVE:
     case CHC_ENC_REPLACE: {
-        char* c      = (char*)p;
-        size_t count = 0;
+        bool replace    = check == CHC_ENC_REPLACE && encoding == PG_UTF8;
+        const char* end = p + len;
+        const char* run = p;
         StringInfoData buf;
+
         pq_begintypsend(&buf);
-        while (count < len) {
-            if (oklen) {
-                appendBinaryStringInfo(&buf, c, oklen);
-                c += oklen;
-                count += oklen;
-            } else {
-                if (state->encoding_check == CHC_ENC_REPLACE && encoding == PG_UTF8) {
-                    appendStringInfoString(&buf, REPLACEMENT_CHARACTER_UTF8);
-                }
-                ++count;
-                ++c;
+        for (const char* c = p + oklen; c < end;) {
+            int charlen = pgch__mbcharlen(encoding, c, end - c);
+
+            if (charlen > 0) {
+                c += charlen;
+                continue;
             }
-            oklen = pg_encoding_verifymbstr(encoding, c, len - count);
+            appendBinaryStringInfo(&buf, run, (int)(c - run));
+            if (replace) {
+                appendStringInfoString(&buf, REPLACEMENT_CHARACTER_UTF8);
+            }
+            run = ++c;
         }
+        appendBinaryStringInfo(&buf, run, (int)(end - run));
         PG_RETURN_TEXT_P(pq_endtypsend(&buf));
     }
     default:
         report_invalid_encoding(encoding, p + oklen, len - oklen);
     }
+}
+
+static Datum
+pgch__convert_text(pgch_convert_state* state, Datum val) {
+    return pgch__checked_text(state->encoding_check, val);
 }
 
 static Datum
@@ -2522,7 +2542,7 @@ pgch_convert_free(void* state) {
 }
 
 char*
-pgch_value_to_cstring(Oid coltype, Datum value) {
+pgch_value_to_cstring(Oid coltype, Datum value, pgch_encoding_check encoding_check) {
     Oid out_func;
     bool typisvarlena;
 
@@ -2534,7 +2554,7 @@ pgch_value_to_cstring(Oid coltype, Datum value) {
                              ? TEXTARRAYOID
                              : slot->array_type;
         void* state =
-            pgch_convert_init(value, ANYARRAYOID, array_type, -1, CHC_ENC_FAIL);
+            pgch_convert_init(value, ANYARRAYOID, array_type, -1, encoding_check);
         Datum arr = pgch_convert(state, value);
 
         getTypeOutputInfo(array_type, &out_func, &typisvarlena);
@@ -2545,7 +2565,7 @@ pgch_value_to_cstring(Oid coltype, Datum value) {
     }
 
     if (coltype == RECORDOID) {
-        void* state = pgch_convert_init(value, RECORDOID, TEXTOID, -1, CHC_ENC_FAIL);
+        void* state = pgch_convert_init(value, RECORDOID, TEXTOID, -1, encoding_check);
         Datum txt   = pgch_convert(state, value);
 
         if (state) {
@@ -2555,10 +2575,7 @@ pgch_value_to_cstring(Oid coltype, Datum value) {
     }
 
     if (coltype == BYTEAOID) {
-        bytea* b = DatumGetByteaPP(value);
-
-        pg_verifymbstr(VARDATA_ANY(b), (int)VARSIZE_ANY_EXHDR(b), false);
-        return TextDatumGetCString(value);
+        return TextDatumGetCString(pgch__checked_text(encoding_check, value));
     }
 
     getTypeOutputInfo(coltype, &out_func, &typisvarlena);

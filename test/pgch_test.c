@@ -380,7 +380,7 @@ decode_reader(pgch_reader* r, Oid outtype, int32 outtypmod, bool from_type) {
         if (isnull) {
         } else if (!OidIsValid(outtype)) {
             val = CStringGetTextDatum(
-                pgch_value_to_cstring(r->coltypes[0], r->values[0])
+                pgch_value_to_cstring(r->coltypes[0], r->values[0], r->encoding_check)
             );
         } else {
             if (!converted) {
@@ -479,7 +479,12 @@ PG_FUNCTION_INFO_V1(pgch_decode);
 /* Decode first column of every row as text */
 Datum
 pgch_decode(PG_FUNCTION_ARGS) {
-    PG_RETURN_DATUM(decode_column(PG_GETARG_BYTEA_PP(0), InvalidOid, -1, false));
+    bytes_source src;
+    pgch_reader r;
+
+    reader_from_bytea(&r, &src, PG_GETARG_BYTEA_PP(0));
+    r.encoding_check = (pgch_encoding_check)PG_GETARG_INT32(1);
+    PG_RETURN_DATUM(decode_reader(&r, InvalidOid, -1, false));
 }
 
 PG_FUNCTION_INFO_V1(pgch_decode_as);

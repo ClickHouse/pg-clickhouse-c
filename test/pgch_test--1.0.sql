@@ -15,7 +15,7 @@ CREATE FUNCTION pgch_encode_pairs(ch_type text, keys text[], vals bigint[],
                                   nest bool DEFAULT false) RETURNS bytea
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 
-CREATE FUNCTION pgch_decode(data bytea) RETURNS text[]
+CREATE FUNCTION pgch_decode(data bytea, enc_check int DEFAULT 0) RETURNS text[]
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 
 -- Pass NULL::type to select target type
