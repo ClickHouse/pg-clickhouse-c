@@ -47,6 +47,10 @@ SELECT pgch_encode_pairs('Map(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[], 1
 SELECT pgch_encode_pairs('Map(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[], 3);
 SELECT pgch_encode_pairs('Tuple(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[]);
 SELECT pgch_encode_pairs('Map(String)', ARRAY['a'], ARRAY[1]::bigint[]);
+-- Write only k with fields = 1, leave v missing
+SELECT pgch_encode_pairs('Nested(k String, v Int64)', ARRAY['a'],
+                         ARRAY[1]::bigint[], 1);
+SELECT pgch_encode('Nested', ARRAY['a']::text[]);
 
 -- Reject invalid Map arrays
 SELECT pgch_encode('Map(String, Int64)', ARRAY['a', '1']::text[]);
@@ -61,6 +65,10 @@ SELECT pgch_pgtype('Nonsense');
 -- Reject unsupported types before reading rows, including nested types
 SELECT pgch_decode(pgch_block('Tuple()', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('Map(String)', 0, ''::bytea));
+SELECT pgch_decode(pgch_block('Nested', 0, ''::bytea));
+SELECT pgch_decode(pgch_block('Nested(a Dynamic)', 0, ''::bytea));
+SELECT pgch_decode(pgch_block('SimpleAggregateFunction(anyLast, Dynamic)', 0,
+                              ''::bytea));
 SELECT pgch_decode(pgch_block('Array(Nothing)', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('LowCardinality(Int32)', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('Array(Dynamic)', 0, ''::bytea));

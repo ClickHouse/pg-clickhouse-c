@@ -422,14 +422,16 @@ pgch__datum_oid(const chc_type* type, const char* what) {
         return InvalidOid;
     case CHC_NULLABLE:
     case CHC_LOW_CARDINALITY:
+    case CHC_SIMPLE_AGGREGATE_FUNCTION:
         return pgch__datum_oid(chc_type_child(type, 0), what);
     case CHC_ARRAY:
     /* Geo types above Ring and LineString nest Array layers over them */
     case CHC_POLYGON:
     case CHC_MULTI_POLYGON:
     case CHC_MULTI_LINE_STRING:
-    /* Map is Array(Tuple(K, V)), so it reads as an array of pairs */
+    /* Map and Nested map to PostgreSQL arrays of records */
     case CHC_MAP:
+    case CHC_NESTED:
         return ANYARRAYOID;
     case CHC_TUPLE:
         return RECORDOID;
@@ -473,6 +475,7 @@ pgch_native_oid_for(const chc_type* type, const char* what) {
     switch (kind) {
     case CHC_NULLABLE:
     case CHC_LOW_CARDINALITY:
+    case CHC_SIMPLE_AGGREGATE_FUNCTION:
         return pgch_native_oid_for(chc_type_child(type, 0), what);
     /* PostgreSQL has no multi-geometry types, so their rings become arrays */
     case CHC_POLYGON:
@@ -481,6 +484,7 @@ pgch_native_oid_for(const chc_type* type, const char* what) {
     case CHC_MULTI_LINE_STRING:
         return PATHARRAYOID;
     case CHC_MAP:
+    case CHC_NESTED:
         return RECORDARRAYOID;
     case CHC_ARRAY: {
         /* PostgreSQL uses one array type for every nesting depth */
@@ -518,6 +522,10 @@ const chc_type*
 pgch_unwrap(const chc_type* type, bool* out_nullable) {
     bool nullable = false;
 
+    /* ClickHouse stores SimpleAggregateFunction values as its argument type */
+    if (chc_type_kind(type) == CHC_SIMPLE_AGGREGATE_FUNCTION) {
+        type = chc_type_child(type, 0);
+    }
     if (chc_type_kind(type) == CHC_NULLABLE) {
         nullable = true;
         type     = chc_type_child(type, 0);
@@ -590,8 +598,9 @@ pgch_pg_type_for(const chc_type* type, const char* what) {
     case CHC_INTERVAL:
         out.truncated = chc_type_interval_unit(leaf) == CHC_INTERVAL_NANOSECOND;
         break;
-    /* Map and the multi-geometry types name a PostgreSQL array of their own */
+    /* Map, Nested and multi-geometry types add a PostgreSQL array dimension */
     case CHC_MAP:
+    case CHC_NESTED:
     case CHC_POLYGON:
     case CHC_MULTI_LINE_STRING:
         out.ndims++;

@@ -748,3 +748,53 @@ SELECT pgch_decode(pgch_encode_pairs('Map(String, Tuple(Int64))',
  {"{{a,(1)},{b,(2)}}"} | {"{{a,(1)},{b,(2)}}"}
 (1 row)
 
+-- Expand untyped Tuple fields into a text array dimension
+SELECT (pgch_decode(pgch_encode_pairs('Nested(k String, v Int64)',
+                                      ARRAY['a', 'b'], ARRAY[1, 2]::bigint[])))[1] AS nested,
+       (pgch_decode(pgch_encode_pairs('Array(Tuple(k String, v Int64))',
+                                      ARRAY['a', 'b'], ARRAY[1, 2]::bigint[])))[1] AS array_tuple;
+    nested     |  array_tuple  
+---------------+---------------
+ {{a,1},{b,2}} | {{a,1},{b,2}}
+(1 row)
+
+-- Convert both declarations into pairformat[] before rendering
+SELECT (pgch_decode_as(pgch_encode_pairs('Nested(k String, v Int64)',
+                                         ARRAY['a', 'b'], ARRAY[1, 2]::bigint[]),
+                       NULL::pairformat[]))[1] AS nested,
+       (pgch_decode_as(pgch_encode_pairs('Array(Tuple(k String, v Int64))',
+                                         ARRAY['a', 'b'], ARRAY[1, 2]::bigint[]),
+                       NULL::pairformat[]))[1] AS array_tuple;
+      nested       |    array_tuple    
+-------------------+-------------------
+ {"(a,1)","(b,2)"} | {"(a,1)","(b,2)"}
+(1 row)
+
+-- Preserve NULL fields in composite array elements
+SELECT (pgch_decode_as(pgch_encode_pairs('Nested(k String, v Nullable(Int64))',
+                                         ARRAY['a', 'b'], ARRAY[1, NULL]::bigint[]),
+                       NULL::pairformat[]))[1] AS null_value;
+    null_value    
+------------------
+ {"(a,1)","(b,)"}
+(1 row)
+
+SELECT pgch_pgtype('Nested(k String, v Int64)');
+ pgch_pgtype 
+-------------
+ record[]
+(1 row)
+
+-- SimpleAggregateFunction stores values as its argument type
+SELECT pgch_roundtrip('SimpleAggregateFunction(sum, Int64)', 7::bigint) AS sum,
+       pgch_roundtrip('SimpleAggregateFunction(anyLast, LowCardinality(String))',
+                      'a'::text) AS any_last,
+       pgch_roundtrip_rows('SimpleAggregateFunction(anyLast, Nullable(Int32))',
+                           ARRAY[1, NULL]::int4[]) AS nullable,
+       pgch_roundtrip('SimpleAggregateFunction(groupArrayArray, Array(Int32))',
+                      ARRAY[1, 2]::int4[]) AS group_array;
+ sum | any_last | nullable | group_array 
+-----+----------+----------+-------------
+ 7   | a        | {1,NULL} | {1,2}
+(1 row)
+

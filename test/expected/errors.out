@@ -56,13 +56,19 @@ SELECT pgch_decode_as(pgch_block('Tuple(Int32, String)', 1,
 ERROR:  invalid input syntax for type bigint: "hi"
 -- Reject Tuple field counts other than the column's arity
 SELECT pgch_encode_pairs('Map(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[], 1);
-ERROR:  pgch: Tuple took 1 of 2 values
+ERROR:  pgch: Tuple requires 2 values, got 1
 SELECT pgch_encode_pairs('Map(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[], 3);
 ERROR:  pgch: Tuple takes 2 values
 SELECT pgch_encode_pairs('Tuple(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[]);
 ERROR:  pgch: Array value into column "c"
 SELECT pgch_encode_pairs('Map(String)', ARRAY['a'], ARRAY[1]::bigint[]);
 ERROR:  pgch: Map wants key and value
+-- Write only k with fields = 1, leave v missing
+SELECT pgch_encode_pairs('Nested(k String, v Int64)', ARRAY['a'],
+                         ARRAY[1]::bigint[], 1);
+ERROR:  pgch: Tuple requires 2 values, got 1
+SELECT pgch_encode('Nested', ARRAY['a']::text[]);
+ERROR:  pgch: Nested column has no fields
 -- Reject invalid Map arrays
 SELECT pgch_encode('Map(String, Int64)', ARRAY['a', '1']::text[]);
 ERROR:  pgch: cannot encode text into ClickHouse Map(String, Int64) (column "c")
@@ -82,6 +88,13 @@ SELECT pgch_decode(pgch_block('Tuple()', 0, ''::bytea));
 ERROR:  decode: returned tuple is empty (column "c")
 SELECT pgch_decode(pgch_block('Map(String)', 0, ''::bytea));
 ERROR:  decode: returned map wants key and value (column "c")
+SELECT pgch_decode(pgch_block('Nested', 0, ''::bytea));
+ERROR:  decode: returned tuple is empty (column "c")
+SELECT pgch_decode(pgch_block('Nested(a Dynamic)', 0, ''::bytea));
+ERROR:  decode: unsupported column type "Dynamic" (column "c")
+SELECT pgch_decode(pgch_block('SimpleAggregateFunction(anyLast, Dynamic)', 0,
+                              ''::bytea));
+ERROR:  decode: unsupported column type "Dynamic" (column "c")
 SELECT pgch_decode(pgch_block('Array(Nothing)', 0, ''::bytea));
 ERROR:  decode: no PG array type for column type "Nothing" (column "c")
 SELECT pgch_decode(pgch_block('LowCardinality(Int32)', 0, ''::bytea));

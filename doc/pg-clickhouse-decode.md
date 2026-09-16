@@ -186,7 +186,7 @@ Conversion supports:
 - `pgch_tuple` of coordinates to `box`, `circle` and `line`, and a decoded
   `path` or `polygon` of two points to `lseg`, none of which PostgreSQL casts
 - `Map` as an array of two-field composites, so a target composite array with
-  matching key and value types receives it
+  matching key and value types receives it, `Nested` likewise over its fields
 - ClickHouse strings and JSON documents, which reach `bytea` unchanged and any
   other target through its input function. The `pgch_encoding_check` parameter
   or field of `pgch_reader` determines the handling of bytes that PostgreSQL

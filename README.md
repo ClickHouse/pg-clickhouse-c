@@ -207,65 +207,67 @@ Decode and encode each depend only on the core header; take one or both.
 name the parser resolves reaches this table or the omitted list `test/sql/type_table.sql`.
 
 <!-- TYPE-TABLE-BEGIN -->
-|     ClickHouse      |         PostgreSQL          |              Notes               |
-|---------------------|-----------------------------|----------------------------------|
-| Array(T)            | T[]                         | One PG array type per depth      |
-| BFloat16            | real                        | Write drops low mantissa bits    |
-| Bool                | boolean                     |                                  |
-| Date                | date                        |                                  |
-| Date32              | date                        |                                  |
-| DateTime            | timestamp with time zone    |                                  |
-| DateTime64(P)       | timestamp(P) with time zone | P over 6 caps at 6               |
-| Decimal(P,S)        | numeric(P,S)                |                                  |
-| Decimal32(S)        | numeric(9,S)                |                                  |
-| Decimal64(S)        | numeric(18,S)               |                                  |
-| Decimal128(S)       | numeric(38,S)               |                                  |
-| Decimal256(S)       | numeric(76,S)               |                                  |
-| Enum8               | text                        |                                  |
-| Enum16              | text                        |                                  |
-| FixedString(N)      | text                        | N counts CH bytes, PG characters |
-| Float32             | real                        |                                  |
-| Float64             | double precision            |                                  |
-| IPv4                | inet                        |                                  |
-| IPv6                | inet                        |                                  |
-| Int8                | smallint                    |                                  |
-| Int16               | smallint                    |                                  |
-| Int32               | integer                     |                                  |
-| Int64               | bigint                      |                                  |
-| Int128              | numeric(39,0)               |                                  |
-| Int256              | numeric(77,0)               |                                  |
-| IntervalDay         | interval                    |                                  |
-| IntervalHour        | interval                    |                                  |
-| IntervalMicrosecond | interval                    |                                  |
-| IntervalMillisecond | interval                    |                                  |
-| IntervalMinute      | interval                    |                                  |
-| IntervalMonth       | interval                    |                                  |
-| IntervalNanosecond  | interval                    | Truncates to microsecond         |
-| IntervalQuarter     | interval                    |                                  |
-| IntervalSecond      | interval                    |                                  |
-| IntervalWeek        | interval                    |                                  |
-| IntervalYear        | interval                    |                                  |
-| JSON                | jsonb                       |                                  |
-| LineString          | path                        |                                  |
-| LowCardinality(T)   | T                           |                                  |
-| Map(K,V)            | record[]                    | One record per pair              |
-| MultiLineString     | path[]                      |                                  |
-| MultiPolygon        | polygon[][]                 |                                  |
-| Nullable(T)         | T                           | Sets nullable on the column      |
-| Point               | point                       |                                  |
-| Polygon             | polygon[]                   |                                  |
-| Ring                | polygon                     |                                  |
-| String              | text                        |                                  |
-| Time                | time without time zone      |                                  |
-| Time64(P)           | time(P) without time zone   | P over 6 caps at 6               |
-| Tuple(...)          | record                      | Pseudo type, no column takes it  |
-| UInt8               | smallint                    |                                  |
-| UInt16              | integer                     |                                  |
-| UInt32              | bigint                      |                                  |
-| UInt64              | numeric(20,0)               |                                  |
-| UInt128             | numeric(39,0)               |                                  |
-| UInt256             | numeric(78,0)               |                                  |
-| UUID                | uuid                        |                                  |
+|          ClickHouse          |         PostgreSQL          |              Notes               |
+|------------------------------|-----------------------------|----------------------------------|
+| Array(T)                     | T[]                         | One PG array type per depth      |
+| BFloat16                     | real                        | Write drops low mantissa bits    |
+| Bool                         | boolean                     |                                  |
+| Date                         | date                        |                                  |
+| Date32                       | date                        |                                  |
+| DateTime                     | timestamp with time zone    |                                  |
+| DateTime64(P)                | timestamp(P) with time zone | P over 6 caps at 6               |
+| Decimal(P,S)                 | numeric(P,S)                |                                  |
+| Decimal32(S)                 | numeric(9,S)                |                                  |
+| Decimal64(S)                 | numeric(18,S)               |                                  |
+| Decimal128(S)                | numeric(38,S)               |                                  |
+| Decimal256(S)                | numeric(76,S)               |                                  |
+| Enum8                        | text                        |                                  |
+| Enum16                       | text                        |                                  |
+| FixedString(N)               | text                        | N counts CH bytes, PG characters |
+| Float32                      | real                        |                                  |
+| Float64                      | double precision            |                                  |
+| IPv4                         | inet                        |                                  |
+| IPv6                         | inet                        |                                  |
+| Int8                         | smallint                    |                                  |
+| Int16                        | smallint                    |                                  |
+| Int32                        | integer                     |                                  |
+| Int64                        | bigint                      |                                  |
+| Int128                       | numeric(39,0)               |                                  |
+| Int256                       | numeric(77,0)               |                                  |
+| IntervalDay                  | interval                    |                                  |
+| IntervalHour                 | interval                    |                                  |
+| IntervalMicrosecond          | interval                    |                                  |
+| IntervalMillisecond          | interval                    |                                  |
+| IntervalMinute               | interval                    |                                  |
+| IntervalMonth                | interval                    |                                  |
+| IntervalNanosecond           | interval                    | Truncates to microsecond         |
+| IntervalQuarter              | interval                    |                                  |
+| IntervalSecond               | interval                    |                                  |
+| IntervalWeek                 | interval                    |                                  |
+| IntervalYear                 | interval                    |                                  |
+| JSON                         | jsonb                       |                                  |
+| LineString                   | path                        |                                  |
+| LowCardinality(T)            | T                           |                                  |
+| Map(K,V)                     | record[]                    | One record per pair              |
+| MultiLineString              | path[]                      |                                  |
+| MultiPolygon                 | polygon[][]                 |                                  |
+| Nested(...)                  | record[]                    | One record per nested row        |
+| Nullable(T)                  | T                           | Sets nullable on the column      |
+| Point                        | point                       |                                  |
+| Polygon                      | polygon[]                   |                                  |
+| Ring                         | polygon                     |                                  |
+| SimpleAggregateFunction(f,T) | T                           | Stores values as T               |
+| String                       | text                        |                                  |
+| Time                         | time without time zone      |                                  |
+| Time64(P)                    | time(P) without time zone   | P over 6 caps at 6               |
+| Tuple(...)                   | record                      | Pseudo type, no column takes it  |
+| UInt8                        | smallint                    |                                  |
+| UInt16                       | integer                     |                                  |
+| UInt32                       | bigint                      |                                  |
+| UInt64                       | numeric(20,0)               |                                  |
+| UInt128                      | numeric(39,0)               |                                  |
+| UInt256                      | numeric(78,0)               |                                  |
+| UUID                         | uuid                        |                                  |
 <!-- TYPE-TABLE-END -->
 
 ## Testing

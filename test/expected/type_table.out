@@ -9,85 +9,85 @@
 \pset border 2
 \pset footer off
 SELECT r[1] AS "Omitted", r[2] AS "Reason" FROM pgch_rows(pgch_type_omitted()) t(r);
-+-------------------------------------+--------------------------------------------------------+
-|               Omitted               |                         Reason                         |
-+-------------------------------------+--------------------------------------------------------+
-| AggregateFunction(sum, Int64)       | pgch: unknown type: sum                                |
-| Dynamic                             | pgch: unsupported column type "Dynamic"                |
-| Nested(a Int32)                     | pgch: unknown type: a                                  |
-| Nothing                             | pgch: no PostgreSQL type                               |
-| Object('json')                      | serializes as a materialized Tuple, unlike JSON        |
-| QBit(BFloat16, 16)                  | pgch: unsupported column type "QBit(BFloat16, 16)"     |
-| SimpleAggregateFunction(sum, Int64) | pgch: unknown type: sum                                |
-| Variant(Int32, String)              | pgch: unsupported column type "Variant(Int32, String)" |
-| Void                                | pgch: no PostgreSQL type                               |
-+-------------------------------------+--------------------------------------------------------+
++-------------------------------+---------------------------------------------------------------+
+|            Omitted            |                            Reason                             |
++-------------------------------+---------------------------------------------------------------+
+| AggregateFunction(sum, Int64) | pgch: unsupported column type "AggregateFunction(sum, Int64)" |
+| Dynamic                       | pgch: unsupported column type "Dynamic"                       |
+| Nothing                       | pgch: no PostgreSQL type                                      |
+| Object('json')                | serializes as a materialized Tuple, unlike JSON               |
+| QBit(BFloat16, 16)            | pgch: unsupported column type "QBit(BFloat16, 16)"            |
+| Variant(Int32, String)        | pgch: unsupported column type "Variant(Int32, String)"        |
+| Void                          | pgch: no PostgreSQL type                                      |
++-------------------------------+---------------------------------------------------------------+
 
 \echo TYPE-TABLE-BEGIN
 TYPE-TABLE-BEGIN
 SELECT r[1] AS "ClickHouse", r[2] AS "PostgreSQL", r[3] AS "Notes"
     FROM pgch_rows(pgch_type_table()) t(r);
-+---------------------+-----------------------------+----------------------------------+
-|     ClickHouse      |         PostgreSQL          |              Notes               |
-+---------------------+-----------------------------+----------------------------------+
-| Array(T)            | T[]                         | One PG array type per depth      |
-| BFloat16            | real                        | Write drops low mantissa bits    |
-| Bool                | boolean                     |                                  |
-| Date                | date                        |                                  |
-| Date32              | date                        |                                  |
-| DateTime            | timestamp with time zone    |                                  |
-| DateTime64(P)       | timestamp(P) with time zone | P over 6 caps at 6               |
-| Decimal(P,S)        | numeric(P,S)                |                                  |
-| Decimal32(S)        | numeric(9,S)                |                                  |
-| Decimal64(S)        | numeric(18,S)               |                                  |
-| Decimal128(S)       | numeric(38,S)               |                                  |
-| Decimal256(S)       | numeric(76,S)               |                                  |
-| Enum8               | text                        |                                  |
-| Enum16              | text                        |                                  |
-| FixedString(N)      | text                        | N counts CH bytes, PG characters |
-| Float32             | real                        |                                  |
-| Float64             | double precision            |                                  |
-| IPv4                | inet                        |                                  |
-| IPv6                | inet                        |                                  |
-| Int8                | smallint                    |                                  |
-| Int16               | smallint                    |                                  |
-| Int32               | integer                     |                                  |
-| Int64               | bigint                      |                                  |
-| Int128              | numeric(39,0)               |                                  |
-| Int256              | numeric(77,0)               |                                  |
-| IntervalDay         | interval                    |                                  |
-| IntervalHour        | interval                    |                                  |
-| IntervalMicrosecond | interval                    |                                  |
-| IntervalMillisecond | interval                    |                                  |
-| IntervalMinute      | interval                    |                                  |
-| IntervalMonth       | interval                    |                                  |
-| IntervalNanosecond  | interval                    | Truncates to microsecond         |
-| IntervalQuarter     | interval                    |                                  |
-| IntervalSecond      | interval                    |                                  |
-| IntervalWeek        | interval                    |                                  |
-| IntervalYear        | interval                    |                                  |
-| JSON                | jsonb                       |                                  |
-| LineString          | path                        |                                  |
-| LowCardinality(T)   | T                           |                                  |
-| Map(K,V)            | record[]                    | One record per pair              |
-| MultiLineString     | path[]                      |                                  |
-| MultiPolygon        | polygon[][]                 |                                  |
-| Nullable(T)         | T                           | Sets nullable on the column      |
-| Point               | point                       |                                  |
-| Polygon             | polygon[]                   |                                  |
-| Ring                | polygon                     |                                  |
-| String              | text                        |                                  |
-| Time                | time without time zone      |                                  |
-| Time64(P)           | time(P) without time zone   | P over 6 caps at 6               |
-| Tuple(...)          | record                      | Pseudo type, no column takes it  |
-| UInt8               | smallint                    |                                  |
-| UInt16              | integer                     |                                  |
-| UInt32              | bigint                      |                                  |
-| UInt64              | numeric(20,0)               |                                  |
-| UInt128             | numeric(39,0)               |                                  |
-| UInt256             | numeric(78,0)               |                                  |
-| UUID                | uuid                        |                                  |
-+---------------------+-----------------------------+----------------------------------+
++------------------------------+-----------------------------+----------------------------------+
+|          ClickHouse          |         PostgreSQL          |              Notes               |
++------------------------------+-----------------------------+----------------------------------+
+| Array(T)                     | T[]                         | One PG array type per depth      |
+| BFloat16                     | real                        | Write drops low mantissa bits    |
+| Bool                         | boolean                     |                                  |
+| Date                         | date                        |                                  |
+| Date32                       | date                        |                                  |
+| DateTime                     | timestamp with time zone    |                                  |
+| DateTime64(P)                | timestamp(P) with time zone | P over 6 caps at 6               |
+| Decimal(P,S)                 | numeric(P,S)                |                                  |
+| Decimal32(S)                 | numeric(9,S)                |                                  |
+| Decimal64(S)                 | numeric(18,S)               |                                  |
+| Decimal128(S)                | numeric(38,S)               |                                  |
+| Decimal256(S)                | numeric(76,S)               |                                  |
+| Enum8                        | text                        |                                  |
+| Enum16                       | text                        |                                  |
+| FixedString(N)               | text                        | N counts CH bytes, PG characters |
+| Float32                      | real                        |                                  |
+| Float64                      | double precision            |                                  |
+| IPv4                         | inet                        |                                  |
+| IPv6                         | inet                        |                                  |
+| Int8                         | smallint                    |                                  |
+| Int16                        | smallint                    |                                  |
+| Int32                        | integer                     |                                  |
+| Int64                        | bigint                      |                                  |
+| Int128                       | numeric(39,0)               |                                  |
+| Int256                       | numeric(77,0)               |                                  |
+| IntervalDay                  | interval                    |                                  |
+| IntervalHour                 | interval                    |                                  |
+| IntervalMicrosecond          | interval                    |                                  |
+| IntervalMillisecond          | interval                    |                                  |
+| IntervalMinute               | interval                    |                                  |
+| IntervalMonth                | interval                    |                                  |
+| IntervalNanosecond           | interval                    | Truncates to microsecond         |
+| IntervalQuarter              | interval                    |                                  |
+| IntervalSecond               | interval                    |                                  |
+| IntervalWeek                 | interval                    |                                  |
+| IntervalYear                 | interval                    |                                  |
+| JSON                         | jsonb                       |                                  |
+| LineString                   | path                        |                                  |
+| LowCardinality(T)            | T                           |                                  |
+| Map(K,V)                     | record[]                    | One record per pair              |
+| MultiLineString              | path[]                      |                                  |
+| MultiPolygon                 | polygon[][]                 |                                  |
+| Nested(...)                  | record[]                    | One record per nested row        |
+| Nullable(T)                  | T                           | Sets nullable on the column      |
+| Point                        | point                       |                                  |
+| Polygon                      | polygon[]                   |                                  |
+| Ring                         | polygon                     |                                  |
+| SimpleAggregateFunction(f,T) | T                           | Stores values as T               |
+| String                       | text                        |                                  |
+| Time                         | time without time zone      |                                  |
+| Time64(P)                    | time(P) without time zone   | P over 6 caps at 6               |
+| Tuple(...)                   | record                      | Pseudo type, no column takes it  |
+| UInt8                        | smallint                    |                                  |
+| UInt16                       | integer                     |                                  |
+| UInt32                       | bigint                      |                                  |
+| UInt64                       | numeric(20,0)               |                                  |
+| UInt128                      | numeric(39,0)               |                                  |
+| UInt256                      | numeric(78,0)               |                                  |
+| UUID                         | uuid                        |                                  |
++------------------------------+-----------------------------+----------------------------------+
 
 \echo TYPE-TABLE-END
 TYPE-TABLE-END

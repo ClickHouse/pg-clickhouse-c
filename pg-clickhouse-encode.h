@@ -363,6 +363,11 @@ pgch__tuple_fill(pgch__node* n, const chc_type* t, size_t arity) {
 
 static pgch__node*
 pgch__node_new(const chc_type* t) {
+    /* ClickHouse stores SimpleAggregateFunction values as its argument type */
+    if (chc_type_kind(t) == CHC_SIMPLE_AGGREGATE_FUNCTION) {
+        t = chc_type_child(t, 0);
+    }
+
     pgch__node* n = palloc0(sizeof(pgch__node));
 
     n->type = t;
@@ -417,15 +422,21 @@ pgch__node_new(const chc_type* t) {
         pgch__tuple_fill(n, t, arity);
         return n;
     }
-    case CHC_MAP: {
-        /* Map is Array(Tuple(K, V)), which clickhouse-c writes without a node */
-        pgch__node* entries = palloc0(sizeof(pgch__node));
-
+    case CHC_MAP:
         if (chc_type_n_children(t) != 2) {
             pgch_error(ERRCODE_FDW_INVALID_DATA_TYPE, "Map wants key and value");
         }
+        CHC_FALLTHROUGH;
+    /* clickhouse-c encodes Map and Nested without an intermediate Tuple node */
+    case CHC_NESTED: {
+        size_t arity        = chc_type_n_children(t);
+        pgch__node* entries = palloc0(sizeof(pgch__node));
+
+        if (arity == 0) {
+            pgch_error(ERRCODE_FDW_INVALID_DATA_TYPE, "Nested column has no fields");
+        }
         entries->kind = CHC_TUPLE;
-        pgch__tuple_fill(entries, t, 2);
+        pgch__tuple_fill(entries, t, arity);
         n->layout       = CHC_COL_ARRAY;
         n->array.values = entries;
         return n;
@@ -1196,9 +1207,9 @@ pgch_tuple_end(pgch_writer* w) {
     if (f && f->child != f->node->tuple.arity) {
         pgch_errorf(
             ERRCODE_FDW_ERROR,
-            "Tuple took %zu of %zu values",
-            f->child,
-            f->node->tuple.arity
+            "Tuple requires %zu values, got %zu",
+            f->node->tuple.arity,
+            f->child
         );
     }
 }
@@ -1516,13 +1527,14 @@ pgch__cast_value(
 }
 
 /*
- * Arrays, Maps, Polygons, and multi-geometries use PostgreSQL arrays
- * Maps contain key-value Tuples
+ * Arrays, Maps, Nested, Polygons, and multi-geometries use PostgreSQL arrays
+ * Map and Nested elements map to PostgreSQL records
  */
 static inline bool
 pgch__kind_takes_array(chc_kind kind) {
-    return kind == CHC_ARRAY || kind == CHC_MAP || kind == CHC_POLYGON ||
-           kind == CHC_MULTI_POLYGON || kind == CHC_MULTI_LINE_STRING;
+    return kind == CHC_ARRAY || kind == CHC_MAP || kind == CHC_NESTED ||
+           kind == CHC_POLYGON || kind == CHC_MULTI_POLYGON ||
+           kind == CHC_MULTI_LINE_STRING;
 }
 
 static void
