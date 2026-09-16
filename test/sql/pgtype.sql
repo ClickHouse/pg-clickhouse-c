@@ -64,11 +64,21 @@ SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.truncated, c.is_column
     'Array(Polygon)', 'Array(MultiPolygon)', 'Array(Map(String, Int64))'
 ]) AS t, pgch_pgcolumn(t) AS c;
 
--- Tuple and Map reach PostgreSQL pseudotypes no table column can hold
+-- Tuple, Map and Nested map to pseudotypes PostgreSQL rejects in table columns
 SELECT t AS ch_type, c.type, c.ndims, c.is_column
   FROM unnest(ARRAY[
     'Tuple(Int32, String)', 'Tuple(a Int32, b String)',
-    'Map(String, Int64)', 'Map(String, Array(Decimal(12,6)))'
+    'Map(String, Int64)', 'Map(String, Array(Decimal(12,6)))',
+    'Nested(a Int32)', 'Nested(a Int32, b Array(String))'
+]) AS t, pgch_pgcolumn(t) AS c;
+
+-- Map SimpleAggregateFunction by argument type, regardless of function
+SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
+  FROM unnest(ARRAY[
+    'SimpleAggregateFunction(sum, Int64)',
+    'SimpleAggregateFunction(anyLast, Nullable(String))',
+    'SimpleAggregateFunction(anyLast, LowCardinality(String))',
+    'SimpleAggregateFunction(groupArrayArray, Array(Decimal(12,6)))'
 ]) AS t, pgch_pgcolumn(t) AS c;
 
 -- FixedString counts bytes, which varchar(N) cannot express, so it maps to text

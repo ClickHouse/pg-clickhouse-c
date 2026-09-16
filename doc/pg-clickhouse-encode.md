@@ -47,8 +47,9 @@ freeing writer or deleting parent releases writer state.
 
 `pgch_writer_new` raises `ERRCODE_FDW_INVALID_DATA_TYPE` when any ClickHouse
 type cannot be encoded. Supported composite output is `Array`, `Tuple`, `Map`,
-and the geometric types built over them; `Dynamic`, `Variant`, and unsupported
-`LowCardinality` forms are rejected.
+`Nested`, and the geometric types built over them; `Dynamic`, `Variant`, and
+unsupported `LowCardinality` forms are rejected.
+`SimpleAggregateFunction(f, T)` writes as `T`.
 
 ## Append PostgreSQL Datums
 
@@ -69,7 +70,8 @@ destinations also accept source type output representation. Missing
 conversion raises `ERRCODE_DATATYPE_MISMATCH`.
 
 A `Map` takes an array of pairs, each pair an array of key and value, so a
-two-dimensional `text[]` fills one. A `Tuple` takes one array of its fields.
+two-dimensional `text[]` fills one. A `Nested` takes the same shape over its
+fields. A `Tuple` takes one array of its fields.
 One array carries one element type while fields take their own, so a text
 item parses through the field type's input function.
 
@@ -181,7 +183,8 @@ pgch_append_datum(writer, 0, Int64GetDatum(count), INT8OID, false);
 pgch_tuple_end(writer);
 ```
 
-Nest both calls freely. `Map(K, V)` writes as `Array(Tuple(K, V))`:
+Nest both calls freely. `Map(K, V)` writes as `Array(Tuple(K, V))`, and
+`Nested(fields)` as `Array(Tuple(fields))`:
 
 ```c
 pgch_array_begin(writer, col);

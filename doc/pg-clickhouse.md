@@ -97,21 +97,24 @@ whether the top bit of a wide value carries a sign.
 - `Tuple` returns `RECORDOID`, representing `pgch_tuple *`
 - `Map` returns `ANYARRAYOID` over `pgch_tuple *` pairs, as ClickHouse stores
   it as `Array(Tuple(K, V))`
+- `Nested` returns `ANYARRAYOID` over `pgch_tuple *` rows, as ClickHouse stores
+  it as `Array(Tuple(fields))`
 - `Polygon`, `MultiPolygon`, and `MultiLineString` return `ANYARRAYOID`, having
   no PostgreSQL multi-geometry counterpart
-- `Nullable` and `LowCardinality` return inner mapping
+- `Nullable`, `LowCardinality` and `SimpleAggregateFunction` return inner
+  mapping
 - `Nothing` and `Void` return `InvalidOid`
 
 `pgch_native_oid` returns type suitable for a PostgreSQL column descriptor.
 Unlike `pgch_datum_oid`, it resolves `Array` to PostgreSQL array OID for leaf
-type, and `Map` to `record[]`. Unsupported mappings raise
+type, and `Map` and `Nested` to `record[]`. Unsupported mappings raise
 `ERRCODE_FDW_INVALID_DATA_TYPE`.
 
 `pgch_native_oid_for` behaves like `pgch_native_oid` and adds `what` to an
 unsupported-type error. Pass `NULL` to omit context.
 
-`pgch_unwrap` removes outer `Nullable`, `LowCardinality`, and nullable wrapper
-inside `LowCardinality`. When `out_nullable` is not `NULL`, it reports whether
+`pgch_unwrap` removes outer `SimpleAggregateFunction`, `Nullable`,
+`LowCardinality`, and nullable wrapper inside `LowCardinality`. When `out_nullable` is not `NULL`, it reports whether
 either nullable wrapper was present.
 
 `pgch_pow10` contains powers from `10^0` through `10^9` for scaling `DateTime64`

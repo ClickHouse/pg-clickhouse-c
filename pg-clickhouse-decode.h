@@ -742,8 +742,9 @@ pgch__array_item(const chc_type* type, const chc_type** leaf, int* ndim) {
             dims++;
             type = chc_type_child(type, 0);
             continue;
-        /* Map holds Tuple(K, V) pairs */
+        /* Map and Nested elements map to PostgreSQL records */
         case CHC_MAP:
+        case CHC_NESTED:
             *ndim = dims + 1;
             return RECORDOID;
         case CHC_POLYGON:
@@ -939,8 +940,8 @@ pgch__read_tuple(
 }
 
 /*
- * Map is Array(Tuple(K, V)) carrying no Tuple type of its own, so the pair
- * reads against the Map type, whose two children are the field types
+ * clickhouse-c exposes Map and Nested field types as direct children,
+ * without an intermediate Tuple type
  */
 static Datum
 pgch__read_map(
@@ -1175,7 +1176,10 @@ pgch_read_value(
     case CHC_TUPLE:
         return pgch__read_tuple(col, type, row, valtype, is_null);
     case CHC_MAP:
+    case CHC_NESTED:
         return pgch__read_map(col, type, row, valtype, is_null);
+    case CHC_SIMPLE_AGGREGATE_FUNCTION:
+        return pgch_read_value(col, chc_type_child(type, 0), row, valtype, is_null);
     default:
         pgch_errorf(
             ERRCODE_FDW_INVALID_DATA_TYPE,
@@ -1195,14 +1199,16 @@ pgch__append_shape(StringInfo buf, const chc_type* type) {
     switch (kind) {
     case CHC_NULLABLE:
     case CHC_LOW_CARDINALITY:
+    case CHC_SIMPLE_AGGREGATE_FUNCTION:
         pgch__append_shape(buf, chc_type_child(type, 0));
         return;
     case CHC_ARRAY:
         appendStringInfoChar(buf, 'a');
         pgch__append_shape(buf, chc_type_child(type, 0));
         return;
-    /* Map reads as Array(Tuple(K, V)), so it shares that shape */
+    /* Map and Nested share Array(Tuple(...)) layout */
     case CHC_MAP:
+    case CHC_NESTED:
         appendStringInfoChar(buf, 'a');
         CHC_FALLTHROUGH;
     case CHC_TUPLE: {
@@ -1272,11 +1278,14 @@ pgch__check_type(const chc_type* type) {
         }
         return NULL;
     }
+    case CHC_SIMPLE_AGGREGATE_FUNCTION:
+        return pgch__check_type(chc_type_child(type, 0));
     case CHC_MAP:
         if (chc_type_n_children(type) != 2) {
             return "returned map wants key and value";
         }
         CHC_FALLTHROUGH;
+    case CHC_NESTED:
     case CHC_TUPLE: {
         size_t n = chc_type_n_children(type);
 

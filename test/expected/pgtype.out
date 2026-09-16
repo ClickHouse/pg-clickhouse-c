@@ -171,11 +171,12 @@ SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.truncated, c.is_column
  Array(Map(String, Int64))      | record[]                      |     2 | f        | f         | f
 (15 rows)
 
--- Tuple and Map reach PostgreSQL pseudotypes no table column can hold
+-- Tuple, Map and Nested map to pseudotypes PostgreSQL rejects in table columns
 SELECT t AS ch_type, c.type, c.ndims, c.is_column
   FROM unnest(ARRAY[
     'Tuple(Int32, String)', 'Tuple(a Int32, b String)',
-    'Map(String, Int64)', 'Map(String, Array(Decimal(12,6)))'
+    'Map(String, Int64)', 'Map(String, Array(Decimal(12,6)))',
+    'Nested(a Int32)', 'Nested(a Int32, b Array(String))'
 ]) AS t, pgch_pgcolumn(t) AS c;
               ch_type              |   type   | ndims | is_column 
 -----------------------------------+----------+-------+-----------
@@ -183,6 +184,24 @@ SELECT t AS ch_type, c.type, c.ndims, c.is_column
  Tuple(a Int32, b String)          | record   |     0 | f
  Map(String, Int64)                | record[] |     1 | f
  Map(String, Array(Decimal(12,6))) | record[] |     1 | f
+ Nested(a Int32)                   | record[] |     1 | f
+ Nested(a Int32, b Array(String))  | record[] |     1 | f
+(6 rows)
+
+-- Map SimpleAggregateFunction by argument type, regardless of function
+SELECT t AS ch_type, c.type, c.ndims, c.nullable, c.is_column
+  FROM unnest(ARRAY[
+    'SimpleAggregateFunction(sum, Int64)',
+    'SimpleAggregateFunction(anyLast, Nullable(String))',
+    'SimpleAggregateFunction(anyLast, LowCardinality(String))',
+    'SimpleAggregateFunction(groupArrayArray, Array(Decimal(12,6)))'
+]) AS t, pgch_pgcolumn(t) AS c;
+                            ch_type                             |      type       | ndims | nullable | is_column 
+----------------------------------------------------------------+-----------------+-------+----------+-----------
+ SimpleAggregateFunction(sum, Int64)                            | bigint          |     0 | f        | t
+ SimpleAggregateFunction(anyLast, Nullable(String))             | text            |     0 | t        | t
+ SimpleAggregateFunction(anyLast, LowCardinality(String))       | text            |     0 | f        | t
+ SimpleAggregateFunction(groupArrayArray, Array(Decimal(12,6))) | numeric(12,6)[] |     1 | f        | t
 (4 rows)
 
 -- FixedString counts bytes, which varchar(N) cannot express, so it maps to text
@@ -212,7 +231,7 @@ ERROR:  pgch: unsupported column type "QBit(Float32, 16)"
 SELECT pgch_pgcolumn('Array(Dynamic)');
 ERROR:  pgch: unsupported column type "Dynamic"
 SELECT pgch_pgcolumn('AggregateFunction(sum, Int64)');
-ERROR:  pgch: unknown type: sum
+ERROR:  pgch: unsupported column type "AggregateFunction(sum, Int64)"
 -- Malformed declarations report the clickhouse-c parse error
 SELECT pgch_pgcolumn('Nonsense');
 ERROR:  pgch: unknown type: Nonsense
