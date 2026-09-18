@@ -541,7 +541,7 @@ pgch__node_count(const pgch__node* n) {
     case CHC_COL_LOW_CARDINALITY:
         return count;
     case CHC_COL_NOTHING:
-        break;
+        pg_unreachable();
     }
     pg_unreachable();
 }
@@ -582,7 +582,7 @@ pgch__checkpoint_node(
         checkpoint->nulls   = n->lc.null_map.len;
         return;
     case CHC_COL_NOTHING:
-        break;
+        pg_unreachable();
     }
     pg_unreachable();
 }
@@ -618,7 +618,7 @@ pgch__rollback_node(pgch__node* n, const pgch__node_checkpoint* entries, size_t*
         n->lc.null_map.len = checkpoint->nulls;
         return;
     case CHC_COL_NOTHING:
-        break;
+        pg_unreachable();
     }
     pg_unreachable();
 }
@@ -669,9 +669,7 @@ pgch_writer_rollback(pgch_writer* w, const pgch_checkpoint* checkpoint) {
     for (size_t i = 0; i < w->ncols; i++) {
         pgch__rollback_node(w->cols[i].root, checkpoint->entries, &pos);
     }
-    if (pos != checkpoint->nentries) {
-        pgch_error(ERRCODE_INTERNAL_ERROR, "writer checkpoint shape changed");
-    }
+    Assert(pos == checkpoint->nentries);
     w->generation++;
 }
 
@@ -746,9 +744,7 @@ pgch__resolve_leaf(pgch_writer* w, size_t col, bool isnull) {
     uint8_t b     = isnull ? 1 : 0;
     bool nullable = false;
 
-    if (!w->cursor_len && col >= w->ncols) {
-        pgch_errorf(ERRCODE_FDW_ERROR, "column %zu out of range", col);
-    }
+    Assert(w->cursor_len || col < w->ncols);
     pgch__node* node = pgch__cursor_node(w, col);
     pgch__cursor_step(w);
 
@@ -764,23 +760,13 @@ pgch__resolve_leaf(pgch_writer* w, size_t col, bool isnull) {
     if (isnull && !nullable) {
         pgch__null_violation(w, col);
     }
-    if (node->layout == CHC_COL_ARRAY) {
-        pgch_errorf(
-            ERRCODE_DATATYPE_MISMATCH,
-            "scalar value into Array %s",
-            pgch__col_desc(w, col)
-        );
-    }
+    Assert(node->layout != CHC_COL_ARRAY);
     return node;
 }
 
 static pgch_buf*
 pgch__fixed_data(pgch__node* node) {
-    if (node->layout != CHC_COL_FIXED) {
-        pgch_error(
-            ERRCODE_DATATYPE_MISMATCH, "fixed-width value into non-fixed-width column"
-        );
-    }
+    Assert(node->layout == CHC_COL_FIXED);
     return &node->fixed.data;
 }
 
@@ -809,13 +795,9 @@ pgch__number_to_bytes(const char* s, const chc_type* type, size_t width, uint8_t
     bool is_signed    = !pgch_kind_is_unsigned(chc_type_kind(type));
     bool neg          = false;
 
-    if (!s) {
-        pgch_error(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE, "numeric parse failure");
-    }
+    Assert(s && *s != '+');
     if (*s == '-') {
         neg = true;
-        s++;
-    } else if (*s == '+') {
         s++;
     }
 
@@ -1051,7 +1033,7 @@ pgch__append_bytes_fixed(pgch__node* node, const void* p, size_t n, bool isnull)
         }
         return;
     }
-    pgch_error(ERRCODE_DATATYPE_MISMATCH, "bytes into non-text column");
+    pg_unreachable();
 }
 
 static void
@@ -1079,7 +1061,7 @@ pgch__append_bytes(pgch_writer* w, size_t col, const void* p, size_t n, bool isn
         pgch__append_bytes_fixed(node, p, n, isnull);
         break;
     default:
-        pgch_error(ERRCODE_DATATYPE_MISMATCH, "bytes into non-text column");
+        pg_unreachable();
     }
     MemoryContextSwitchTo(old);
 }
@@ -1092,9 +1074,7 @@ pgch__append_number(pgch_writer* w, size_t col, const char* digits, bool isnull)
     size_t width      = node->fixed.elem_size;
     uint8_t raw[32]   = {};
 
-    if (!pgch__kind_maps_to_numeric(node->kind)) {
-        pgch_error(ERRCODE_DATATYPE_MISMATCH, "numeric into non-numeric column");
-    }
+    Assert(pgch__kind_maps_to_numeric(node->kind));
     if (!isnull) {
         pgch__number_to_bytes(digits, node->type, width, raw);
     }
@@ -1118,7 +1098,7 @@ pgch__node_rows(const pgch__node* n) {
     case CHC_COL_LOW_CARDINALITY:
         return pgch__offs_len(&n->lc.offs);
     case CHC_COL_NOTHING:
-        break;
+        pg_unreachable();
     }
     pg_unreachable();
 }
@@ -1396,18 +1376,11 @@ pgch_array_from_pg(
     AnyArrayType* v = DatumGetAnyArrayP(arr);
     int ndim        = AARR_NDIM(v);
     int* dims       = AARR_DIMS(v);
-    size_t total    = ArrayGetNItems(ndim, dims);
+    Assert(ndim <= MAXDIM);
+
+    size_t total = ArrayGetNItems(ndim, dims);
     array_iter iter;
     pgch_array* out;
-
-    if (ndim > MAXDIM) {
-        pgch_errorf(
-            ERRCODE_PROGRAM_LIMIT_EXCEEDED,
-            "array depth %d exceeds maximum %d",
-            ndim,
-            MAXDIM
-        );
-    }
 
 #if PG_VERSION_NUM < 190000
 #define PGCH__ITER_SETUP() array_iter_setup(&iter, v)
@@ -1787,13 +1760,9 @@ pgch__append_one(
         if (kind != CHC_TUPLE && !pgch__kind_takes_array(kind)) {
             goto type_mismatch;
         }
+        /* Array kinds took the NULL path above, Tuple values cannot be NULL */
         if (isnull) {
-            /* Tuple values cannot be NULL, empty Array or Map represents NULL input */
-            if (kind == CHC_TUPLE) {
-                pgch__null_violation(w, col);
-            }
-            pgch__append_null_array(w, col);
-            return;
+            pgch__null_violation(w, col);
         }
 
         pgch_array* arr   = (pgch_array*)DatumGetPointer(val);
@@ -2250,7 +2219,7 @@ pgch__finalize_node(pgch__node* n) {
         return pgch__col_node(chc_build_lc(key_size, lc_keys, n_rows, dict));
     }
     case CHC_COL_NOTHING:
-        break;
+        pg_unreachable();
     }
     pg_unreachable();
 }
@@ -2277,7 +2246,7 @@ pgch__node_bytes(const pgch__node* n) {
     case CHC_COL_LOW_CARDINALITY:
         return n->lc.data.len + n->lc.offs.len + n->lc.null_map.len;
     case CHC_COL_NOTHING:
-        break;
+        pg_unreachable();
     }
     pg_unreachable();
 }
@@ -2311,7 +2280,7 @@ pgch__reset_node(pgch__node* n) {
         pgch_buf_reset(&n->lc.null_map);
         return;
     case CHC_COL_NOTHING:
-        break;
+        pg_unreachable();
     }
     pg_unreachable();
 }

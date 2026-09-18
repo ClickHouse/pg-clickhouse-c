@@ -387,3 +387,11 @@ SELECT pgch_native_settings();
  output_format_native_encode_types_in_binary_format=0,output_format_native_write_json_as_string=1
 (1 row)
 
+-- Quote column names ClickHouse cannot take bare, escaping quote and backslash
+CREATE TABLE oddnames ("a1" int, "a b" int, "q""x" int, "back\slash" int);
+SELECT pgch_structure('oddnames');
+                                          pgch_structure                                          
+--------------------------------------------------------------------------------------------------
+ a1 Nullable(Int32), "a b" Nullable(Int32), "q""x" Nullable(Int32), "back\\slash" Nullable(Int32)
+(1 row)
+

@@ -10,3 +10,6 @@ compile_commands.json
 .vsode
 .zed
 .gram
+coverage/
+*.gcda
+*.gcno

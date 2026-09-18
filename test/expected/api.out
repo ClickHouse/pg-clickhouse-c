@@ -1,0 +1,137 @@
+-- Verify guards on calls the library's own paths never make
+SET lc_messages = 'C';
+-- Report columns past the writer instead of reading past them
+SELECT pgch_writer_probe('column_range') AS out_of_range,
+       pgch_writer_probe('array_scale') AS array_scale,
+       pgch_writer_probe('close_idle') AS close_idle;
+  out_of_range  | array_scale | close_idle 
+----------------+-------------+------------
+ kind 0 scale 0 | scale 3     | nest 0
+(1 row)
+
+SELECT pgch_writer_probe('array_range');
+ERROR:  pgch: column 9 out of range
+SELECT pgch_writer_probe('nesting');
+ERROR:  pgch: mismatched Array and Tuple nesting
+SELECT pgch_writer_probe('append_range');
+ERROR:  pgch: column 9 out of range
+SELECT pgch_writer_probe('unnamed');
+ERROR:  pgch: cannot append NULL to NOT NULL Int32 column 0
+SELECT pgch_writer_probe('tuple_null');
+ERROR:  pgch: cannot append NULL to NOT NULL Tuple(Int32, String) column "c"
+-- Save and restore row position across column layouts
+SELECT pgch_writer_probe('checkpoint_grow') AS grow,
+       pgch_writer_probe('rollback_built') AS rollback_built,
+       pgch_writer_probe('rebuild') AS rebuild,
+       pgch_writer_probe('bytes') AS bytes;
+   grow    | rollback_built | rebuild |  bytes   
+-----------+----------------+---------+----------
+ entries 7 | rows 1         | rows 1  | bytes 48
+(1 row)
+
+SELECT pgch_writer_probe('checkpoint_nested');
+ERROR:  pgch: checkpoint inside nested value
+SELECT pgch_writer_probe('checkpoint_stale');
+ERROR:  pgch: stale writer checkpoint
+-- Reject ClickHouse types the parser cannot spell
+SELECT pgch_writer_probe('interval_unit');
+ERROR:  pgch: unsupported Interval unit "IntervalDay"
+SELECT pgch_writer_probe('datetime64_scale');
+ERROR:  pgch: DateTime64(3) scale 10 out of range
+SELECT pgch_reader_probe('read_datetime64_scale');
+ERROR:  pgch: DateTime64 scale 10 out of range
+SELECT pgch_reader_probe('read_time64_scale');
+ERROR:  pgch: Time64 scale 10 out of range
+SELECT pgch_reader_probe('read_unsupported');
+ERROR:  pgch: unsupported type "Dynamic" in Native format
+SELECT pgch_reader_probe('read_array_item');
+ERROR:  pgch: no PG array type for column type "Nothing"
+-- Release a reader before its block runs out
+SELECT pgch_decode_first(pgch_encode_rows('Int32', ARRAY[1, 2, 3]::int4[])) AS first,
+       pgch_decode_first(pgch_encode_rows('Int32', ARRAY[]::int4[])) AS empty;
+ first | empty 
+-------+-------
+ 1     | 
+(1 row)
+
+-- Report a source that fails before the first block
+SELECT pgch_decode_failed_source();
+    pgch_decode_failed_source     
+----------------------------------
+ source failed before first block
+(1 row)
+
+-- Prepare conversion from a declaration rather than from the block
+SELECT pgch_decode_typed_decl(pgch_encode_rows('Int32', ARRAY[1, 2]::int4[]),
+                              'Int32', NULL::int8) AS widened,
+       pgch_decode_typed_decl(pgch_encode_rows('Nullable(Int32)',
+                                               ARRAY[1, NULL]::int4[]),
+                              'Nullable(Int32)', NULL::text) AS text;
+ widened |   text   
+---------+----------
+ {1,2}   | {1,NULL}
+(1 row)
+
+-- Stop chunk delivery mid-stream, with and without cancellation
+SELECT pgch_decode_chunks(pgch_encode_rows('Int32', ARRAY[1, 2]::int4[]), 4,
+                          fail_at => 1);
+ERROR:  decode: chunk source gave up
+SELECT pgch_decode_chunks(pgch_encode_rows('Int32', ARRAY[1, 2]::int4[]), 4,
+                          fail_at => 2);
+ERROR:  decode: chunk source gave up
+SELECT pgch_decode_chunks(pgch_encode_rows('Int32', ARRAY[1, 2]::int4[]), 4,
+                          cancel_at => 1);
+ERROR:  decode: canceled
+SELECT pgch_decode_chunks(pgch_encode_rows('Int32', ARRAY[1, 2]::int4[]), 4,
+                          fail_at => -1);
+ERROR:  decode: chunk source failed
+-- Reject columns whose shape the wire cannot spell
+SELECT pgch_reader_probe('read_empty_tuple');
+ERROR:  pgch: returned tuple is empty
+SELECT pgch_reader_probe('read_lc_key_size');
+ERROR:  pgch: unexpected LowCardinality key size 3
+SELECT pgch_reader_probe('read_lc_inner');
+ERROR:  pgch: unsupported LowCardinality inner type
+SELECT pgch_reader_probe('read_decimal_width');
+ERROR:  pgch: decimal too wide
+SELECT pgch_reader_probe('read_wide_width');
+ERROR:  pgch: integer too wide
+SELECT pgch_reader_probe('read_decimal_scale');
+ERROR:  pgch: decimal too wide
+SELECT pgch_reader_probe('read_many_points');
+ERROR:  pgch: too many points requested
+-- Keep callbacks terminal after EOF and source failure
+SELECT pgch_reader_probe('chunk_eof');
+ pgch_reader_probe 
+-------------------
+ ok
+(1 row)
+
+SELECT pgch_reader_probe('chunk_error');
+ pgch_reader_probe 
+-------------------
+ ok
+(1 row)
+
+-- Reject valid types exceeding Native writer's formatting buffer
+SELECT pgch_writer_probe('flush_long_type');
+ERROR:  pgch: block write: type name too long for inline buffer
+-- Fail each allocation in turn, recover and compare complete results
+SELECT pgch_fault_probe('append');
+ pgch_fault_probe 
+------------------
+ ok
+(1 row)
+
+SELECT pgch_fault_probe('flush');
+ pgch_fault_probe 
+------------------
+ ok
+(1 row)
+
+SELECT pgch_fault_probe('read');
+ pgch_fault_probe 
+------------------
+ ok
+(1 row)
+

@@ -278,6 +278,27 @@ make -C test install         # needs write access to the PG install
 make -C test installcheck    # needs superuser
 ```
 
+## Coverage
+
+GCC, matching `gcov`, and the regression suite report line coverage of
+`pg-clickhouse*.h`:
+
+```sh
+initdb -D /tmp/pgch -A trust          # cluster owned by the build's user
+pg_ctl -D /tmp/pgch -o '-k /tmp/pgch' start && export PGHOST=/tmp/pgch
+make -C test coverage-build           # rebuilds with --coverage at -O0
+sudo make -C test install PG_CONFIG="$(which pg_config)"
+make -C test installcheck
+make -C test installcheck REGRESS_OPTS='--no-locale --encoding=SQL_ASCII'
+make -C test installcheck REGRESS_OPTS='--no-locale --encoding=EUC_KR'
+make -C test coverage-report
+```
+
+Counters land beside `test/pgch_test.o` and sum across runs, so report after
+the last one. Backends write them as the server's user, which a packaged
+cluster leaves neither reachable nor readable. Stop test clusters before
+reporting, a killed backend loses its counters
+
 [clickhouse-c]: https://github.com/ClickHouse/clickhouse-c
 [pg_clickhouse]: https://github.com/ClickHouse/pg_clickhouse
 [chDB]: https://github.com/chdb-io/chdb

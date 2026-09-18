@@ -8,6 +8,8 @@
 #include "postgres.h"
 
 #include <ctype.h>
+#include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "access/table.h"
@@ -30,8 +32,40 @@
 #define PGCH_IMPLEMENTATION
 #include "clickhouse.h"
 
+/* Scope allocation faults to library calls, preserve PostgreSQL ERROR semantics */
+static int alloc_fail_at;
+static int alloc_seen;
+static bool alloc_failed;
+
+static void
+alloc_fault(void) {
+    if (alloc_fail_at && ++alloc_seen == alloc_fail_at) {
+        alloc_fail_at = 0;
+        alloc_failed  = true;
+        ereport(ERROR, (errcode(ERRCODE_OUT_OF_MEMORY), errmsg("injected OOM")));
+    }
+}
+
+static void*
+fault_alloc_huge(MemoryContext cxt, Size size) {
+    alloc_fault();
+    return MemoryContextAllocHuge(cxt, size);
+}
+
+static void*
+fault_realloc_huge(void* ptr, Size size) {
+    alloc_fault();
+    return repalloc_huge(ptr, size);
+}
+
+#define MemoryContextAllocHuge fault_alloc_huge
+#define repalloc_huge fault_realloc_huge
+
 #include "pg-clickhouse-decode.h"
 #include "pg-clickhouse-encode.h"
+
+#undef MemoryContextAllocHuge
+#undef repalloc_huge
 
 PG_MODULE_MAGIC;
 
@@ -398,6 +432,9 @@ decode_reader(pgch_reader* r, Oid outtype, int32 outtypmod, bool from_type) {
     if (r->error) {
         elog(ERROR, "decode: %s", r->error);
     }
+    if (pgch_reader_next(r)) {
+        elog(ERROR, "reader returned a row past the end of the stream");
+    }
     if (convstate) {
         pgch_convert_free(convstate);
     }
@@ -427,28 +464,41 @@ arg_typmod(FunctionCallInfo fcinfo, int argno) {
     return exprTypmod((Node*)list_nth(((FuncExpr*)expr)->args, argno));
 }
 
-/* Supply fixed-size chunks */
+/* Supply fixed-size chunks, failing or cancelling on a chosen chunk */
 typedef struct {
     const uint8_t* data;
     size_t len;
     size_t pos;
     size_t chunk;
+    int calls;
+    int fail_at;
+    int cancel_at;
 } chunk_feed;
 
 static bool
-feed_next_chunk(
-    void* ud,
-    const void** p,
-    size_t* n,
-    char** error pg_attribute_unused()
-) {
+feed_next_chunk(void* ud, const void** p, size_t* n, char** error) {
     chunk_feed* f = (chunk_feed*)ud;
     size_t take   = Min(f->chunk, f->len - f->pos);
 
+    f->calls++;
+    /* Negative fail_at fails without a message, which the reader stands in for */
+    if (f->fail_at && f->calls >= abs(f->fail_at)) {
+        if (f->fail_at > 0) {
+            *error = pstrdup("chunk source gave up");
+        }
+        return false;
+    }
     *p = f->data + f->pos;
     *n = take;
     f->pos += take;
     return true;
+}
+
+static bool
+feed_cancelled(void* ud) {
+    chunk_feed* f = (chunk_feed*)ud;
+
+    return f->calls >= f->cancel_at;
 }
 
 PG_FUNCTION_INFO_V1(pgch_decode_chunks);
@@ -461,14 +511,17 @@ pgch_decode_chunks(PG_FUNCTION_ARGS) {
     pgch_chunk_source src;
     pgch_reader r;
 
-    feed.data  = (const uint8_t*)VARDATA_ANY(data);
-    feed.len   = VARSIZE_ANY_EXHDR(data);
-    feed.pos   = 0;
-    feed.chunk = Max(1, PG_GETARG_INT32(1));
+    feed.data      = (const uint8_t*)VARDATA_ANY(data);
+    feed.len       = VARSIZE_ANY_EXHDR(data);
+    feed.pos       = 0;
+    feed.chunk     = Max(1, PG_GETARG_INT32(1));
+    feed.calls     = 0;
+    feed.fail_at   = PG_GETARG_INT32(2);
+    feed.cancel_at = PG_GETARG_INT32(3);
 
     src.ud         = &feed;
     src.next_chunk = feed_next_chunk;
-    src.cancelled  = NULL;
+    src.cancelled  = feed.cancel_at ? feed_cancelled : NULL;
 
     pgch_reader_init_chunks(&r, &src, NULL);
     PG_RETURN_DATUM(decode_reader(&r, InvalidOid, -1, false));
@@ -852,7 +905,9 @@ Datum
 pgch_structure(PG_FUNCTION_ARGS) {
     Relation rel        = table_open(PG_GETARG_OID(0), AccessShareLock);
     pgch_type_opts opts = type_opts(fcinfo, 1);
-    char* s             = pgch_structure_from_tupdesc(RelationGetDescr(rel), &opts);
+    /* Library reads NULL opts as every option unset */
+    bool any = opts.json_as_json || opts.low_cardinality || opts.numeric_as_string;
+    char* s  = pgch_structure_from_tupdesc(RelationGetDescr(rel), any ? &opts : NULL);
 
     table_close(rel, AccessShareLock);
     PG_RETURN_TEXT_P(cstring_to_text(s));
@@ -940,6 +995,12 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
         j++;
     }
 
+    /* Column order needs no map, which dropped attributes rule out */
+    bool dense = true;
+    for (size_t i = 0; i < ncols; i++) {
+        dense = dense && dest[i] == (int)i;
+    }
+
     if (PG_GETARG_BOOL(4)) {
         pgch_writer_set_null_array(w, PGCH_NULL_ARRAY_EMPTY);
     }
@@ -971,7 +1032,11 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
         StringInfoData row;
 
         memset(nulls, true, desc->natts * sizeof(bool));
-        pgch_reader_fill_map(&r, states, dest, values, nulls);
+        if (dense) {
+            pgch_reader_fill(&r, states, values, nulls);
+        } else {
+            pgch_reader_fill_map(&r, states, dest, values, nulls);
+        }
         initStringInfo(&row);
         for (size_t i = 0; i < ncols; i++) {
             if (i) {
@@ -991,4 +1056,518 @@ pgch_table_roundtrip(PG_FUNCTION_ARGS) {
     pgch_reader_free(&r);
 
     PG_RETURN_DATUM(makeArrayResult(rows, CurrentMemoryContext));
+}
+
+/* ---- API guards ----------------------------------------------------- */
+
+static pgch_writer*
+writer_for_decls(const char* const* decls, const char* const* names, size_t n) {
+    pgch_col* cols = palloc0(n * sizeof(pgch_col));
+
+    for (size_t i = 0; i < n; i++) {
+        cols[i].name     = names[i];
+        cols[i].name_len = strlen(names[i]);
+        cols[i].type     = parse_ch_type_cstr(decls[i], NULL);
+    }
+    return pgch_writer_new(CurrentMemoryContext, cols, n);
+}
+
+static pgch_writer*
+writer_for_decl(const char* decl, const char* name) {
+    return writer_for_decls(&decl, &name, 1);
+}
+
+static void
+append_int(pgch_writer* w, size_t col, int32 v) {
+    pgch_append_datum(w, col, Int32GetDatum(v), INT4OID, false);
+}
+
+static void
+fault_read(pgch_chunk_source* src, text* value) {
+    pgch_reader r;
+    size_t rows = 0;
+
+    pgch_reader_init_chunks(&r, src, NULL);
+    while (pgch_reader_next(&r)) {
+        if (r.nulls[0]) {
+            elog(ERROR, "fault recovery produced NULL");
+        }
+        text* got        = DatumGetTextPP(r.values[0]);
+        const char* want = rows < 8 ? "seed" : VARDATA(value);
+        size_t len       = rows < 8 ? 4 : VARSIZE(value) - VARHDRSZ;
+
+        if (VARSIZE_ANY_EXHDR(got) != len || memcmp(VARDATA_ANY(got), want, len) != 0) {
+            elog(ERROR, "fault recovery changed decoded value");
+        }
+        rows++;
+    }
+    if (r.error || rows != 9) {
+        elog(ERROR, "fault recovery changed decoded rows");
+    }
+    pgch_reader_free(&r);
+}
+
+PG_FUNCTION_INFO_V1(pgch_fault_probe);
+
+Datum
+pgch_fault_probe(PG_FUNCTION_ARGS) {
+    char* what  = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    bool append = strcmp(what, "append") == 0;
+    bool flush  = strcmp(what, "flush") == 0;
+    bool read   = strcmp(what, "read") == 0;
+    if (!append && !flush && !read) {
+        elog(ERROR, "unknown fault probe: %s", what);
+    }
+
+    MemoryContext parent = CurrentMemoryContext;
+    MemoryContext cxt =
+        AllocSetContextCreate(parent, "fault probe", ALLOCSET_DEFAULT_SIZES);
+    text* value = palloc(VARHDRSZ + 512);
+    SET_VARSIZE(value, VARHDRSZ + 512);
+    memset(VARDATA(value), 'x', 512);
+
+    pgch_writer* baseline = writer_for_decl("Nullable(String)", "c");
+    for (int i = 0; i < 8; i++) {
+        pgch_append_datum(baseline, 0, CStringGetTextDatum("seed"), TEXTOID, false);
+    }
+    pgch_append_datum(baseline, 0, PointerGetDatum(value), TEXTOID, false);
+    pgch_buf expected = {};
+    pgch_writer_flush(baseline, &expected, NULL);
+    pgch_writer_free(baseline);
+
+    for (int nth = 1; nth < 1000; nth++) {
+        MemoryContextSwitchTo(cxt);
+        pgch_writer* w        = writer_for_decl("Nullable(String)", "c");
+        pgch_buf* out         = palloc0(sizeof(*out));
+        chunk_feed* feed      = palloc0(sizeof(*feed));
+        feed->data            = expected.data;
+        feed->len             = expected.len;
+        feed->chunk           = 7;
+        pgch_chunk_source src = { .ud = feed, .next_chunk = feed_next_chunk };
+        MemoryContext rcxt =
+            AllocSetContextCreate(cxt, "fault reader", ALLOCSET_DEFAULT_SIZES);
+        for (int i = 0; i < 8; i++) {
+            pgch_append_datum(w, 0, CStringGetTextDatum("seed"), TEXTOID, false);
+        }
+        pgch_checkpoint cp = {};
+        pgch_writer_checkpoint(w, &cp);
+        size_t saved_bytes = pgch_writer_bytes(w);
+        if (!append) {
+            pgch_append_datum(w, 0, PointerGetDatum(value), TEXTOID, false);
+        }
+        alloc_seen    = 0;
+        alloc_failed  = false;
+        alloc_fail_at = nth;
+        PG_TRY();
+        {
+            if (append) {
+                pgch_append_datum(w, 0, PointerGetDatum(value), TEXTOID, false);
+            } else if (flush) {
+                pgch_writer_flush(w, out, NULL);
+            } else {
+                MemoryContextSwitchTo(rcxt);
+                fault_read(&src, value);
+            }
+        }
+        PG_CATCH();
+        {
+            alloc_fail_at = 0;
+            MemoryContextSwitchTo(cxt);
+            if (!alloc_failed || geterrcode() != ERRCODE_OUT_OF_MEMORY) {
+                PG_RE_THROW();
+            }
+            FlushErrorState();
+        }
+        PG_END_TRY();
+        alloc_fail_at = 0;
+        MemoryContextSwitchTo(cxt);
+
+        if (alloc_failed) {
+            if (append) {
+                pgch_writer_rollback(w, &cp);
+                if (pgch_writer_rows(w) != 8 || pgch_writer_bytes(w) != saved_bytes) {
+                    elog(ERROR, "allocation failure broke rollback");
+                }
+                pgch_append_datum(w, 0, PointerGetDatum(value), TEXTOID, false);
+            } else if (flush) {
+                if (pgch_writer_rows(w) != 9) {
+                    elog(ERROR, "failed flush reset writer");
+                }
+                pgch_buf_reset(out);
+            } else {
+                MemoryContextReset(rcxt);
+                feed->pos   = 0;
+                feed->calls = 0;
+                MemoryContextSwitchTo(rcxt);
+                fault_read(&src, value);
+                MemoryContextSwitchTo(cxt);
+            }
+        }
+        if (append || (flush && alloc_failed)) {
+            pgch_writer_flush(w, out, NULL);
+        }
+        if (!read && (pgch_writer_rows(w) != 0 || out->len != expected.len ||
+                      memcmp(out->data, expected.data, expected.len) != 0)) {
+            elog(ERROR, "allocation failure changed serialized rows");
+        }
+        MemoryContextSwitchTo(parent);
+        MemoryContextReset(cxt);
+        if (!alloc_failed) {
+            if (nth == 1) {
+                elog(ERROR, "fault probe reached no allocations");
+            }
+            MemoryContextDelete(cxt);
+            PG_RETURN_TEXT_P(cstring_to_text("ok"));
+        }
+    }
+    elog(ERROR, "fault probe never completed");
+}
+
+PG_FUNCTION_INFO_V1(pgch_writer_probe);
+
+/* Drive writer guards against calls no correct caller makes */
+Datum
+pgch_writer_probe(PG_FUNCTION_ARGS) {
+    char* what         = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    pgch_checkpoint cp = {};
+    pgch_writer* w;
+
+    if (strcmp(what, "column_range") == 0) {
+        w = writer_for_decl("Int32", "c");
+        PG_RETURN_TEXT_P(cstring_to_text(psprintf(
+            "kind %d scale %u",
+            (int)pgch_column_kind(w, 9),
+            pgch_column_datetime64_scale(w, 9)
+        )));
+    }
+    if (strcmp(what, "array_scale") == 0) {
+        w = writer_for_decl("Array(Nullable(DateTime64(3)))", "c");
+        PG_RETURN_TEXT_P(
+            cstring_to_text(psprintf("scale %u", pgch_column_datetime64_scale(w, 0)))
+        );
+    }
+    if (strcmp(what, "close_idle") == 0) {
+        w = writer_for_decl("Int32", "c");
+        pgch_array_end(w);
+        pgch_tuple_end(w);
+        PG_RETURN_TEXT_P(cstring_to_text(psprintf("nest %d", pgch_nest_active(w))));
+    }
+    if (strcmp(what, "array_range") == 0) {
+        w = writer_for_decl("Array(Int32)", "c");
+        pgch_array_begin(w, 9);
+    } else if (strcmp(what, "nesting") == 0) {
+        w = writer_for_decl("Array(Int32)", "c");
+        pgch_array_begin(w, 0);
+        pgch_tuple_end(w);
+    } else if (strcmp(what, "append_range") == 0) {
+        w = writer_for_decl("Int32", "c");
+        append_int(w, 9, 1);
+    } else if (strcmp(what, "unnamed") == 0) {
+        w = writer_for_decl("Int32", "");
+        pgch_append_datum(w, 0, (Datum)0, INT4OID, true);
+    } else if (strcmp(what, "tuple_null") == 0) {
+        w = writer_for_decl("Tuple(Int32, String)", "c");
+        /* Tuple fields arrive as an array, which the library never passes as NULL */
+        pgch_append_datum(w, 0, (Datum)0, ANYARRAYOID, true);
+    } else if (strcmp(what, "checkpoint_nested") == 0) {
+        w = writer_for_decl("Array(Int32)", "c");
+        pgch_array_begin(w, 0);
+        pgch_writer_checkpoint(w, &cp);
+    } else if (strcmp(what, "checkpoint_stale") == 0) {
+        w = writer_for_decl("Int32", "c");
+        pgch_writer_checkpoint(w, &cp);
+        pgch_writer_rollback(writer_for_decl("Int32", "c"), &cp);
+    } else if (strcmp(what, "checkpoint_grow") == 0) {
+        static const char* const decls[] = { "Int32",
+                                             "Tuple(Int32, String)",
+                                             "Array(Nullable(Int32))" };
+        static const char* const names[] = { "a", "b", "d" };
+
+        /* Wider writer wants more entries, so saved storage grows */
+        pgch_writer_checkpoint(writer_for_decl("Int32", "c"), &cp);
+        w = writer_for_decls(decls, names, lengthof(decls));
+        pgch_writer_checkpoint(w, &cp);
+        PG_RETURN_TEXT_P(cstring_to_text(psprintf("entries %zu", cp.nentries)));
+    } else if (strcmp(what, "rollback_built") == 0) {
+        w = writer_for_decl("Int32", "c");
+        append_int(w, 0, 1);
+        pgch_writer_checkpoint(w, &cp);
+        append_int(w, 0, 2);
+        /* Block context outlives the build, rollback drops it */
+        pgch_writer_build(w);
+        pgch_writer_rollback(w, &cp);
+        PG_RETURN_TEXT_P(cstring_to_text(psprintf("rows %zu", pgch_writer_rows(w))));
+    } else if (strcmp(what, "rebuild") == 0) {
+        w = writer_for_decl("Int32", "c");
+        append_int(w, 0, 1);
+        pgch_writer_build(w);
+        pgch_writer_build(w);
+        PG_RETURN_TEXT_P(cstring_to_text(psprintf("rows %zu", pgch_writer_rows(w))));
+    } else if (strcmp(what, "bytes") == 0) {
+        static const char* const decls[] = { "Int32",
+                                             "String",
+                                             "Nullable(Int32)",
+                                             "Array(Int32)",
+                                             "Tuple(Int32, String)",
+                                             "LowCardinality(String)" };
+        static const char* const names[] = { "f", "s", "n", "a", "t", "l" };
+
+        w = writer_for_decls(decls, names, lengthof(decls));
+        append_int(w, 0, 1);
+        pgch_append_datum(w, 1, CStringGetTextDatum("s"), TEXTOID, false);
+        pgch_append_datum(w, 2, (Datum)0, INT4OID, true);
+        pgch_append_datum(
+            w, 3, PointerGetDatum(construct_empty_array(INT4OID)), INT4ARRAYOID, false
+        );
+        pgch_tuple_begin(w, 4);
+        append_int(w, 4, 2);
+        pgch_append_datum(w, 4, CStringGetTextDatum("t"), TEXTOID, false);
+        pgch_tuple_end(w);
+        pgch_append_datum(w, 5, CStringGetTextDatum("l"), TEXTOID, false);
+        PG_RETURN_TEXT_P(cstring_to_text(psprintf("bytes %zu", pgch_writer_bytes(w))));
+    } else if (strcmp(what, "flush_long_type") == 0) {
+        char label[301];
+        pgch_buf out = {};
+
+        memset(label, 'x', sizeof(label) - 1);
+        label[sizeof(label) - 1] = '\0';
+        w = writer_for_decl(psprintf("Enum8('%s'=1)", label), "c");
+        pgch_writer_flush(w, &out, NULL);
+    } else if (strcmp(what, "interval_unit") == 0) {
+        chc_type* t  = parse_ch_type_cstr("IntervalDay", NULL);
+        pgch_col col = { .name = "c", .name_len = 1, .type = t };
+        Interval* iv = (Interval*)palloc0(sizeof(Interval));
+
+        /* Every Interval the parser spells carries a unit */
+        t->interval = CHC_INTERVAL_NONE;
+        w           = pgch_writer_new(CurrentMemoryContext, &col, 1);
+        pgch_append_datum(w, 0, IntervalPGetDatum(iv), INTERVALOID, false);
+    } else if (strcmp(what, "datetime64_scale") == 0) {
+        chc_type* t  = parse_ch_type_cstr("DateTime64(3)", NULL);
+        pgch_col col = { .name = "c", .name_len = 1, .type = t };
+
+        /* Parser caps precision at 9, one past the scaling table */
+        t->temporal.scale = 10;
+        pgch_writer_new(CurrentMemoryContext, &col, 1);
+    } else {
+        elog(ERROR, "unknown writer probe: %s", what);
+    }
+    elog(ERROR, "writer probe %s raised nothing", what);
+}
+
+PG_FUNCTION_INFO_V1(pgch_reader_probe);
+
+/* Drive reader and value guards the block reader keeps out of reach */
+Datum
+pgch_reader_probe(PG_FUNCTION_ARGS) {
+    char* what     = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    uint8_t raw[8] = {};
+    Oid valtype;
+    bool isnull;
+
+    if (strcmp(what, "chunk_eof") == 0 || strcmp(what, "chunk_error") == 0) {
+        bool fail           = strcmp(what, "chunk_error") == 0;
+        chunk_feed feed     = { .data = raw, .chunk = 1, .fail_at = fail ? 1 : 0 };
+        pgch__chunks chunks = {
+            .src = { .ud = &feed, .next_chunk = feed_next_chunk },
+            .cxt = CurrentMemoryContext,
+        };
+        chc_err err = {};
+        size_t n    = 1;
+        int rc      = pgch__chunk_read(&chunks, raw, sizeof(raw), &n, &err);
+
+        if (rc != (fail ? CHC_ERR_IO : CHC_OK) || !chunks.eos ||
+            (fail ? chunks.error == NULL : n != 0)) {
+            elog(ERROR, "unexpected chunk termination");
+        }
+        if (fail && pgch__chunk_next_block(&chunks) != NULL) {
+            elog(ERROR, "chunk callback resumed after error");
+        }
+        n = 1;
+        if (pgch__chunk_read(&chunks, raw, sizeof(raw), &n, &err) != CHC_OK || n != 0 ||
+            feed.calls != 1) {
+            elog(ERROR, "chunk callback resumed source after termination");
+        }
+        PG_RETURN_TEXT_P(cstring_to_text("ok"));
+    }
+    if (strcmp(what, "read_datetime64_scale") == 0 ||
+        strcmp(what, "read_time64_scale") == 0) {
+        bool time64    = strcmp(what, "read_time64_scale") == 0;
+        chc_column col = chc_build_fixed(raw, sizeof raw, 1);
+        chc_type* t = parse_ch_type_cstr(time64 ? "Time64(3)" : "DateTime64(3)", NULL);
+
+        /* Parser caps precision at 9, one past the scaling table */
+        t->temporal.scale = 10;
+        pgch_read_value(&col, t, 0, &valtype, &isnull);
+    } else if (strcmp(what, "read_unsupported") == 0) {
+        chc_column col = chc_build_fixed(raw, sizeof raw, 1);
+
+        /* Reader rejects the column before reading rows, callers may not */
+        pgch_read_value(
+            &col, parse_ch_type_cstr("Dynamic", NULL), 0, &valtype, &isnull
+        );
+    } else if (strcmp(what, "read_empty_tuple") == 0) {
+        chc_column col = chc_build_fixed(raw, sizeof raw, 1);
+
+        pgch_read_value(
+            &col, parse_ch_type_cstr("Tuple()", NULL), 0, &valtype, &isnull
+        );
+    } else if (strcmp(what, "read_lc_key_size") == 0) {
+        uint64_t offs[1] = { 1 };
+        chc_column dict  = chc_build_string(offs, (const uint8_t*)"a", 1);
+        /* Wire spells four key widths, the builder takes any */
+        chc_column col = chc_build_lc(3, raw, 1, &dict);
+
+        pgch_read_value(
+            &col,
+            parse_ch_type_cstr("LowCardinality(String)", NULL),
+            0,
+            &valtype,
+            &isnull
+        );
+    } else if (strcmp(what, "read_lc_inner") == 0) {
+        chc_column dict = chc_build_fixed(raw, 2, 1);
+        chc_column col  = chc_build_lc(4, raw, 1, &dict);
+
+        pgch_read_value(
+            &col,
+            parse_ch_type_cstr("LowCardinality(FixedString(2))", NULL),
+            0,
+            &valtype,
+            &isnull
+        );
+    } else if (strcmp(what, "read_decimal_width") == 0) {
+        /* Columns off the wire carry a width the digit formatter can take */
+        chc_column col = chc_build_fixed(raw, 5, 1);
+
+        pgch_read_value(
+            &col, parse_ch_type_cstr("Decimal128(2)", NULL), 0, &valtype, &isnull
+        );
+    } else if (strcmp(what, "read_wide_width") == 0) {
+        chc_column col = chc_build_fixed(raw, 5, 1);
+
+        pgch_read_value(&col, parse_ch_type_cstr("Int128", NULL), 0, &valtype, &isnull);
+    } else if (strcmp(what, "read_decimal_scale") == 0) {
+        uint8_t wide[32] = {};
+        chc_column col   = chc_build_fixed(wide, sizeof wide, 1);
+        chc_type* t      = parse_ch_type_cstr("Decimal256(76)", NULL);
+
+        /* Parser caps scale at the declared precision, 76 digits */
+        t->decimal.scale = 79;
+        pgch_read_value(&col, t, 0, &valtype, &isnull);
+    } else if (strcmp(what, "read_many_points") == 0) {
+        uint64_t offs[1]   = { (uint64_t)INT_MAX };
+        chc_column axes[2] = { chc_build_fixed(raw, 8, 1), chc_build_fixed(raw, 8, 1) };
+        chc_column* pair[2] = { &axes[0], &axes[1] };
+        chc_column point    = chc_build_tuple(pair, 2);
+        chc_column col      = chc_build_array(offs, 1, &point);
+
+        pgch_read_value(&col, parse_ch_type_cstr("Ring", NULL), 0, &valtype, &isnull);
+    } else if (strcmp(what, "read_array_item") == 0) {
+        uint64_t offs[1] = { 1 };
+        chc_column inner = chc_build_fixed(raw, 1, 1);
+        chc_column col   = chc_build_array(offs, 1, &inner);
+
+        pgch_read_value(
+            &col, parse_ch_type_cstr("Array(Nothing)", NULL), 0, &valtype, &isnull
+        );
+    } else {
+        elog(ERROR, "unknown reader probe: %s", what);
+    }
+    elog(ERROR, "reader probe %s raised nothing", what);
+}
+
+PG_FUNCTION_INFO_V1(pgch_decode_first);
+
+/* Decode the first row, then release the reader while its block still holds rows */
+Datum
+pgch_decode_first(PG_FUNCTION_ARGS) {
+    bytes_source src;
+    pgch_reader r;
+    char* out = NULL;
+
+    reader_from_bytea(&r, &src, PG_GETARG_BYTEA_PP(0));
+    if (pgch_reader_convert_init(&r, pgch_reader_columns(&r), INT4OID, -1)) {
+        elog(ERROR, "prepared conversion for a column past the block");
+    }
+    if (pgch_reader_next(&r)) {
+        out = pgch_value_to_cstring(r.coltypes[0], r.values[0], r.encoding_check);
+    }
+    pgch_reader_free(&r);
+
+    if (!out) {
+        PG_RETURN_NULL();
+    }
+    PG_RETURN_TEXT_P(cstring_to_text(out));
+}
+
+static const chc_block*
+failed_next_block(void* ud pg_attribute_unused()) {
+    return NULL;
+}
+
+static const char*
+failed_source_error(void* ud pg_attribute_unused()) {
+    return "source failed before first block";
+}
+
+PG_FUNCTION_INFO_V1(pgch_decode_failed_source);
+
+/* Report a source that fails before the reader asks for a block */
+Datum
+pgch_decode_failed_source(PG_FUNCTION_ARGS pg_attribute_unused()) {
+    pgch_block_source bsrc = { .ud         = NULL,
+                               .next_block = failed_next_block,
+                               .error      = failed_source_error };
+    pgch_reader r;
+
+    pgch_reader_init(&r, &bsrc);
+    if (!r.error) {
+        elog(ERROR, "reader missed the source error");
+    }
+    PG_RETURN_TEXT_P(cstring_to_text(r.error));
+}
+
+PG_FUNCTION_INFO_V1(pgch_decode_typed_decl);
+
+/* Decode rows with conversion prepared from a ClickHouse declaration */
+Datum
+pgch_decode_typed_decl(PG_FUNCTION_ARGS) {
+    Oid outtype     = get_fn_expr_argtype(fcinfo->flinfo, 2);
+    int32 outtypmod = arg_typmod(fcinfo, 2);
+    chc_type* t     = parse_ch_type(PG_GETARG_TEXT_PP(1), "column c");
+    ArrayBuildState* out;
+    FmgrInfo outfn = {};
+    Oid outfuncid;
+    bool typisvarlena;
+    bytes_source src;
+    pgch_reader r;
+    void* state;
+
+    if (!OidIsValid(outtype)) {
+        elog(ERROR, "could not determine target type");
+    }
+    getTypeOutputInfo(outtype, &outfuncid, &typisvarlena);
+    fmgr_info(outfuncid, &outfn);
+    out = initArrayResult(TEXTOID, CurrentMemoryContext, false);
+
+    reader_from_bytea(&r, &src, PG_GETARG_BYTEA_PP(0));
+    state = pgch_convert_init_type(t, outtype, outtypmod, r.encoding_check);
+    while (pgch_reader_next(&r)) {
+        Datum val = (Datum)0;
+
+        if (!r.nulls[0]) {
+            val = CStringGetTextDatum(
+                OutputFunctionCall(&outfn, pgch_convert(state, r.values[0]))
+            );
+        }
+        accumArrayResult(out, val, r.nulls[0], TEXTOID, CurrentMemoryContext);
+    }
+    if (r.error) {
+        elog(ERROR, "decode: %s", r.error);
+    }
+    pgch_convert_free(state);
+    pgch_reader_free(&r);
+
+    PG_RETURN_DATUM(makeArrayResult(out, CurrentMemoryContext));
 }

@@ -192,3 +192,7 @@ SELECT pgch_roundtrip('BFloat16', 'NaN'::float4) AS bfloat_keeps_nan;
 
 -- Return required Native query settings
 SELECT pgch_native_settings();
+
+-- Quote column names ClickHouse cannot take bare, escaping quote and backslash
+CREATE TABLE oddnames ("a1" int, "a b" int, "q""x" int, "back\slash" int);
+SELECT pgch_structure('oddnames');

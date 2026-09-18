@@ -815,33 +815,6 @@ pgch__read_array(
     return PointerGetDatum(slot);
 }
 
-/* Geo types carry no children, so a level's element kind follows from the kind */
-static chc_kind
-pgch__geo_child(chc_kind kind) {
-    switch (kind) {
-    case CHC_MULTI_POLYGON:
-        return CHC_POLYGON;
-    case CHC_POLYGON:
-        return CHC_RING;
-    case CHC_MULTI_LINE_STRING:
-        return CHC_LINE_STRING;
-    case CHC_RING:
-    case CHC_LINE_STRING:
-        return CHC_POINT;
-    default:
-        pg_unreachable();
-    }
-}
-
-static Datum
-pgch__read_geo(
-    const chc_column* col,
-    chc_kind kind,
-    uint64_t row,
-    Oid* valtype,
-    bool* is_null
-);
-
 /* PostgreSQL has no multi-geometry types, so their members become array items */
 static Datum
 pgch__read_geo_array(
@@ -855,7 +828,6 @@ pgch__read_geo_array(
     uint64_t start          = row == 0 ? 0 : offs[row - 1];
     uint64_t len            = offs[row] - start;
     const chc_column* inner = chc_column_array_values(col);
-    chc_kind child          = pgch__geo_child(kind);
     pgch_array* slot        = (pgch_array*)palloc(sizeof(pgch_array));
 
     slot->len  = len;
@@ -866,41 +838,21 @@ pgch__read_geo_array(
     slot->datums     = len ? (Datum*)palloc0(sizeof(Datum) * len) : NULL;
     slot->nulls      = len ? (bool*)palloc0(sizeof(bool) * len) : NULL;
 
+    /* Geo types carry no children, so a level's element kind follows from the kind */
     for (uint64_t i = 0; i < len; i++) {
-        Oid scratch = slot->item_type;
+        Oid scratch  = slot->item_type;
+        bool* isnull = &slot->nulls[i];
 
         slot->datums[i] =
-            pgch__read_geo(inner, child, start + i, &scratch, &slot->nulls[i]);
+            kind == CHC_MULTI_POLYGON
+                ? pgch__read_geo_array(inner, CHC_POLYGON, start + i, &scratch, isnull)
+            : kind == CHC_POLYGON ? pgch__read_polygon(inner, start + i, isnull)
+                                  : pgch__read_path(inner, start + i, isnull);
     }
 
     *valtype = ANYARRAYOID;
     *is_null = false;
     return PointerGetDatum(slot);
-}
-
-static Datum
-pgch__read_geo(
-    const chc_column* col,
-    chc_kind kind,
-    uint64_t row,
-    Oid* valtype,
-    bool* is_null
-) {
-    *valtype = pgch_kind_oids[kind];
-    switch (kind) {
-    case CHC_POINT:
-        return pgch__read_point(col, row);
-    case CHC_RING:
-        return pgch__read_polygon(col, row, is_null);
-    case CHC_LINE_STRING:
-        return pgch__read_path(col, row, is_null);
-    case CHC_POLYGON:
-    case CHC_MULTI_POLYGON:
-    case CHC_MULTI_LINE_STRING:
-        return pgch__read_geo_array(col, kind, row, valtype, is_null);
-    default:
-        pg_unreachable();
-    }
 }
 
 static Datum
@@ -1159,12 +1111,15 @@ pgch_read_value(
     case CHC_UUID:
         return pgch__read_uuid(col, row);
     case CHC_POINT:
+        return pgch__read_point(col, row);
     case CHC_RING:
+        return pgch__read_polygon(col, row, is_null);
     case CHC_LINE_STRING:
+        return pgch__read_path(col, row, is_null);
     case CHC_POLYGON:
     case CHC_MULTI_POLYGON:
     case CHC_MULTI_LINE_STRING:
-        return pgch__read_geo(col, kind, row, valtype, is_null);
+        return pgch__read_geo_array(col, kind, row, valtype, is_null);
     case CHC_IPV4:
         return pgch__read_ipv4(col, row);
     case CHC_IPV6:
@@ -1504,8 +1459,7 @@ pgch_reader_init_chunks(
     const chc_block_opts* opts
 ) {
     pgch__chunks* c = palloc0(sizeof(*c));
-    pgch_block_source bsrc;
-    chc_err err = {};
+    chc_err err     = {};
 
     c->src  = *src;
     c->opts = opts ? *opts : pgch_block_opts_local;
@@ -1514,13 +1468,14 @@ pgch_reader_init_chunks(
                         .read         = pgch__chunk_read,
                         .check_cancel = src->cancelled ? pgch__chunk_cancel : NULL };
     c->in   = pgch_in_alloc();
-    if (chc_in_init(c->in, &c->io, &pgch_alloc, 0, &err) != CHC_OK) {
-        pgch_raise(&err, ERRCODE_FDW_ERROR, "reader init: ", NULL);
-    }
+    /* PostgreSQL allocation failures raise ERROR instead of returning NULL */
+    int rc = chc_in_init(c->in, &c->io, &pgch_alloc, 0, &err);
+    Assert(rc == CHC_OK);
+    (void)rc;
 
-    bsrc.ud         = c;
-    bsrc.next_block = pgch__chunk_next_block;
-    bsrc.error      = pgch__chunk_error;
+    pgch_block_source bsrc = { .ud         = c,
+                               .next_block = pgch__chunk_next_block,
+                               .error      = pgch__chunk_error };
     pgch_reader_init(r, &bsrc);
 }
 
@@ -2315,31 +2270,24 @@ pgch__convert_init(
         if (outtype == TEXTOID) {
             fmgr_info(F_RECORD_OUT, &state->flinfo);
         } else if (outtype != RECORDOID) {
-            TypeCacheEntry* typentry = lookup_type_cache(
-                outtype, TYPECACHE_TUPDESC | TYPECACHE_DOMAIN_BASE_INFO
-            );
-            TupleDesc tupdesc;
+            TypeCacheEntry* typentry = lookup_type_cache(outtype, TYPECACHE_TUPDESC);
 
-            if (typentry->typtype == TYPTYPE_DOMAIN) {
-                tupdesc = lookup_rowtype_tupdesc_noerror(
-                    typentry->domainBaseType, typentry->domainBaseTypmod, false
+            /* Function entry splits domains off, recursing with the base type */
+            Assert(typentry->typtype != TYPTYPE_DOMAIN);
+            if (typentry->tupDesc == NULL) {
+                const char* tname = ct ? chc_type_name(ct, NULL) : slot->ch_type_name;
+
+                pgch_errorf(
+                    ERRCODE_WRONG_OBJECT_TYPE,
+                    "cannot return %s as %s",
+                    tname ? tname : "?",
+                    format_type_be(outtype)
                 );
-            } else {
-                if (typentry->tupDesc == NULL) {
-                    const char* tname =
-                        ct ? chc_type_name(ct, NULL) : slot->ch_type_name;
-
-                    pgch_errorf(
-                        ERRCODE_WRONG_OBJECT_TYPE,
-                        "cannot return %s as %s",
-                        tname ? tname : "?",
-                        format_type_be(outtype)
-                    );
-                }
-
-                tupdesc = typentry->tupDesc;
-                PinTupleDesc(tupdesc);
             }
+
+            TupleDesc tupdesc = typentry->tupDesc;
+
+            PinTupleDesc(tupdesc);
             state->outdesc = CreateTupleDescCopy(tupdesc);
             ReleaseTupleDesc(tupdesc);
         }
@@ -2452,9 +2400,6 @@ pgch__convert_init(
                 return state;
             }
             case COERCION_PATH_RELABELTYPE:
-                if (state->func == NULL) {
-                    goto no_conversion;
-                }
                 break;
             default:
             no_cast:
@@ -2468,7 +2413,6 @@ pgch__convert_init(
             pgch__init_typmod_coerce(state);
         }
     } else if (!state->func) {
-    no_conversion:
         /* Matching types may still need lower precision */
         if (!pgch__init_typmod_coerce(state)) {
             pfree(state);
