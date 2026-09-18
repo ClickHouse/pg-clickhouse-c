@@ -246,3 +246,81 @@ SELECT decode_status(f, 'text') AS text, decode_status(f, 'bytea') AS bytea
 (1 row)
 
 DROP FUNCTION decode_status;
+-- Reject values with no cast to the column's PostgreSQL type
+SELECT pgch_roundtrip('IPv4', 1::numeric);
+ERROR:  pgch: cannot encode numeric into ClickHouse IPv4 (column "c")
+SELECT pgch_roundtrip('Int32', '2020-01-02'::date);
+ERROR:  pgch: cannot encode date into ClickHouse Int32 (column "c")
+SELECT pgch_roundtrip('Int32', '01:02:03'::time);
+ERROR:  pgch: cannot encode time without time zone into ClickHouse Int32 (column "c")
+SELECT pgch_roundtrip('Int32', '2020-01-02 03:04:05+00'::timestamptz);
+ERROR:  pgch: cannot encode timestamp with time zone into ClickHouse Int32 (column "c")
+SELECT pgch_roundtrip('Int32', ARRAY[1]::int4[]);
+ERROR:  pgch: cannot encode integer[] into ClickHouse Int32 (column "c")
+SELECT pgch_roundtrip('Int32', '11111111-2222-3333-4444-555555555555'::uuid);
+ERROR:  pgch: cannot encode uuid into ClickHouse Int32 (column "c")
+-- PostgreSQL 14 catalogs an unimplemented path -> point cast
+SELECT pgch_roundtrip('Int32', '((0,0),(1,1))'::path);
+ERROR:  pgch: cannot encode path into ClickHouse Int32 (column "c")
+SELECT pgch_roundtrip('Point', '{1,2,3}'::line);
+ERROR:  pgch: cannot encode line into ClickHouse Point (column "c")
+-- Reject timestamps outside the scaled DateTime64 range
+SELECT pgch_roundtrip('DateTime64(9)', '9999-01-01'::timestamptz);
+ERROR:  pgch: timestamp out of range for DateTime64(9)
+-- Reject LowCardinality dictionaries that hold anything but String
+SELECT pgch_decode(pgch_block('LowCardinality(FixedString(2))', 0, ''::bytea));
+ERROR:  decode: unsupported LowCardinality inner type (column "c")
+-- Reject targets with no conversion from the column type
+SELECT pgch_decode_as(pgch_encode('Int32', 1::int4), NULL::point);
+ERROR:  pgch: could not cast value from integer to point
+-- Reject Tuple columns without fields
+SELECT pgch_encode('Tuple()', ARRAY[]::text[]);
+ERROR:  pgch: Tuple column has no fields
+SELECT pgch_decode(pgch_block('Array(Tuple())', 0, ''::bytea));
+ERROR:  decode: returned tuple is empty (column "c")
+-- Reject blocks carrying no columns
+SELECT pgch_decode('\x0000'::bytea);
+ERROR:  expected 1 column, got 0
+-- Reject nested arrays where the column takes one dimension
+SELECT pgch_encode('Array(Int32)', ARRAY[[1, 2]]::int4[]);
+ERROR:  pgch: cannot encode anyarray into ClickHouse Array(Int32) (column "c")
+SELECT pgch_encode('Array(Tuple(Int32))', ARRAY[[NULL]]::int4[]);
+ERROR:  pgch: cannot append NULL to NOT NULL Array(Tuple(Int32)) column "c"
+-- Reject coordinates into a Tuple that holds anything but Float64
+SELECT pgch_encode('Tuple(Int32, Int32)', '((0,0),(1,1))'::box);
+ERROR:  pgch: coordinates into column "c"
+-- Reject Tuples the target's coordinates cannot take
+SELECT pgch_decode_as(pgch_block('Tuple(Nullable(Float64), Float64, Float64)', 1,
+                                 '\x01'::bytea || '\x0000000000000000'::bytea ||
+                                 '\x000000000000f03f'::bytea ||
+                                 '\x0000000000000040'::bytea), NULL::line);
+ERROR:  pgch: cannot return Tuple(Nullable(Float64), Float64, Float64) as line
+SELECT pgch_decode_as(pgch_block('Tuple(Float64, Float64, Float64, Float64, Float64)',
+                                 1, ('\x' || repeat('00', 40))::bytea), NULL::line);
+ERROR:  pgch: cannot return Tuple(Float64, Float64, Float64, Float64, Float64) as line
+SELECT pgch_decode_as(pgch_block('Tuple(String, Float64, Float64)', 1,
+                                 '\x0161'::bytea ||
+                                 '\x0000000000000000'::bytea ||
+                                 '\x0000000000000000'::bytea), NULL::line);
+ERROR:  pgch: cannot return Tuple(String, Float64, Float64) as line
+-- Reject arrays nested deeper than PostgreSQL allows
+SELECT pgch_decode_as(
+    pgch_block('Array(Array(Array(Array(Array(Array(Array(Int32)))))))', 1,
+               ('\x' || repeat('0100000000000000', 7))::bytea ||
+               '\x2a000000'::bytea), NULL::int4[]);
+ERROR:  pgch: nested array depth 7 exceeds maximum 6
+-- Reject blocks whose column count changes mid-stream
+SELECT pgch_decode(pgch_encode_rows('Int32', ARRAY[1]::int4[]) ||
+                   '\x0201'::bytea ||
+                   '\x01' || convert_to('c', 'UTF8') ||
+                   '\x05' || convert_to('Int32', 'UTF8') || '\x01000000'::bytea ||
+                   '\x01' || convert_to('d', 'UTF8') ||
+                   '\x05' || convert_to('Int32', 'UTF8') || '\x02000000'::bytea);
+ERROR:  decode: block column count changed from 1 to 2
+-- Reject point pairs the target's coordinate count cannot take
+SELECT pgch_decode_as(pgch_encode('Tuple(Point, Point)', ARRAY['(0,0)', '(1,1)']::point[]),
+                      NULL::line);
+ERROR:  pgch: cannot return Tuple(Point, Point) as line
+-- Reject coordinates the Tuple has too few fields to hold
+SELECT pgch_encode('Tuple(Float64, Float64)', '((0,0),(1,1))'::box);
+ERROR:  pgch: coordinates into column "c"

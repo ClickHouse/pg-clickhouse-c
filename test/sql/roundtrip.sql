@@ -429,3 +429,139 @@ SELECT pgch_roundtrip('SimpleAggregateFunction(sum, Int64)', 7::bigint) AS sum,
                            ARRAY[1, NULL]::int4[]) AS nullable,
        pgch_roundtrip('SimpleAggregateFunction(groupArrayArray, Array(Int32))',
                       ARRAY[1, 2]::int4[]) AS group_array;
+
+-- Convert values whose PostgreSQL type the column kind does not take directly
+SELECT pgch_roundtrip('Int32', true) AS bool,
+       pgch_roundtrip('Int32', 1.5::float4) AS float4,
+       pgch_roundtrip('Int32', 2.5::float8) AS float8,
+       pgch_roundtrip('String', 1.5::numeric) AS numeric;
+
+-- Read timestamp without time zone through the session timezone
+SELECT pgch_roundtrip('DateTime', '2020-01-02 03:04:05'::timestamp) AS datetime,
+       pgch_roundtrip('DateTime64(3)', '2020-01-02 03:04:05.5'::timestamp) AS scaled,
+       pgch_roundtrip('DateTime64(3)',
+                      '1900-01-01 00:00:00.5'::timestamptz) AS before_epoch;
+
+-- Take the midpoint of a two-point list as a Point
+SELECT pgch_roundtrip('Point', '[(0,0),(1,1)]'::lseg) AS lseg,
+       pgch_roundtrip('Point', '((0,0),(1,1))'::box) AS box;
+
+-- Nothing and Void carry one byte per row, every value NULL
+SELECT pgch_decode(pgch_block('Nothing', 1, '\x00'::bytea)) AS nothing,
+       pgch_decode(pgch_block('Void', 1, '\x00'::bytea)) AS void;
+
+-- Compressed values arrive as a copy the encoder frees after writing
+CREATE TABLE toasted (t text, j json);
+INSERT INTO toasted VALUES (repeat('a', 4000), ('"' || repeat('b', 4000) || '"')::json);
+SELECT length((pgch_decode(pgch_encode('String', t)))[1]) AS text,
+       length((pgch_decode(pgch_encode('String', j)))[1]) AS json FROM toasted;
+
+-- Nest multi-geometries a level deeper inside an array
+SELECT pgch_roundtrip_as('Array(MultiLineString)',
+                         ARRAY[ARRAY['[(0,0),(1,1)]']]::path[]) AS lines,
+       pgch_roundtrip_as('Array(MultiPolygon)',
+                         ARRAY[ARRAY[ARRAY['((0,0),(1,1),(2,0))']]]::polygon[]) AS polys;
+
+-- Bound every ring point when the target is a box, take two points as an lseg
+SELECT pgch_decode_as(pgch_encode('Ring', '((2,2),(0,0),(1,3))'::polygon),
+                      NULL::box) AS bbox,
+       pgch_decode_as(pgch_encode('Ring', '((2,2),(0,0))'::polygon),
+                      NULL::lseg) AS lseg;
+
+-- Convert UInt8 into boolean, Nothing into any target
+SELECT pgch_decode_as(pgch_encode('UInt8', 1::int2), NULL::bool) AS bool,
+       pgch_decode_as(pgch_block('Nothing', 1, '\x00'::bytea), NULL::int4) AS nothing;
+
+-- Take String into a target carrying no type modifier
+SELECT pgch_decode_as(pgch_encode('String', 'x'::text), NULL::varchar) AS varchar;
+
+-- Read an empty array row
+SELECT pgch_decode_as(pgch_encode('Array(Int32)', ARRAY[]::int4[]),
+                      NULL::int4[]) AS empty;
+
+-- Read an enum value the dictionary does not hold
+SELECT pgch_decode(pgch_block('Enum8(''a'' = 1)', 1, '\x02'::bytea)) AS unknown;
+
+-- Keep rows written before a failing value, whatever the column layout
+SELECT pgch_decode(pgch_encode_valid_rows('String',
+                                          ARRAY['a', NULL, 'b']::text[])) AS string,
+       pgch_decode(pgch_encode_valid_rows('LowCardinality(String)',
+                                          ARRAY['a', NULL]::text[])) AS low_cardinality,
+       pgch_decode(pgch_encode_valid_rows('Map(String, Int64)',
+                                          ARRAY['a']::text[])) AS map;
+
+-- Write NULL into Nullable JSON, whose value ClickHouse validates regardless
+SELECT pgch_roundtrip('Nullable(JSON)', NULL::jsonb) AS null_json;
+
+-- Read LowCardinality keys of every width ClickHouse writes
+SELECT pgch_decode(pgch_block('LowCardinality(String)', 1,
+                              '\x0100000000000000'::bytea ||
+                              '\x0006000000000000'::bytea ||
+                              '\x0100000000000000'::bytea || '\x0161'::bytea ||
+                              '\x0100000000000000'::bytea || '\x00'::bytea)) AS key1,
+       pgch_decode(pgch_block('LowCardinality(String)', 1,
+                              '\x0100000000000000'::bytea ||
+                              '\x0106000000000000'::bytea ||
+                              '\x0100000000000000'::bytea || '\x0161'::bytea ||
+                              '\x0100000000000000'::bytea || '\x0000'::bytea)) AS key2,
+       pgch_decode(pgch_block('LowCardinality(String)', 1,
+                              '\x0100000000000000'::bytea ||
+                              '\x0306000000000000'::bytea ||
+                              '\x0100000000000000'::bytea || '\x0161'::bytea ||
+                              '\x0100000000000000'::bytea ||
+                              '\x0000000000000000'::bytea)) AS key8;
+
+-- Write NULL into every nullable column layout
+SELECT pgch_roundtrip('Nullable(IPv6)', NULL::inet) AS ipv6,
+       pgch_roundtrip('Nullable(FixedString(4))', NULL::text) AS fixed_string,
+       pgch_roundtrip('Nullable(Enum8(''a'' = 1))', NULL::text) AS enum,
+       pgch_roundtrip('Nullable(Array(Int32))', NULL::int4[]) AS array;
+
+-- Relabel a binary-coercible target, take Nothing into any target
+SELECT pgch_decode_typed(pgch_encode('Int32', 1::int4), NULL::oid) AS oid,
+       pgch_decode_typed(pgch_block('Nothing', 1, '\x00'::bytea),
+                         NULL::int4) AS nothing;
+
+-- Convert an empty array row, whose element type still governs the result
+SELECT pgch_decode_as(pgch_encode('Array(Int32)', ARRAY[]::int4[]),
+                      NULL::int8[]) AS empty;
+
+-- Spread a nested Tuple's axes over the target's coordinates
+SELECT pgch_decode_as(pgch_block('Tuple(Tuple(Float64, Float64), Float64)', 1,
+                                 '\x000000000000f03f'::bytea ||
+                                 '\x0000000000000040'::bytea ||
+                                 '\x0000000000000840'::bytea), NULL::line) AS line;
+
+-- Read a Tuple into a domain over a composite type
+CREATE DOMAIN pairdom AS pairformat;
+SELECT pgch_decode_typed(pgch_encode_pairs('Map(String, Int64)', ARRAY['a'],
+                                           ARRAY[1]::bigint[]),
+                         NULL::pairdom[]) AS pairs;
+
+-- Convert array rows that hold no values, at the outer and the inner dimension
+SELECT pgch_decode_as(pgch_block('Array(Array(Int32))', 1,
+                                 '\x0000000000000000'::bytea),
+                      NULL::int8[]) AS empty_outer,
+       pgch_decode_as(pgch_block('Array(Array(Int32))', 1,
+                                 '\x0100000000000000'::bytea ||
+                                 '\x0000000000000000'::bytea),
+                      NULL::int8[]) AS empty_inner;
+
+-- Read a Tuple into a domain over a composite type
+SELECT pgch_decode_typed(pgch_encode('Tuple(String, Int64)',
+                                     ARRAY['a', '1']::text[]),
+                         NULL::pairdom) AS pair;
+
+-- PostgreSQL 19 added oid8, which takes UInt64 the way xid8 does
+CREATE FUNCTION decode_as_type(data bytea, target text) RETURNS text
+    LANGUAGE plpgsql AS $$
+DECLARE
+    out text;
+BEGIN
+    EXECUTE format('SELECT (pgch_decode_as($1, NULL::%s))[1]', target)
+        INTO out USING data;
+    RETURN out;
+END $$;
+SELECT decode_as_type(pgch_encode('UInt64', 42::numeric),
+                      coalesce(to_regtype('oid8'), 'xid8'::regtype)::text) AS unsigned64;
+DROP FUNCTION decode_as_type;

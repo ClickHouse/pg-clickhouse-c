@@ -28,6 +28,8 @@ jobs:
         run: |
           set -euo pipefail
           make -C test
+          # Plain build first, since -O2 reports warnings -O0 misses
+          make -C test coverage-build
           # sudo drops PG_CONFIG from env
           sudo make -C test install PG_CONFIG="$PG_CONFIG"
           make -C test installcheck
@@ -37,6 +39,20 @@ jobs:
 
       - name: Run regression tests with EUC_KR
         run: make -C test installcheck REGRESS_OPTS='--no-locale --encoding=EUC_KR'
+
+      # Counters from every run above sum here. Version-gated code leaves each
+      # major short of the whole library, so the merge job holds the gate
+      - name: Coverage report
+        if: ${{ !cancelled() }}
+        run: make -C test coverage-report COVERAGE_MIN_LINE=0
+
+      - name: Upload coverage
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-pg${{ matrix.pg }}
+          path: coverage
+          if-no-files-found: error
 
       - name: Upload regression output on failure
         if: failure()
@@ -48,6 +64,37 @@ jobs:
             test/regression.out
             test/results/
           if-no-files-found: ignore
+
+  # Every line of the library runs under some PostgreSQL major
+  coverage:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: coverage-pg*
+          path: majors
+
+      - name: Merge coverage of every PostgreSQL major
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          awk -f clickhouse-c/tools/lcov_merge.awk majors/*/lcov.info > merged.lcov
+          awk -v missing=missing-lines.txt -f tools/lcov_summary.awk merged.lcov
+
+      - name: Upload merged coverage
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-merged
+          path: |
+            merged.lcov
+            missing-lines.txt
+          if-no-files-found: error
 
   format:
     runs-on: ubuntu-latest

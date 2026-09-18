@@ -177,3 +177,70 @@ SELECT decode_status(f, 'text') AS text, decode_status(f, 'bytea') AS bytea
   FROM (SELECT pgch_block('FixedString(4)', 1, '\x66730000'::bytea)) AS t(f);
 
 DROP FUNCTION decode_status;
+
+-- Reject values with no cast to the column's PostgreSQL type
+SELECT pgch_roundtrip('IPv4', 1::numeric);
+SELECT pgch_roundtrip('Int32', '2020-01-02'::date);
+SELECT pgch_roundtrip('Int32', '01:02:03'::time);
+SELECT pgch_roundtrip('Int32', '2020-01-02 03:04:05+00'::timestamptz);
+SELECT pgch_roundtrip('Int32', ARRAY[1]::int4[]);
+SELECT pgch_roundtrip('Int32', '11111111-2222-3333-4444-555555555555'::uuid);
+-- PostgreSQL 14 catalogs an unimplemented path -> point cast
+SELECT pgch_roundtrip('Int32', '((0,0),(1,1))'::path);
+SELECT pgch_roundtrip('Point', '{1,2,3}'::line);
+
+-- Reject timestamps outside the scaled DateTime64 range
+SELECT pgch_roundtrip('DateTime64(9)', '9999-01-01'::timestamptz);
+
+-- Reject LowCardinality dictionaries that hold anything but String
+SELECT pgch_decode(pgch_block('LowCardinality(FixedString(2))', 0, ''::bytea));
+
+-- Reject targets with no conversion from the column type
+SELECT pgch_decode_as(pgch_encode('Int32', 1::int4), NULL::point);
+
+-- Reject Tuple columns without fields
+SELECT pgch_encode('Tuple()', ARRAY[]::text[]);
+SELECT pgch_decode(pgch_block('Array(Tuple())', 0, ''::bytea));
+
+-- Reject blocks carrying no columns
+SELECT pgch_decode('\x0000'::bytea);
+
+-- Reject nested arrays where the column takes one dimension
+SELECT pgch_encode('Array(Int32)', ARRAY[[1, 2]]::int4[]);
+SELECT pgch_encode('Array(Tuple(Int32))', ARRAY[[NULL]]::int4[]);
+
+-- Reject coordinates into a Tuple that holds anything but Float64
+SELECT pgch_encode('Tuple(Int32, Int32)', '((0,0),(1,1))'::box);
+
+-- Reject Tuples the target's coordinates cannot take
+SELECT pgch_decode_as(pgch_block('Tuple(Nullable(Float64), Float64, Float64)', 1,
+                                 '\x01'::bytea || '\x0000000000000000'::bytea ||
+                                 '\x000000000000f03f'::bytea ||
+                                 '\x0000000000000040'::bytea), NULL::line);
+SELECT pgch_decode_as(pgch_block('Tuple(Float64, Float64, Float64, Float64, Float64)',
+                                 1, ('\x' || repeat('00', 40))::bytea), NULL::line);
+SELECT pgch_decode_as(pgch_block('Tuple(String, Float64, Float64)', 1,
+                                 '\x0161'::bytea ||
+                                 '\x0000000000000000'::bytea ||
+                                 '\x0000000000000000'::bytea), NULL::line);
+
+-- Reject arrays nested deeper than PostgreSQL allows
+SELECT pgch_decode_as(
+    pgch_block('Array(Array(Array(Array(Array(Array(Array(Int32)))))))', 1,
+               ('\x' || repeat('0100000000000000', 7))::bytea ||
+               '\x2a000000'::bytea), NULL::int4[]);
+
+-- Reject blocks whose column count changes mid-stream
+SELECT pgch_decode(pgch_encode_rows('Int32', ARRAY[1]::int4[]) ||
+                   '\x0201'::bytea ||
+                   '\x01' || convert_to('c', 'UTF8') ||
+                   '\x05' || convert_to('Int32', 'UTF8') || '\x01000000'::bytea ||
+                   '\x01' || convert_to('d', 'UTF8') ||
+                   '\x05' || convert_to('Int32', 'UTF8') || '\x02000000'::bytea);
+
+-- Reject point pairs the target's coordinate count cannot take
+SELECT pgch_decode_as(pgch_encode('Tuple(Point, Point)', ARRAY['(0,0)', '(1,1)']::point[]),
+                      NULL::line);
+
+-- Reject coordinates the Tuple has too few fields to hold
+SELECT pgch_encode('Tuple(Float64, Float64)', '((0,0),(1,1))'::box);

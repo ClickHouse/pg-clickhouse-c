@@ -56,7 +56,8 @@ CREATE FUNCTION pgch_native_settings() RETURNS text
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 
 -- Decode bytes delivered in fixed-size chunks
-CREATE FUNCTION pgch_decode_chunks(data bytea, chunk int) RETURNS text[]
+CREATE FUNCTION pgch_decode_chunks(data bytea, chunk int, fail_at int DEFAULT 0,
+                                   cancel_at int DEFAULT 0) RETURNS text[]
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 
 CREATE FUNCTION pgch_chtype(decl text, notnull bool DEFAULT false,
@@ -97,3 +98,26 @@ CREATE FUNCTION pgch_roundtrip_as(ch_type text, val anyelement) RETURNS text
 
 CREATE FUNCTION pgch_roundtrip_rows(ch_type text, vals anyarray) RETURNS text[]
     LANGUAGE sql AS $$ SELECT pgch_decode(pgch_encode_rows($1, $2)) $$;
+
+-- Drive writer guards against calls no correct caller makes
+CREATE FUNCTION pgch_writer_probe(what text) RETURNS text
+    AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
+
+-- Drive reader guards the block reader keeps out of reach
+CREATE FUNCTION pgch_reader_probe(what text) RETURNS text
+    AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
+
+-- Decode one row, then release the reader mid-block
+CREATE FUNCTION pgch_decode_first(data bytea) RETURNS text
+    AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
+
+CREATE FUNCTION pgch_decode_failed_source() RETURNS text
+    AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
+
+-- Prepare conversion from a ClickHouse declaration instead of the block
+CREATE FUNCTION pgch_decode_typed_decl(data bytea, ch_type text,
+                                       target anyelement) RETURNS text[]
+    AS 'MODULE_PATHNAME' LANGUAGE c CALLED ON NULL INPUT;
+
+CREATE FUNCTION pgch_fault_probe(what text) RETURNS text
+    AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
