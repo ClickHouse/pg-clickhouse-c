@@ -1340,12 +1340,12 @@ pgch__nest_array(
 ) {
     pgch_array* arr = palloc(sizeof(pgch_array));
 
-    arr->len        = dims[level];
-    arr->ndim       = ndim - level;
-    arr->item_type  = item_type;
-    arr->array_type = InvalidOid;
-    arr->datums     = palloc(sizeof(Datum) * arr->len);
-    arr->nulls      = palloc0(sizeof(bool) * arr->len);
+    arr->len       = dims[level];
+    arr->ndim      = ndim - level;
+    arr->item_type = item_type;
+    arr->type      = NULL;
+    arr->datums    = palloc(sizeof(Datum) * arr->len);
+    arr->nulls     = palloc0(sizeof(bool) * arr->len);
 
     if (level + 1 == ndim) {
         for (size_t i = 0; i < arr->len; i++) {
@@ -1392,13 +1392,13 @@ pgch_array_from_pg(
 #endif
 
     if (ndim <= 1) {
-        out             = palloc(sizeof(pgch_array));
-        out->len        = total;
-        out->ndim       = 1;
-        out->item_type  = elemtype;
-        out->array_type = InvalidOid;
-        out->datums     = total ? palloc(sizeof(Datum) * total) : NULL;
-        out->nulls      = total ? palloc(sizeof(bool) * total) : NULL;
+        out            = palloc(sizeof(pgch_array));
+        out->len       = total;
+        out->ndim      = 1;
+        out->item_type = elemtype;
+        out->type      = NULL;
+        out->datums    = total ? palloc(sizeof(Datum) * total) : NULL;
+        out->nulls     = total ? palloc(sizeof(bool) * total) : NULL;
 
         PGCH__ITER_SETUP();
         for (size_t j = 0; j < total; j++) {
@@ -1587,6 +1587,7 @@ pgch__append_one(
             return;
         case CHC_INT64:
         case CHC_UINT64:
+        case CHC_INTERVAL:
             pgch__append_i64(w, col, v, isnull);
             return;
         default:

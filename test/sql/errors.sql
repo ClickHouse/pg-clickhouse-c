@@ -137,6 +137,9 @@ SELECT pgch_decode(pgch_block('Array(Int32)', 2,
 SELECT pgch_decode('\x0103'::bytea);
 SELECT pgch_decode(pgch_encode_rows('Int32', ARRAY[1]::int4[]) ||
                    pgch_encode_rows('String', ARRAY['a']::text[]));
+-- Interval units convert differently from one another
+SELECT pgch_decode(pgch_encode_rows('IntervalSecond', ARRAY[1]::int8[]) ||
+                   pgch_encode_rows('IntervalDay', ARRAY[1]::int8[]));
 
 -- Reject chunk streams ending within a block
 SELECT pgch_decode_chunks(substring(pgch_encode_rows('Int32', ARRAY[1, 2]::int4[])

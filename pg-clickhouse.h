@@ -189,19 +189,18 @@ typedef struct pgch_array {
     Datum* datums;
     bool* nulls;
     size_t len;
-    int ndim;       /* Nesting depth, at least one */
-    Oid item_type;  /* PostgreSQL leaf type */
-    Oid array_type; /* PostgreSQL array type */
+    int ndim;             /* Nesting depth, at least one */
+    Oid item_type;        /* PostgreSQL leaf type */
+    const chc_type* type; /* Decoded ClickHouse type, NULL for staged arrays */
 } pgch_array;
 
 /* Represent a decoded ClickHouse Tuple */
 typedef struct pgch_tuple {
     Datum* datums;
     bool* nulls;
-    Oid* types;        /* Datum types */
-    Oid* native_types; /* Preferred PostgreSQL field types */
+    Oid* types; /* Datum types */
     size_t len;
-    const char* ch_type_name;
+    const chc_type* type; /* Decoded ClickHouse Tuple, Map or Nested type */
 } pgch_tuple;
 
 /* ---- byte buffer ---------------------------------------------------- */
@@ -373,7 +372,7 @@ const Oid pgch_kind_oids[CHC_KIND_COUNT] = {
     [CHC_POINT]        = POINTOID,
     [CHC_RING]         = POLYGONOID,
     [CHC_LINE_STRING]  = PATHOID,
-    [CHC_INTERVAL]     = INTERVALOID,
+    [CHC_INTERVAL]     = INT8OID, /* Unit count, conversion applies the unit */
 };
 
 const int64_t pgch_pow10[10] = {
@@ -465,6 +464,8 @@ pgch_native_oid_for(const chc_type* type, const char* what) {
     case CHC_JSON:
     case CHC_OBJECT:
         return JSONBOID;
+    case CHC_INTERVAL:
+        return INTERVALOID;
     default:
         break;
     }

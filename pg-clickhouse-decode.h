@@ -126,24 +126,10 @@ extern void
 pgch_reader_free(pgch_reader* r);
 
 /*
- * Prepare reusable conversion from intype to outtype
- * Pass representative value for arrays and tuples
+ * Prepare reusable conversion from ClickHouse column type to outtype
  * Pass target type modifier to enforce length and precision, or -1 for none
  * Return NULL when conversion is unnecessary
  * Allocate state in CurrentMemoryContext
- */
-extern void*
-pgch_convert_init(
-    Datum val,
-    Oid intype,
-    Oid outtype,
-    int32 outtypmod,
-    pgch_encoding_check encoding_check
-);
-
-/*
- * Prepare conversion from ClickHouse column type
- * Use pgch_reader_convert_init to read type and valtype override from reader
  */
 extern void*
 pgch_convert_init_type(
@@ -184,9 +170,13 @@ pgch_reader_fill_map(
     bool* nulls
 );
 
-/* Return decoded value as palloc'd C string */
+/* Return decoded value of ClickHouse type as palloc'd C string */
 extern char*
-pgch_value_to_cstring(Oid coltype, Datum value, pgch_encoding_check encoding_check);
+pgch_value_to_cstring(
+    const chc_type* type,
+    Datum value,
+    pgch_encoding_check encoding_check
+);
 
 #ifdef PGCH_IMPLEMENTATION
 
@@ -461,34 +451,6 @@ pgch__read_uuid(const chc_column* col, uint64_t row) {
     memcpy(u->data, &a, 8);
     memcpy(u->data + 8, &b, 8);
     return UUIDPGetDatum(u);
-}
-
-/* ClickHouse is one unit, PostgreSQL keeps months, days and time apart */
-static Datum
-pgch__read_interval(const chc_column* col, const chc_type* type, uint64_t row) {
-    int64 raw     = pgch__rd_i64((const uint8_t*)chc_column_fixed_data(col, NULL), row);
-    Interval unit = pgch_interval_unit_of(type);
-    /* Exactly one field is set, or all zero for nanoseconds */
-    int64 scale  = unit.month + unit.day + unit.time;
-    Interval* iv = (Interval*)palloc0(sizeof(Interval));
-    int64 v      = raw / 1000;
-
-    if (scale && (pg_mul_s64_overflow(raw, scale, &v) ||
-                  ((unit.month || unit.day) && v != (int32)v))) {
-        pgch_errorf(
-            ERRCODE_DATETIME_VALUE_OUT_OF_RANGE,
-            "%s value out of range",
-            chc_type_name(type, NULL)
-        );
-    }
-    if (unit.month) {
-        iv->month = (int32)v;
-    } else if (unit.day) {
-        iv->day = (int32)v;
-    } else {
-        iv->time = v;
-    }
-    return IntervalPGetDatum(iv);
 }
 
 /* ClickHouse Point is Tuple(Float64, Float64), one column per axis */
@@ -784,10 +746,10 @@ pgch__read_array(
 
     slot->len = len;
     /* PostgreSQL uses one array type for every nesting depth */
-    slot->item_type  = pgch__array_item(type, &leaf, &ndim);
-    slot->ndim       = ndim;
-    slot->array_type = get_array_type(slot->item_type);
-    if (!OidIsValid(slot->array_type)) {
+    slot->item_type = pgch__array_item(type, &leaf, &ndim);
+    slot->ndim      = ndim;
+    slot->type      = type;
+    if (!OidIsValid(get_array_type(slot->item_type))) {
         pgch_errorf(
             ERRCODE_FDW_INVALID_DATA_TYPE,
             "no PG array type for column type \"%s\"",
@@ -819,6 +781,7 @@ pgch__read_array(
 static Datum
 pgch__read_geo_array(
     const chc_column* col,
+    const chc_type* type,
     chc_kind kind,
     uint64_t row,
     Oid* valtype,
@@ -834,9 +797,9 @@ pgch__read_geo_array(
     slot->ndim = kind == CHC_MULTI_POLYGON ? 2 : 1;
     slot->item_type =
         pgch_kind_oids[kind == CHC_MULTI_LINE_STRING ? CHC_LINE_STRING : CHC_RING];
-    slot->array_type = get_array_type(slot->item_type);
-    slot->datums     = len ? (Datum*)palloc0(sizeof(Datum) * len) : NULL;
-    slot->nulls      = len ? (bool*)palloc0(sizeof(bool) * len) : NULL;
+    slot->type   = type;
+    slot->datums = len ? (Datum*)palloc0(sizeof(Datum) * len) : NULL;
+    slot->nulls  = len ? (bool*)palloc0(sizeof(bool) * len) : NULL;
 
     /* Geo types carry no children, so a level's element kind follows from the kind */
     for (uint64_t i = 0; i < len; i++) {
@@ -845,7 +808,9 @@ pgch__read_geo_array(
 
         slot->datums[i] =
             kind == CHC_MULTI_POLYGON
-                ? pgch__read_geo_array(inner, CHC_POLYGON, start + i, &scratch, isnull)
+                ? pgch__read_geo_array(
+                      inner, NULL, CHC_POLYGON, start + i, &scratch, isnull
+                  )
             : kind == CHC_POLYGON ? pgch__read_polygon(inner, start + i, isnull)
                                   : pgch__read_path(inner, start + i, isnull);
     }
@@ -869,19 +834,17 @@ pgch__read_tuple(
         pgch_error(ERRCODE_FDW_ERROR, "returned tuple is empty");
     }
 
-    pgch_tuple* slot   = (pgch_tuple*)palloc(sizeof(pgch_tuple));
-    slot->datums       = (Datum*)palloc(sizeof(Datum) * n);
-    slot->nulls        = (bool*)palloc0(sizeof(bool) * n);
-    slot->types        = (Oid*)palloc0(sizeof(Oid) * n);
-    slot->native_types = (Oid*)palloc(sizeof(Oid) * n);
-    slot->len          = n;
-    slot->ch_type_name = chc_type_name(type, NULL);
+    pgch_tuple* slot = (pgch_tuple*)palloc(sizeof(pgch_tuple));
+    slot->datums     = (Datum*)palloc(sizeof(Datum) * n);
+    slot->nulls      = (bool*)palloc0(sizeof(bool) * n);
+    slot->types      = (Oid*)palloc0(sizeof(Oid) * n);
+    slot->len        = n;
+    slot->type       = type;
 
     for (size_t i = 0; i < n; ++i) {
         const chc_type* ft   = chc_type_child(type, i);
         const chc_column* fc = chc_column_tuple_child(col, i);
 
-        slot->native_types[i] = pgch_native_oid(ft);
         slot->datums[i] =
             pgch_read_value(fc, ft, row, &slot->types[i], &slot->nulls[i]);
     }
@@ -909,12 +872,12 @@ pgch__read_map(
     const chc_column* entries = chc_column_array_values(col);
     pgch_array* slot          = (pgch_array*)palloc(sizeof(pgch_array));
 
-    slot->len        = len;
-    slot->ndim       = 1;
-    slot->item_type  = RECORDOID;
-    slot->array_type = RECORDARRAYOID;
-    slot->datums     = len ? (Datum*)palloc0(sizeof(Datum) * len) : NULL;
-    slot->nulls      = len ? (bool*)palloc0(sizeof(bool) * len) : NULL;
+    slot->len       = len;
+    slot->ndim      = 1;
+    slot->item_type = RECORDOID;
+    slot->type      = type;
+    slot->datums    = len ? (Datum*)palloc0(sizeof(Datum) * len) : NULL;
+    slot->nulls     = len ? (bool*)palloc0(sizeof(bool) * len) : NULL;
 
     for (uint64_t i = 0; i < len; i++) {
         Oid scratch = RECORDOID;
@@ -1107,7 +1070,9 @@ pgch_read_value(
         return TimeADTGetDatum(t);
     }
     case CHC_INTERVAL:
-        return pgch__read_interval(col, type, row);
+        return Int64GetDatum(
+            pgch__rd_i64((const uint8_t*)chc_column_fixed_data(col, NULL), row)
+        );
     case CHC_UUID:
         return pgch__read_uuid(col, row);
     case CHC_POINT:
@@ -1119,7 +1084,7 @@ pgch_read_value(
     case CHC_POLYGON:
     case CHC_MULTI_POLYGON:
     case CHC_MULTI_LINE_STRING:
-        return pgch__read_geo_array(col, kind, row, valtype, is_null);
+        return pgch__read_geo_array(col, type, kind, row, valtype, is_null);
     case CHC_IPV4:
         return pgch__read_ipv4(col, row);
     case CHC_IPV6:
@@ -1181,6 +1146,10 @@ pgch__append_shape(StringInfo buf, const chc_type* type) {
     case CHC_MULTI_POLYGON:
     case CHC_MULTI_LINE_STRING:
         appendStringInfo(buf, "g%d;", (int)kind);
+        return;
+    /* Conversion applies the unit to the count read */
+    case CHC_INTERVAL:
+        appendStringInfo(buf, "i%d;", (int)chc_type_interval_unit(type));
         return;
     default:
         appendStringInfo(buf, "%u;", pgch_kind_oids[kind]);
@@ -1585,6 +1554,9 @@ struct pgch_convert_state {
     int32 typmod;
     Oid typioparam;
 
+    Interval unit;       /* Interval column's unit */
+    const char* ch_name; /* ClickHouse type named in range errors */
+
     CoercionPathType ctype;
     pgch_encoding_check encoding_check;
 };
@@ -1609,26 +1581,7 @@ pgch__convert_record(pgch_convert_state* state, Datum val) {
     for (size_t i = 0; i < slot->len; i++) {
         pgch_convert_state* s = state->field_states[i];
 
-        if (slot->nulls[i]) {
-            continue;
-        }
-
-        if (s == NULL && slot->types[i] == RECORDOID) {
-            MemoryContext oldcxt  = MemoryContextSwitchTo(GetMemoryChunkContext(state));
-            Form_pg_attribute att = TupleDescAttr(state->indesc, i);
-
-            s = pgch_convert_init(
-                slot->datums[i],
-                RECORDOID,
-                att->atttypid,
-                att->atttypmod,
-                state->encoding_check
-            );
-            MemoryContextSwitchTo(oldcxt);
-            state->field_states[i] = s;
-        }
-
-        if (s) {
+        if (s && !slot->nulls[i]) {
             slot->datums[i] = s->func(s, slot->datums[i]);
         }
     }
@@ -1661,12 +1614,12 @@ pgch__convert_record_array(pgch_convert_state* state, Datum val) {
     pgch_tuple* slot = (pgch_tuple*)DatumGetPointer(val);
     pgch_array* out  = (pgch_array*)palloc(sizeof(pgch_array));
 
-    out->len        = slot->len;
-    out->ndim       = 1;
-    out->item_type  = state->item_type;
-    out->array_type = state->outtype;
-    out->datums     = (Datum*)palloc(sizeof(Datum) * slot->len);
-    out->nulls      = (bool*)palloc(sizeof(bool) * slot->len);
+    out->len       = slot->len;
+    out->ndim      = 1;
+    out->item_type = state->item_type;
+    out->type      = NULL;
+    out->datums    = (Datum*)palloc(sizeof(Datum) * slot->len);
+    out->nulls     = (bool*)palloc(sizeof(bool) * slot->len);
 
     for (size_t i = 0; i < slot->len; i++) {
         pgch_convert_state* field = state->field_states[i];
@@ -1863,7 +1816,7 @@ pgch__convert_axes(pgch_convert_state* state, Datum val) {
         pgch_errorf(
             ERRCODE_DATATYPE_MISMATCH,
             "cannot return %s as %s",
-            slot->ch_type_name ? slot->ch_type_name : "?",
+            chc_type_name(slot->type, NULL),
             format_type_be(state->outtype)
         );
     }
@@ -2040,6 +1993,33 @@ pgch__convert_time(pgch_convert_state* state pg_attribute_unused(), Datum val) {
     return TimeADTGetDatum(t < 0 ? t + USECS_PER_DAY : t);
 }
 
+/* ClickHouse is one unit, PostgreSQL keeps months, days and time apart */
+static Datum
+pgch__convert_interval(pgch_convert_state* state, Datum val) {
+    int64 raw     = DatumGetInt64(val);
+    Interval unit = state->unit;
+    /* Exactly one field is set, or all zero for nanoseconds */
+    int64 scale  = unit.month + unit.day + unit.time;
+    Interval* iv = (Interval*)palloc0(sizeof(Interval));
+    int64 v      = raw / 1000;
+
+    if (scale && (pg_mul_s64_overflow(raw, scale, &v) ||
+                  ((unit.month || unit.day) && v != (int32)v))) {
+        pgch_errorf(
+            ERRCODE_DATETIME_VALUE_OUT_OF_RANGE, "%s value out of range", state->ch_name
+        );
+    }
+    if (unit.month) {
+        iv->month = (int32)v;
+    } else if (unit.day) {
+        iv->day = (int32)v;
+    } else {
+        iv->time = v;
+    }
+    val = IntervalPGetDatum(iv);
+    return state->inner ? state->inner->func(state->inner, val) : val;
+}
+
 /*
  * PostgreSQL cast lookup unwraps domains to their base types. Check domain
  * constraints here because no cast function will do so
@@ -2058,21 +2038,6 @@ pgch__convert_domain(pgch_convert_state* state, Datum val) {
 Datum
 pgch_convert(void* state, Datum val) {
     return state ? ((pgch_convert_state*)state)->func(state, val) : val;
-}
-
-static bool
-pgch__array_leaf(const pgch_array* slot, Datum* out) {
-    for (size_t i = 0; i < slot->len; i++) {
-        if (slot->ndim > 1) {
-            if (pgch__array_leaf((pgch_array*)DatumGetPointer(slot->datums[i]), out)) {
-                return true;
-            }
-        } else if (!slot->nulls[i]) {
-            *out = slot->datums[i];
-            return true;
-        }
-    }
-    return false;
 }
 
 /*
@@ -2098,17 +2063,13 @@ pgch__init_typmod_coerce(pgch_convert_state* state) {
  * conversion because fields still contain pgch_array intermediates
  */
 static Oid
-pgch__spread_type(const chc_type* ct, const pgch_tuple* slot, Oid elem) {
-    size_t nfields = ct ? chc_type_n_children(ct) : slot->len;
-
+pgch__spread_type(const chc_type* ct, Oid elem) {
     if (!OidIsValid(elem) || pgch__record_axes(elem) ||
         type_is_rowtype(getBaseType(elem))) {
         return InvalidOid;
     }
-    for (size_t i = 0; i < nfields; i++) {
-        Oid ftype = ct ? pgch_datum_oid(chc_type_child(ct, i)) : slot->types[i];
-
-        if (ftype == ANYARRAYOID) {
+    for (size_t i = 0; i < chc_type_n_children(ct); i++) {
+        if (pgch_datum_oid(chc_type_child(ct, i)) == ANYARRAYOID) {
             return InvalidOid;
         }
     }
@@ -2129,7 +2090,6 @@ pgch__uint64_type(Oid typid) {
 static pgch_convert_state*
 pgch__convert_init(
     const chc_type* ct,
-    Datum val,
     Oid intype,
     Oid outtype,
     int32 outtypmod,
@@ -2149,7 +2109,7 @@ pgch__convert_init(
             dom->outtype = outtype;
             dom->func    = pgch__convert_domain;
             dom->inner =
-                pgch__convert_init(ct, val, intype, base, basetypmod, encoding_check);
+                pgch__convert_init(ct, intype, base, basetypmod, encoding_check);
             return dom;
         }
     }
@@ -2165,55 +2125,50 @@ pgch__convert_init(
     state->ctype          = COERCION_PATH_NONE;
     state->encoding_check = encoding_check;
 
+    /* Integer targets take Interval's unit count, keeping nanoseconds */
+    if (chc_type_kind(ct) == CHC_INTERVAL && outtype != INT2OID && outtype != INT4OID &&
+        outtype != INT8OID) {
+        state->func    = pgch__convert_interval;
+        state->unit    = pgch_interval_unit_of(ct);
+        state->ch_name = pstrdup(chc_type_name(ct, NULL));
+        state->inner =
+            pgch__convert_init(NULL, INTERVALOID, outtype, outtypmod, encoding_check);
+        return state;
+    }
+
     if (intype == ANYARRAYOID) {
-        pgch_array* slot     = ct ? NULL : (pgch_array*)DatumGetPointer(val);
-        const chc_type* leaf = ct;
+        const chc_type* leaf;
+        int ndim;
         /* Array domains expose element type and type modifier through base type */
         Oid out_base = OidIsValid(outtype) ? getBaseTypeAndTypmod(outtype, &outtypmod)
                                            : InvalidOid;
         Oid out_elem = OidIsValid(out_base) ? get_element_type(out_base) : InvalidOid;
 
-        if (ct) {
-            int ndim;
-
-            state->item_type = pgch__array_item(ct, &leaf, &ndim);
-            state->intype    = get_array_type(state->item_type);
-        } else {
-            state->item_type = slot->item_type;
-            state->intype    = slot->array_type;
-        }
-        state->func = pgch__convert_array;
+        state->item_type = pgch__array_item(ct, &leaf, &ndim);
+        state->intype    = get_array_type(state->item_type);
+        state->func      = pgch__convert_array;
 
         /* PostgreSQL reports array casts separately from scalar element casts,
-         * and its COERCION_PATH_ARRAYCOERCE applies a type modifier per element */
+         * and its COERCION_PATH_ARRAYCOERCE applies a type modifier per element
+         * Pass array column's type modifier to each element */
         if (OidIsValid(out_elem) && (out_elem != state->item_type || outtypmod >= 0)) {
-            Datum leafval  = (Datum)0;
-            bool have_leaf = ct || pgch__array_leaf(slot, &leafval);
+            Oid elem_out = out_elem;
 
-            /* Records without a value to inspect are empty or all NULL, so
-             * they need the element type named but no conversion built
-             * Pass array column's type modifier to each element */
-            if (have_leaf || state->item_type != RECORDOID) {
-                Oid elem_out = out_elem;
+            if (state->item_type == RECORDOID) {
+                Oid spread = pgch__spread_type(leaf, out_elem);
 
-                if (state->item_type == RECORDOID) {
-                    Oid spread = pgch__spread_type(
-                        leaf, (const pgch_tuple*)DatumGetPointer(leafval), out_elem
-                    );
-
-                    if (OidIsValid(spread)) {
-                        elem_out = spread;
-                    }
+                if (OidIsValid(spread)) {
+                    elem_out = spread;
                 }
-                state->elem_state = pgch__convert_init(
-                    leaf, leafval, state->item_type, elem_out, outtypmod, encoding_check
-                );
-                /* This array builds every dimension at once, so leave the
-                 * fields of each Tuple unbuilt */
-                if (state->elem_state &&
-                    state->elem_state->func == pgch__convert_tuple_array) {
-                    state->elem_state->func = pgch__convert_record_array;
-                }
+            }
+            state->elem_state = pgch__convert_init(
+                leaf, state->item_type, elem_out, outtypmod, encoding_check
+            );
+            /* This array builds every dimension at once, so leave the
+             * fields of each Tuple unbuilt */
+            if (state->elem_state &&
+                state->elem_state->func == pgch__convert_tuple_array) {
+                state->elem_state->func = pgch__convert_record_array;
             }
             if (out_elem != state->item_type) {
                 state->item_type = out_elem;
@@ -2236,11 +2191,10 @@ pgch__convert_init(
     }
 
     if (intype == RECORDOID) {
-        pgch_tuple* slot = ct ? NULL : (pgch_tuple*)DatumGetPointer(val);
-        size_t nfields   = ct ? chc_type_n_children(ct) : slot->len;
-        Oid item         = get_element_type(outtype);
+        size_t nfields = chc_type_n_children(ct);
+        Oid item       = get_element_type(outtype);
 
-        if (OidIsValid(pgch__spread_type(ct, slot, item))) {
+        if (OidIsValid(pgch__spread_type(ct, item))) {
             state->func         = pgch__convert_tuple_array;
             state->item_type    = item;
             state->field_states = palloc(sizeof(void*) * nfields);
@@ -2249,16 +2203,11 @@ pgch__convert_init(
             );
 
             for (size_t i = 0; i < nfields; ++i) {
-                const chc_type* ft = ct ? chc_type_child(ct, i) : NULL;
-                Oid ftype          = ct ? pgch_datum_oid(ft) : slot->types[i];
-                Datum fval         = ct ? (Datum)0 : slot->datums[i];
+                const chc_type* ft = chc_type_child(ct, i);
 
-                state->field_states[i] =
-                    !ct && slot->nulls[i]
-                        ? NULL
-                        : pgch__convert_init(
-                              ft, fval, ftype, item, outtypmod, encoding_check
-                          );
+                state->field_states[i] = pgch__convert_init(
+                    ft, pgch_datum_oid(ft), item, outtypmod, encoding_check
+                );
             }
             return state;
         }
@@ -2275,12 +2224,10 @@ pgch__convert_init(
             /* Function entry splits domains off, recursing with the base type */
             Assert(typentry->typtype != TYPTYPE_DOMAIN);
             if (typentry->tupDesc == NULL) {
-                const char* tname = ct ? chc_type_name(ct, NULL) : slot->ch_type_name;
-
                 pgch_errorf(
                     ERRCODE_WRONG_OBJECT_TYPE,
                     "cannot return %s as %s",
-                    tname ? tname : "?",
+                    chc_type_name(ct, NULL),
                     format_type_be(outtype)
                 );
             }
@@ -2293,10 +2240,9 @@ pgch__convert_init(
         }
 
         for (size_t i = 0; i < nfields; ++i) {
-            const chc_type* ft = ct ? chc_type_child(ct, i) : NULL;
-            Oid ftype          = ct ? pgch_datum_oid(ft) : slot->types[i];
-            bool isnull        = ct ? false : slot->nulls[i];
-            Oid item_type      = ct ? pgch_native_oid(ft) : slot->native_types[i];
+            const chc_type* ft = chc_type_child(ct, i);
+            Oid ftype          = pgch_datum_oid(ft);
+            Oid item_type      = pgch_native_oid(ft);
             int32 item_typmod  = -1;
 
             /* Unbuilt and byte fields convert into target type, scalars
@@ -2311,15 +2257,8 @@ pgch__convert_init(
                 item_typmod = TupleDescAttr(state->outdesc, i)->atttypmod;
             }
 
-            state->field_states[i] = isnull ? NULL
-                                            : pgch__convert_init(
-                                                  ft,
-                                                  ct ? (Datum)0 : slot->datums[i],
-                                                  ftype,
-                                                  item_type,
-                                                  item_typmod,
-                                                  encoding_check
-                                              );
+            state->field_states[i] =
+                pgch__convert_init(ft, ftype, item_type, item_typmod, encoding_check);
 
             TupleDescInitEntry(
                 state->indesc, (AttrNumber)i + 1, "", item_type, item_typmod, 0
@@ -2425,17 +2364,6 @@ pgch__convert_init(
 }
 
 void*
-pgch_convert_init(
-    Datum val,
-    Oid intype,
-    Oid outtype,
-    int32 outtypmod,
-    pgch_encoding_check encoding_check
-) {
-    return pgch__convert_init(NULL, val, intype, outtype, outtypmod, encoding_check);
-}
-
-void*
 pgch_convert_init_type(
     const chc_type* in,
     Oid outtype,
@@ -2443,7 +2371,7 @@ pgch_convert_init_type(
     pgch_encoding_check encoding_check
 ) {
     return pgch__convert_init(
-        in, (Datum)0, pgch_datum_oid(in), outtype, outtypmod, encoding_check
+        in, pgch_datum_oid(in), outtype, outtypmod, encoding_check
     );
 }
 
@@ -2459,7 +2387,6 @@ pgch_reader_convert_init(
     }
     return pgch__convert_init(
         chc_block_column_type(r->cur, col),
-        (Datum)0,
         r->coltypes[col],
         outtype,
         outtypmod,
@@ -2495,44 +2422,29 @@ pgch_convert_free(void* state) {
 }
 
 char*
-pgch_value_to_cstring(Oid coltype, Datum value, pgch_encoding_check encoding_check) {
+pgch_value_to_cstring(
+    const chc_type* type,
+    Datum value,
+    pgch_encoding_check encoding_check
+) {
+    Oid outtype = pgch_native_oid(type);
     Oid out_func;
     bool typisvarlena;
 
-    if (coltype == ANYARRAYOID) {
-        pgch_array* slot = (pgch_array*)DatumGetPointer(value);
-        /* Anonymous records have no array to build and ClickHouse strings
-         * decode as bytes, so render both as text */
-        Oid array_type = slot->item_type == RECORDOID || slot->item_type == BYTEAOID
-                             ? TEXTARRAYOID
-                             : slot->array_type;
-        void* state =
-            pgch_convert_init(value, ANYARRAYOID, array_type, -1, encoding_check);
-        Datum arr = pgch_convert(state, value);
-
-        getTypeOutputInfo(array_type, &out_func, &typisvarlena);
-        if (state) {
-            pgch_convert_free(state);
-        }
-        return OidOutputFunctionCall(out_func, arr);
+    /* Anonymous records have no type to build, and JSON keeps ClickHouse's text */
+    if (outtype == RECORDOID || outtype == JSONBOID) {
+        outtype = TEXTOID;
+    } else if (outtype == RECORDARRAYOID || outtype == JSONBARRAYOID) {
+        outtype = TEXTARRAYOID;
     }
+    void* state = pgch_convert_init_type(type, outtype, -1, encoding_check);
+    Datum out   = pgch_convert(state, value);
 
-    if (coltype == RECORDOID) {
-        void* state = pgch_convert_init(value, RECORDOID, TEXTOID, -1, encoding_check);
-        Datum txt   = pgch_convert(state, value);
-
-        if (state) {
-            pgch_convert_free(state);
-        }
-        return TextDatumGetCString(txt);
+    if (state) {
+        pgch_convert_free(state);
     }
-
-    if (coltype == BYTEAOID) {
-        return TextDatumGetCString(pgch__checked_text(encoding_check, value));
-    }
-
-    getTypeOutputInfo(coltype, &out_func, &typisvarlena);
-    return OidOutputFunctionCall(out_func, value);
+    getTypeOutputInfo(outtype, &out_func, &typisvarlena);
+    return OidOutputFunctionCall(out_func, out);
 }
 
 #endif /* PGCH_IMPLEMENTATION */

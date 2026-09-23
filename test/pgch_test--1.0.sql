@@ -25,9 +25,8 @@ CREATE FUNCTION pgch_decode_as(data bytea, target anyelement) RETURNS text[]
 CREATE FUNCTION pgch_decode_text(data bytea, enc_check int DEFAULT 0) RETURNS text[]
     AS 'MODULE_PATHNAME' LANGUAGE c CALLED ON NULL INPUT;
 
--- Prepare conversion from ClickHouse column type
 CREATE FUNCTION pgch_decode_typed(data bytea, target anyelement) RETURNS text[]
-    AS 'MODULE_PATHNAME' LANGUAGE c CALLED ON NULL INPUT;
+    AS 'MODULE_PATHNAME', 'pgch_decode_as' LANGUAGE c CALLED ON NULL INPUT;
 
 CREATE FUNCTION pgch_pgtype(ch_type text) RETURNS text
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;

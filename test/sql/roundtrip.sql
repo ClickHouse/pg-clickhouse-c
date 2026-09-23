@@ -152,6 +152,22 @@ SELECT pgch_roundtrip('IntervalHour', '1 day 2 hours'::interval),
        pgch_roundtrip('IntervalNanosecond', '00:00:00.000001'::interval),
        pgch_encode('IntervalWeek', '14 days'::interval);
 
+-- Interval columns take and return integers as raw unit counts, keeping nanoseconds
+SELECT pgch_encode('IntervalNanosecond', 21::bigint),
+       pgch_encode('IntervalQuarter', -2::int4);
+SELECT pgch_decode_as(pgch_encode('IntervalNanosecond', 21::bigint), NULL::int8),
+       pgch_decode_as(pgch_encode('IntervalQuarter', -2::int4), NULL::int2),
+       pgch_decode_as(pgch_encode_rows('Nullable(IntervalSecond)',
+                                       ARRAY[90, NULL]::int8[]), NULL::int4),
+       pgch_decode_as(pgch_encode('Array(IntervalNanosecond)', ARRAY[21, 22]::int8[]),
+                      NULL::int8[]),
+       pgch_decode_as(pgch_encode('IntervalMinute', 3::int8), NULL::text);
+SELECT pgch_roundtrip('Array(IntervalNanosecond)', ARRAY[21000, 22000]::int8[]),
+       pgch_decode(pgch_block('Tuple(IntervalDay, Array(IntervalHour))', 1,
+                              '\x0200000000000000'::bytea ||
+                              '\x0100000000000000'::bytea ||
+                              '\x0300000000000000'::bytea));
+
 -- Interval columns take arrays and nulls, and String columns take an interval
 SELECT pgch_roundtrip('Array(IntervalMonth)', ARRAY['1 mon', '2 mons']::interval[]),
        pgch_roundtrip('Nullable(IntervalSecond)', NULL::interval) IS NULL AS is_null,
