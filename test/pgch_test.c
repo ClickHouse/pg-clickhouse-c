@@ -380,12 +380,11 @@ reader_from_bytea(pgch_reader* r, bytes_source* src, bytea* data) {
     pgch_reader_init(r, &bsrc);
 }
 
-/* Decode first column as text, optionally prepare conversion from column type */
+/* Decode first column as text, or into outtype when valid */
 static Datum
-decode_reader(pgch_reader* r, Oid outtype, int32 outtypmod, bool from_type) {
+decode_reader(pgch_reader* r, Oid outtype, int32 outtypmod) {
     ArrayBuildState* out = initArrayResult(TEXTOID, CurrentMemoryContext, false);
     void* convstate      = NULL;
-    bool converted       = false;
     FmgrInfo outfn       = {};
 
     if (OidIsValid(outtype)) {
@@ -402,9 +401,8 @@ decode_reader(pgch_reader* r, Oid outtype, int32 outtypmod, bool from_type) {
     if (pgch_reader_columns(r) != 1) {
         elog(ERROR, "expected 1 column, got %zu", pgch_reader_columns(r));
     }
-    if (OidIsValid(outtype) && from_type) {
+    if (OidIsValid(outtype)) {
         convstate = pgch_reader_convert_init(r, 0, outtype, outtypmod);
-        converted = true;
     }
 
     while (pgch_reader_next(r)) {
@@ -413,16 +411,10 @@ decode_reader(pgch_reader* r, Oid outtype, int32 outtypmod, bool from_type) {
 
         if (isnull) {
         } else if (!OidIsValid(outtype)) {
-            val = CStringGetTextDatum(
-                pgch_value_to_cstring(r->coltypes[0], r->values[0], r->encoding_check)
-            );
+            val = CStringGetTextDatum(pgch_value_to_cstring(
+                chc_block_column_type(r->cur, 0), r->values[0], r->encoding_check
+            ));
         } else {
-            if (!converted) {
-                convstate = pgch_convert_init(
-                    r->values[0], r->coltypes[0], outtype, outtypmod, r->encoding_check
-                );
-                converted = true;
-            }
             val = CStringGetTextDatum(
                 OutputFunctionCall(&outfn, pgch_convert(convstate, r->values[0]))
             );
@@ -444,12 +436,12 @@ decode_reader(pgch_reader* r, Oid outtype, int32 outtypmod, bool from_type) {
 }
 
 static Datum
-decode_column(bytea* data, Oid outtype, int32 outtypmod, bool from_type) {
+decode_column(bytea* data, Oid outtype, int32 outtypmod) {
     bytes_source src;
     pgch_reader r;
 
     reader_from_bytea(&r, &src, data);
-    return decode_reader(&r, outtype, outtypmod, from_type);
+    return decode_reader(&r, outtype, outtypmod);
 }
 
 /* Arguments carry no type modifier at run time, so read it off the call site */
@@ -524,7 +516,7 @@ pgch_decode_chunks(PG_FUNCTION_ARGS) {
     src.cancelled  = feed.cancel_at ? feed_cancelled : NULL;
 
     pgch_reader_init_chunks(&r, &src, NULL);
-    PG_RETURN_DATUM(decode_reader(&r, InvalidOid, -1, false));
+    PG_RETURN_DATUM(decode_reader(&r, InvalidOid, -1));
 }
 
 PG_FUNCTION_INFO_V1(pgch_decode);
@@ -537,7 +529,7 @@ pgch_decode(PG_FUNCTION_ARGS) {
 
     reader_from_bytea(&r, &src, PG_GETARG_BYTEA_PP(0));
     r.encoding_check = (pgch_encoding_check)PG_GETARG_INT32(1);
-    PG_RETURN_DATUM(decode_reader(&r, InvalidOid, -1, false));
+    PG_RETURN_DATUM(decode_reader(&r, InvalidOid, -1));
 }
 
 PG_FUNCTION_INFO_V1(pgch_decode_as);
@@ -554,7 +546,7 @@ pgch_decode_as(PG_FUNCTION_ARGS) {
         elog(ERROR, "could not determine target type");
     }
     PG_RETURN_DATUM(
-        decode_column(PG_GETARG_BYTEA_PP(0), outtype, arg_typmod(fcinfo, 1), false)
+        decode_column(PG_GETARG_BYTEA_PP(0), outtype, arg_typmod(fcinfo, 1))
     );
 }
 
@@ -572,25 +564,7 @@ pgch_decode_text(PG_FUNCTION_ARGS) {
 
     reader_from_bytea(&r, &src, PG_GETARG_BYTEA_PP(0));
     r.encoding_check = (pgch_encoding_check)PG_GETARG_INT32(1);
-    PG_RETURN_DATUM(decode_reader(&r, TEXTOID, 0, false));
-}
-
-PG_FUNCTION_INFO_V1(pgch_decode_typed);
-
-/* Decode rows with conversion prepared from ClickHouse column type */
-Datum
-pgch_decode_typed(PG_FUNCTION_ARGS) {
-    Oid outtype = get_fn_expr_argtype(fcinfo->flinfo, 1);
-
-    if (PG_ARGISNULL(0)) {
-        PG_RETURN_NULL();
-    }
-    if (!OidIsValid(outtype)) {
-        elog(ERROR, "could not determine target type");
-    }
-    PG_RETURN_DATUM(
-        decode_column(PG_GETARG_BYTEA_PP(0), outtype, arg_typmod(fcinfo, 1), true)
-    );
+    PG_RETURN_DATUM(decode_reader(&r, TEXTOID, 0));
 }
 
 PG_FUNCTION_INFO_V1(pgch_pgtype);
@@ -1491,7 +1465,9 @@ pgch_decode_first(PG_FUNCTION_ARGS) {
         elog(ERROR, "prepared conversion for a column past the block");
     }
     if (pgch_reader_next(&r)) {
-        out = pgch_value_to_cstring(r.coltypes[0], r.values[0], r.encoding_check);
+        out = pgch_value_to_cstring(
+            chc_block_column_type(r.cur, 0), r.values[0], r.encoding_check
+        );
     }
     pgch_reader_free(&r);
 

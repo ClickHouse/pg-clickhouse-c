@@ -18,7 +18,8 @@ PostgreSQL Datum, writes returned type OID to `*valtype`, and sets
 `*is_null`.
 
 `String`, `FixedString`, `Enum`, `JSON` and `Object` decode to `bytea`, leaving
-text and document parsing to `pgch_convert`.
+text and document parsing to `pgch_convert`. `Interval` decodes to `int8`
+count of its unit, leaving unit to `pgch_convert`.
 
 Returned variable-length values are allocated with `palloc`. Unsupported types
 raise `ERRCODE_FDW_INVALID_DATA_TYPE`.
@@ -169,7 +170,6 @@ conversion state across independently managed block streams.
 ## Convert into target PostgreSQL types
 
 ```c
-void *pgch_convert_init(Datum val, Oid intype, Oid outtype, int32 outtypmod, pgch_encoding_check encoding_check);
 void *pgch_convert_init_type(const chc_type *in, Oid outtype, int32 outtypmod, pgch_encoding_check encoding_check);
 void *pgch_reader_convert_init(const pgch_reader *r,
                                size_t col, Oid outtype, int32 outtypmod);
@@ -196,6 +196,8 @@ Conversion supports:
   non-binary PostgreSQL target
 - Explicit PostgreSQL casts between scalar types
 - `numeric` to `xid8` and `oid8`
+- `Interval` to `interval`, or its unit count unchanged into `smallint`,
+  `integer` and `bigint`, keeping nanoseconds `interval` cannot hold
 - Per-element conversion when source and target array element types differ, or
   when the target array carries a type modifier
 
@@ -224,11 +226,7 @@ for (size_t i = 0; i < reader.ncols; i++)
 ```
 
 `pgch_convert_init_type` provides same behavior for standalone ClickHouse
-type.
-
-Use `pgch_convert_init` when only representative value is available. Arrays
-and tuples require non-NULL representative value because shape comes from
-intermediate representation.
+type. Decoded `pgch_array` and `pgch_tuple` carry theirs in `type`.
 
 All initialization functions allocate state in `CurrentMemoryContext`. Build
 state in context that outlives row loop. They return `NULL` when no conversion
@@ -269,11 +267,12 @@ pgch_reader_fill_map(&reader, states, attnums,
 ## Render values as text
 
 ```c
-char *pgch_value_to_cstring(Oid coltype, Datum value,
+char *pgch_value_to_cstring(const chc_type *type, Datum value,
                             pgch_encoding_check encoding_check);
 ```
 
-Return palloc'd text representation for decoded value. Function also handles
+Return palloc'd text representation for value decoded from `type`, rendered as
+PostgreSQL type `pgch_native_oid` names. Function also handles
 `pgch_array` and `pgch_tuple` intermediate representations. It renders every
 ClickHouse string as text, so `encoding_check` decides the handling of bytes
 PostgreSQL cannot read in database encoding. Convert to `bytea` to keep those

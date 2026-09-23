@@ -186,6 +186,10 @@ ERROR:  decode: ioless buffer drained
 SELECT pgch_decode(pgch_encode_rows('Int32', ARRAY[1]::int4[]) ||
                    pgch_encode_rows('String', ARRAY['a']::text[]));
 ERROR:  decode: block column 1 type changed
+-- Interval units convert differently from one another
+SELECT pgch_decode(pgch_encode_rows('IntervalSecond', ARRAY[1]::int8[]) ||
+                   pgch_encode_rows('IntervalDay', ARRAY[1]::int8[]));
+ERROR:  decode: block column 1 type changed
 -- Reject chunk streams ending within a block
 SELECT pgch_decode_chunks(substring(pgch_encode_rows('Int32', ARRAY[1, 2]::int4[])
                                     FROM 1 FOR 12), 4);

@@ -93,6 +93,7 @@ whether the top bit of a wide value carries a sign.
 - `String`, `FixedString`, `Enum8`, `Enum16`, `JSON` and `Object` return
   `BYTEAOID`, ClickHouse has no guarantee of compatibility with PostgreSQL
   database encoding
+- `Interval` types return `INT8OID`, counting their unit
 - `Array` returns `ANYARRAYOID`, representing `pgch_array *`
 - `Tuple` returns `RECORDOID`, representing `pgch_tuple *`
 - `Map` returns `ANYARRAYOID` over `pgch_tuple *` pairs, as ClickHouse stores
@@ -107,8 +108,8 @@ whether the top bit of a wide value carries a sign.
 
 `pgch_native_oid` returns type suitable for a PostgreSQL column descriptor.
 Unlike `pgch_datum_oid`, it resolves `Array` to PostgreSQL array OID for leaf
-type, and `Map` and `Nested` to `record[]`. Unsupported mappings raise
-`ERRCODE_FDW_INVALID_DATA_TYPE`.
+type, `Map` and `Nested` to `record[]`, and `Interval` to `interval`.
+Unsupported mappings raise `ERRCODE_FDW_INVALID_DATA_TYPE`.
 
 `pgch_native_oid_for` behaves like `pgch_native_oid` and adds `what` to an
 unsupported-type error. Pass `NULL` to omit context.
@@ -246,15 +247,15 @@ typedef struct pgch_array {
     size_t  len;
     int     ndim;
     Oid     item_type;
-    Oid     array_type;
+    const chc_type *type;
 } pgch_array;
 
 typedef struct pgch_tuple {
-    Datum      *datums;
-    bool       *nulls;
-    Oid        *types;
-    size_t      len;
-    const char *ch_type_name;
+    Datum          *datums;
+    bool           *nulls;
+    Oid            *types;
+    size_t          len;
+    const chc_type *type;
 } pgch_tuple;
 ```
 
@@ -264,10 +265,12 @@ PostgreSQL type. Convert them with APIs in
 
 For `pgch_array`, `ndim` is at least one. With nested arrays, each datum points
 to child `pgch_array` until leaf level. `item_type` is PostgreSQL leaf OID.
-Decoded array representations also set `array_type`; representations created
-for encoding may leave it `InvalidOid`.
+Decoded array representations set `type` to their ClickHouse type, valid
+until reader loads next block. Representations created for encoding, and
+child arrays of multi-geometry types, leave it `NULL`.
 
-For `pgch_tuple`, `types[i]` describes `datums[i]`.
+For `pgch_tuple`, `types[i]` describes `datums[i]`. `type` is ClickHouse
+Tuple, or Map or Nested type whose children are entry fields.
 
 ## Byte buffers
 
