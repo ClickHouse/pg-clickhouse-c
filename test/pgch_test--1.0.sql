@@ -37,7 +37,7 @@ CREATE FUNCTION pgch_pgcolumn(ch_type text, OUT type text, OUT ndims int,
                               OUT is_column bool)
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 
--- ClickHouse to PostgreSQL type table of README
+-- ClickHouse to PostgreSQL type table in decoder documentation
 CREATE FUNCTION pgch_type_table() RETURNS text[]
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 

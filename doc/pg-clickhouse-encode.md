@@ -1,27 +1,66 @@
 # pg-clickhouse-encode.h
 
-Encode PostgreSQL values into ClickHouse Native blocks. Include
-[pg-clickhouse.h](pg-clickhouse.md), then this header.
+Encode PostgreSQL values into ClickHouse Native blocks. See
+[setup](pg-clickhouse.md) and [header](../pg-clickhouse-encode.h).
 
-Define `PGCH_IMPLEMENTATION` in exactly one translation unit. Writer does not
-send data or execute queries; consumer chooses clickhouse-c client, socket,
-chDB stream, or in-memory destination.
+Define `PGCH_IMPLEMENTATION` in exactly one translation unit. Supply your own
+transport and query execution.
+
+## Type mapping
+
+These defaults come from `pgch_ch_type_for` for non-nullable columns.
+Types without a dedicated mapping use `String`. Domains use their base type
+and type modifier. Arrays wrap the element mapping in `Array`, with nullable
+elements; the array itself cannot be nullable. Nullable scalar columns use
+`Nullable` where ClickHouse supports it.
+
+<!-- ENCODE-TABLE-BEGIN -->
+|    PostgreSQL    |           Default ClickHouse           |                       Notes                        |
+|------------------|----------------------------------------|----------------------------------------------------|
+| boolean          | Bool                                   |                                                    |
+| smallint         | Int16                                  |                                                    |
+| integer          | Int32                                  |                                                    |
+| bigint           | Int64                                  |                                                    |
+| oid              | UInt32                                 |                                                    |
+| xid8             | UInt64                                 |                                                    |
+| oid8             | UInt64                                 |                                                    |
+| real             | Float32                                | BFloat16 drops low mantissa bits                   |
+| double precision | Float64                                |                                                    |
+| numeric          | Decimal256(38)                         | numeric_as_string selects String                   |
+| numeric(12,6)    | Decimal(12,6)                          | Precision selects Decimal width                    |
+| text             | String                                 | low_cardinality selects LowCardinality(String)     |
+| bytea            | String                                 | Writes raw bytes                                   |
+| date             | Date32                                 |                                                    |
+| time             | Time64(6)                              |                                                    |
+| timestamp        | DateTime64(6, 'UTC')                   |                                                    |
+| timestamptz      | DateTime64(6, 'UTC')                   |                                                    |
+| interval         | String                                 | Interval destinations require whole unit counts    |
+| uuid             | UUID                                   |                                                    |
+| json             | String                                 | json_as_json selects JSON                          |
+| jsonb            | String                                 | json_as_json selects JSON                          |
+| inet             | String                                 | Override with IPv4 or IPv6 matching address family |
+| point            | Point                                  |                                                    |
+| lseg             | LineString                             | Two points                                         |
+| path             | LineString                             | Closed paths repeat the first point                |
+| polygon          | Ring                                   |                                                    |
+| box              | Tuple(high Point, low Point)           |                                                    |
+| circle           | Tuple(center Point, radius Float64)    |                                                    |
+| line             | Tuple(a Float64, b Float64, c Float64) |                                                    |
+<!-- ENCODE-TABLE-END -->
+
+[Read conversions](pg-clickhouse-decode.md#type-mapping) follow separate
+rules. Reading and writing may not preserve original types or values.
+
+| Explicit destination | Conversion |
+|----------------------|------------|
+| Integer | Accept compatible integer widths |
+| `String` | Accept source type's text representation |
+| `Interval` | Interpret integers as destination unit counts |
+| Other | Accept PostgreSQL explicit casts to [destination's PostgreSQL mapping](pg-clickhouse-decode.md#type-mapping) |
+
+See [Append PostgreSQL Datums](#append-postgresql-datums) for structural conversions and value constraints.
 
 ## Create writer
-
-```c
-typedef struct pgch_col {
-    const char     *name;
-    size_t          name_len;
-    const chc_type *type;
-} pgch_col;
-
-typedef struct pgch_writer pgch_writer;
-
-pgch_writer *pgch_writer_new(MemoryContext parent,
-                             const pgch_col *cols, size_t ncols);
-void pgch_writer_free(pgch_writer *w);
-```
 
 Parse same ClickHouse declarations used by destination:
 
@@ -53,116 +92,54 @@ unsupported `LowCardinality` forms are rejected.
 
 ## Append PostgreSQL Datums
 
-```c
-void pgch_append_datum(pgch_writer *w, size_t col,
-                       Datum val, Oid valtype, bool isnull);
-void pgch_append_slot(pgch_writer *w, TupleTableSlot *slot);
-```
-
 Call `pgch_append_datum` once for every column in every row. Column order
-within row does not matter. `valtype` must describe `val`. This is the only
-value-append entry point; per-type conversion lives inside writer.
+within row does not matter. Pass source type OID as `valtype`; writer handles
+conversion.
 
 For PostgreSQL arrays, pass actual array OID. To pass `pgch_array`, use
-`ANYARRAYOID`. Writer accepts compatible integer widths and PostgreSQL
-explicit casts into destination PostgreSQL mapping. ClickHouse String-like
-destinations also accept source type output representation. Missing
-conversion raises `ERRCODE_DATATYPE_MISMATCH`.
+`ANYARRAYOID`. Missing conversion raises `ERRCODE_DATATYPE_MISMATCH`.
 
-A `Map` takes an array of pairs, each pair an array of key and value, so a
-two-dimensional `text[]` fills one. A `Nested` takes the same shape over its
-fields. A `Tuple` takes one array of its fields.
-One array carries one element type while fields take their own, so a text
-item parses through the field type's input function.
+Pass a `Tuple` as an array of fields. Pass a `Map` as a two-dimensional array
+of key/value pairs, or `Nested` as an array of rows. Text elements are parsed
+as destination field types.
 
 `bytea` values map to ClickHouse `String` and `FixedString` without text
 conversion. `json` and `jsonb` map to `JSON`, `Object`, or `String`.
-`FixedString` pads short values with NUL and raises
-`ERRCODE_STRING_DATA_RIGHT_TRUNCATION` on longer ones, as ClickHouse rejects
-them too. `Enum` takes text matching a declared name. `numeric` scales to
-destination `Decimal`, and values exceeding its width raise instead of
-wrapping. `inet` family must match `IPv4` or `IPv6`.
+`FixedString` pads short values with NUL and rejects longer values. `Enum`
+requires a declared label. `numeric` scales to destination `Decimal` and
+rejects overflow. `inet` family must match `IPv4` or `IPv6`.
 
-`interval` conversion raises `ERRCODE_DATETIME_VALUE_OUT_OF_RANGE` when it'd
-be lossy, such as when converting 18 months into an IntervalYear.
+`interval` conversion rejects precision loss, such as 18 months written as
+`IntervalYear`. `Float32` and `Float64` accept NaN and Infinity; `Decimal`
+rejects them.
 
-NULL requires nullable destination. NULL passed to non-nullable destination
-raises `ERRCODE_NOT_NULL_VIOLATION`, subject to array policy below.
+NULL requires a nullable destination, except for arrays handled by policy below.
 
 `pgch_append_slot` appends one row from slot. It skips dropped and generated
 attributes, matching `pgch_structure_from_tupdesc`. Build writer from same
-descriptor and options to preserve positional alignment.
-
-## Intermediate array representations
-
-```c
-Datum pgch_array_from_pg(Datum arr, Oid elemtype,
-                         int16 typlen, bool typbyval, char typalign);
-```
-
-`pgch_append_datum` converts PostgreSQL arrays automatically. Use
-`pgch_array_from_pg` when consumer already caches element type metadata:
-
-```c
-Datum value = pgch_array_from_pg(array, elemtype,
-                                 typlen, typbyval, typalign);
-pgch_append_datum(writer, col, value, ANYARRAYOID, false);
-```
-
-Return value is allocated in `CurrentMemoryContext`.
+descriptor and options to preserve column order.
 
 ## NULL arrays
 
-```c
-typedef enum pgch_null_array {
-    PGCH_NULL_ARRAY_ERROR = 0,
-    PGCH_NULL_ARRAY_EMPTY,
-} pgch_null_array;
-
-void pgch_writer_set_null_array(pgch_writer *w, pgch_null_array policy);
-```
-
 Default `PGCH_NULL_ARRAY_ERROR` rejects NULL PostgreSQL arrays because
-ClickHouse cannot represent nullable `Array` value. Set
-`PGCH_NULL_ARRAY_EMPTY` to write empty array instead.
-
-NaN and Infinity reach the destination unchanged, so `Float32` and `Float64`
-take them and `Decimal` raises.
+ClickHouse cannot represent a nullable array. Call
+`pgch_writer_set_null_array(w, PGCH_NULL_ARRAY_EMPTY)` to write an empty array
+instead.
 
 ## Recover from row errors
 
-```c
-pgch_checkpoint checkpoint = {};
+Zero-initialize `pgch_checkpoint`. Call `pgch_writer_checkpoint` before
+appending each row. Saving again replaces previous position. Successful
+appends need no further checkpoint calls.
 
-pgch_writer_checkpoint(pgch_writer *w, pgch_checkpoint *checkpoint);
-pgch_writer_rollback(pgch_writer *w, const pgch_checkpoint *checkpoint);
-pgch_checkpoint_free(pgch_checkpoint *checkpoint);
-```
-
-Initialize checkpoint to zero before first use. Save checkpoint before appending
-each row. If append succeeds, no other call is needed. Saving again replaces
-previous saved position.
-
-If append fails, roll back to remove everything written since checkpoint. This
-also restores nested arrays, tuples, low-cardinality values, and NULL state.
-Writer keeps allocated memory and conversion information for later rows.
+If append fails, call `pgch_writer_rollback` to discard everything written
+since checkpoint.
 
 Save checkpoints only at row boundaries, with no array or tuple open. Resetting
 writer or rolling back invalidates all saved checkpoints. Call
 `pgch_checkpoint_free` when checkpoint is no longer needed.
 
 ## Append arrays and tuples manually
-
-```c
-void pgch_array_begin(pgch_writer *w, size_t col);
-void pgch_array_end(pgch_writer *w);
-void pgch_tuple_begin(pgch_writer *w, size_t col);
-void pgch_tuple_end(pgch_writer *w);
-bool pgch_nest_active(const pgch_writer *w);
-
-chc_kind pgch_column_kind(const pgch_writer *w, size_t col);
-uint32_t pgch_column_datetime64_scale(const pgch_writer *w, size_t col);
-```
 
 Open array, append one value per element, then close array:
 
@@ -174,7 +151,7 @@ pgch_array_end(writer);
 ```
 
 Open tuple, append one value per field left to right, then close tuple.
-`pgch_tuple_end` raises unless every field took a value:
+`pgch_tuple_end` requires a value for every field:
 
 ```c
 pgch_tuple_begin(writer, col);
@@ -183,56 +160,19 @@ pgch_append_datum(writer, 0, Int64GetDatum(count), INT8OID, false);
 pgch_tuple_end(writer);
 ```
 
-Nest both calls freely. `Map(K, V)` writes as `Array(Tuple(K, V))`, and
-`Nested(fields)` as `Array(Tuple(fields))`:
-
-```c
-pgch_array_begin(writer, col);
-for (size_t i = 0; i < npairs; i++) {
-    pgch_tuple_begin(writer, 0);
-    pgch_append_datum(writer, 0, keys[i], TEXTOID, false);
-    pgch_append_datum(writer, 0, Int64GetDatum(vals[i]), INT8OID, false);
-    pgch_tuple_end(writer);
-}
-pgch_array_end(writer);
-```
+Nest these calls as needed. Write `Map(K, V)` as `Array(Tuple(K, V))` and
+`Nested(fields)` as `Array(Tuple(fields))`.
 
 While either context is active, `pgch_append_datum` ignores `col` and targets
-current array element or tuple field. `pgch_column_kind` returns that target's
-kind and returns `CHC_STRING` for `LowCardinality(String)`.
-`pgch_column_datetime64_scale` returns `DateTime64` or `Time64` scale, zero for
-other types; use it with `pgch_pow10` to see what precision a value keeps.
+current array element or tuple field.
 
 Close every context before building block.
 
 ## Inspect and write buffered rows
 
-```c
-size_t pgch_writer_rows(const pgch_writer *w);
-size_t pgch_writer_bytes(const pgch_writer *w);
-
-const chc_block_builder *pgch_writer_build(pgch_writer *w);
-void pgch_writer_reset(pgch_writer *w);
-void pgch_writer_flush(pgch_writer *w, pgch_buf *out,
-                       const chc_block_opts *opts);
-```
-
 `pgch_writer_rows` returns first column row count.
 `pgch_writer_bytes` returns buffered bytes across all columns. Use these to
 choose block boundary.
-
-`pgch_writer_build` returns block builder referencing writer buffers. Use it
-before `pgch_writer_reset`. Reset releases built block and empties buffers
-while retaining capacity.
-
-```c
-const chc_block_builder *block = pgch_writer_build(writer);
-
-if (chc_block_write(&io, block, &opts, &err) != CHC_OK)
-    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
-
-pgch_writer_reset(writer);
-```
 
 `pgch_writer_flush` appends serialized block to `pgch_buf`, then resets writer
 after a successful write. Pass `NULL` options to use `pgch_block_opts_local`.
@@ -244,3 +184,7 @@ pgch_writer_flush(writer, &out, NULL);
 send_native(out.data, out.len);
 pgch_buf_reset(&out);
 ```
+
+For another output destination, pass `pgch_writer_build` to `chc_block_write`.
+Built block borrows writer buffers; finish writing before calling
+`pgch_writer_reset`. Reset empties buffers and keeps storage for reuse.

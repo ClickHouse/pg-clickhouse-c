@@ -1,6 +1,6 @@
--- Build the ClickHouse to PostgreSQL type table of README
+-- Build decoder and encoder type tables in doc/
 -- gen_type_table.awk splices the marked block of this test's expected
--- output into README, so the table needs no database to regenerate
+-- output into documentation, so the table needs no database to regenerate
 --
 -- Probe every type name the parser resolves
 -- New types reach the table or omitted list automatically
@@ -23,73 +23,148 @@ SELECT r[1] AS "Omitted", r[2] AS "Reason" FROM pgch_rows(pgch_type_omitted()) t
 
 \echo TYPE-TABLE-BEGIN
 TYPE-TABLE-BEGIN
-SELECT r[1] AS "ClickHouse", r[2] AS "PostgreSQL", r[3] AS "Notes"
+SELECT r[1] AS "ClickHouse", r[2] AS "Default PostgreSQL",
+       r[3] AS "Additional read targets", r[4] AS "Notes"
     FROM pgch_rows(pgch_type_table()) t(r);
-+------------------------------+-----------------------------+----------------------------------+
-|          ClickHouse          |         PostgreSQL          |              Notes               |
-+------------------------------+-----------------------------+----------------------------------+
-| Array(T)                     | T[]                         | One PG array type per depth      |
-| BFloat16                     | real                        | Write drops low mantissa bits    |
-| Bool                         | boolean                     |                                  |
-| Date                         | date                        |                                  |
-| Date32                       | date                        |                                  |
-| DateTime                     | timestamp with time zone    |                                  |
-| DateTime64(P)                | timestamp(P) with time zone | P over 6 caps at 6               |
-| Decimal(P,S)                 | numeric(P,S)                |                                  |
-| Decimal32(S)                 | numeric(9,S)                |                                  |
-| Decimal64(S)                 | numeric(18,S)               |                                  |
-| Decimal128(S)                | numeric(38,S)               |                                  |
-| Decimal256(S)                | numeric(76,S)               |                                  |
-| Enum8                        | text                        |                                  |
-| Enum16                       | text                        |                                  |
-| FixedString(N)               | text                        | N counts CH bytes, PG characters |
-| Float32                      | real                        |                                  |
-| Float64                      | double precision            |                                  |
-| IPv4                         | inet                        |                                  |
-| IPv6                         | inet                        |                                  |
-| Int8                         | smallint                    |                                  |
-| Int16                        | smallint                    |                                  |
-| Int32                        | integer                     |                                  |
-| Int64                        | bigint                      |                                  |
-| Int128                       | numeric(39,0)               |                                  |
-| Int256                       | numeric(77,0)               |                                  |
-| IntervalDay                  | interval                    |                                  |
-| IntervalHour                 | interval                    |                                  |
-| IntervalMicrosecond          | interval                    |                                  |
-| IntervalMillisecond          | interval                    |                                  |
-| IntervalMinute               | interval                    |                                  |
-| IntervalMonth                | interval                    |                                  |
-| IntervalNanosecond           | interval                    | Truncates to microsecond         |
-| IntervalQuarter              | interval                    |                                  |
-| IntervalSecond               | interval                    |                                  |
-| IntervalWeek                 | interval                    |                                  |
-| IntervalYear                 | interval                    |                                  |
-| JSON                         | jsonb                       |                                  |
-| LineString                   | path                        |                                  |
-| LowCardinality(T)            | T                           |                                  |
-| Map(K,V)                     | record[]                    | One record per pair              |
-| MultiLineString              | path[]                      |                                  |
-| MultiPolygon                 | polygon[][]                 |                                  |
-| Nested(...)                  | record[]                    | One record per nested row        |
-| Nullable(T)                  | T                           | Sets nullable on the column      |
-| Point                        | point                       |                                  |
-| Polygon                      | polygon[]                   |                                  |
-| Ring                         | polygon                     |                                  |
-| SimpleAggregateFunction(f,T) | T                           | Stores values as T               |
-| String                       | text                        |                                  |
-| Time                         | time without time zone      |                                  |
-| Time64(P)                    | time(P) without time zone   | P over 6 caps at 6               |
-| Tuple(...)                   | record                      | Pseudo type, no column takes it  |
-| UInt8                        | smallint                    |                                  |
-| UInt16                       | integer                     |                                  |
-| UInt32                       | bigint                      |                                  |
-| UInt64                       | numeric(20,0)               |                                  |
-| UInt128                      | numeric(39,0)               |                                  |
-| UInt256                      | numeric(78,0)               |                                  |
-| UUID                         | uuid                        |                                  |
-+------------------------------+-----------------------------+----------------------------------+
++------------------------------+-----------------------------+-------------------------------------------+------------------------------------------------------+
+|          ClickHouse          |     Default PostgreSQL      |          Additional read targets          |                        Notes                         |
++------------------------------+-----------------------------+-------------------------------------------+------------------------------------------------------+
+| Array(T)                     | T[]                         |                                           | One PG array type per depth                          |
+| BFloat16                     | real                        |                                           |                                                      |
+| Bool                         | boolean                     |                                           |                                                      |
+| Date                         | date                        |                                           |                                                      |
+| Date32                       | date                        |                                           |                                                      |
+| DateTime                     | timestamp with time zone    | time                                      |                                                      |
+| DateTime64(P)                | timestamp(P) with time zone | time                                      | P over 6 caps at 6                                   |
+| Decimal(P,S)                 | numeric(P,S)                | xid8, oid8                                |                                                      |
+| Decimal32(S)                 | numeric(9,S)                | xid8, oid8                                |                                                      |
+| Decimal64(S)                 | numeric(18,S)               | xid8, oid8                                |                                                      |
+| Decimal128(S)                | numeric(38,S)               | xid8, oid8                                |                                                      |
+| Decimal256(S)                | numeric(76,S)               | xid8, oid8                                |                                                      |
+| Enum8                        | text                        | bytea; input-compatible types             | Decodes label; PG enums with matching labels qualify |
+| Enum16                       | text                        | bytea; input-compatible types             | Decodes label; PG enums with matching labels qualify |
+| FixedString(N)               | text                        | bytea; input-compatible types             | Only bytea keeps trailing NULs                       |
+| Float32                      | real                        |                                           |                                                      |
+| Float64                      | double precision            |                                           |                                                      |
+| IPv4                         | inet                        |                                           |                                                      |
+| IPv6                         | inet                        |                                           |                                                      |
+| Int8                         | smallint                    | boolean                                   | Zero is false; nonzero is true                       |
+| Int16                        | smallint                    | boolean                                   | Zero is false; nonzero is true                       |
+| Int32                        | integer                     |                                           |                                                      |
+| Int64                        | bigint                      |                                           |                                                      |
+| Int128                       | numeric(39,0)               | xid8, oid8                                |                                                      |
+| Int256                       | numeric(77,0)               | xid8, oid8                                |                                                      |
+| IntervalDay                  | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalHour                 | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalMicrosecond          | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalMillisecond          | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalMinute               | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalMonth                | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalNanosecond           | interval                    | smallint, integer, bigint                 | Integers keep ns; interval truncates to us           |
+| IntervalQuarter              | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalSecond               | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalWeek                 | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalYear                 | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| JSON                         | jsonb                       | json, text, bytea; input-compatible types | jsonb normalizes document                            |
+| LineString                   | path                        | lseg                                      | lseg requires two points                             |
+| LowCardinality(T)            | T                           |                                           |                                                      |
+| Map(K,V)                     | record[]                    | composite[], T[][], text                  | One record per pair                                  |
+| MultiLineString              | path[]                      |                                           |                                                      |
+| MultiPolygon                 | polygon[][]                 |                                           |                                                      |
+| Nested(...)                  | record[]                    | composite[], T[][], text                  | One record per nested row                            |
+| Nullable(T)                  | T                           |                                           | Sets nullable on the column                          |
+| Point                        | point                       |                                           |                                                      |
+| Polygon                      | polygon[]                   |                                           |                                                      |
+| Ring                         | polygon                     | lseg                                      | lseg requires two points                             |
+| SimpleAggregateFunction(f,T) | T                           |                                           | Stores values as T                                   |
+| String                       | text                        | bytea; input-compatible types             | bytea keeps raw bytes                                |
+| Time                         | time without time zone      |                                           |                                                      |
+| Time64(P)                    | time(P) without time zone   |                                           | P over 6 caps at 6                                   |
+| Tuple(...)                   | record                      | composite, T[], text; box, circle, line   | Match field order and types                          |
+| UInt8                        | smallint                    | boolean                                   | Zero is false; nonzero is true                       |
+| UInt16                       | integer                     |                                           |                                                      |
+| UInt32                       | bigint                      |                                           |                                                      |
+| UInt64                       | numeric(20,0)               | xid8, oid8                                |                                                      |
+| UInt128                      | numeric(39,0)               | xid8, oid8                                |                                                      |
+| UInt256                      | numeric(78,0)               | xid8, oid8                                |                                                      |
+| UUID                         | uuid                        |                                           |                                                      |
++------------------------------+-----------------------------+-------------------------------------------+------------------------------------------------------+
 
 \echo TYPE-TABLE-END
 TYPE-TABLE-END
+\echo ENCODE-TABLE-BEGIN
+ENCODE-TABLE-BEGIN
+SELECT pg AS "PostgreSQL",
+       pgch_chtype(CASE WHEN pg = 'oid8'
+                       THEN coalesce(to_regtype('oid8'), 'xid8'::regtype)::text
+                       ELSE pg END, true) AS "Default ClickHouse",
+       behavior AS "Notes"
+FROM (VALUES
+    ('boolean', ''),
+    ('smallint', ''),
+    ('integer', ''),
+    ('bigint', ''),
+    ('oid', ''),
+    ('xid8', ''),
+    ('oid8', ''),
+    ('real', 'BFloat16 drops low mantissa bits'),
+    ('double precision', ''),
+    ('numeric', 'numeric_as_string selects String'),
+    ('numeric(12,6)', 'Precision selects Decimal width'),
+    ('text', 'low_cardinality selects LowCardinality(String)'),
+    ('bytea', 'Writes raw bytes'),
+    ('date', ''),
+    ('time', ''),
+    ('timestamp', ''),
+    ('timestamptz', ''),
+    ('interval', 'Interval destinations require whole unit counts'),
+    ('uuid', ''),
+    ('json', 'json_as_json selects JSON'),
+    ('jsonb', 'json_as_json selects JSON'),
+    ('inet', 'Override with IPv4 or IPv6 matching address family'),
+    ('point', ''),
+    ('lseg', 'Two points'),
+    ('path', 'Closed paths repeat the first point'),
+    ('polygon', ''),
+    ('box', ''),
+    ('circle', ''),
+    ('line', '')
+) AS types(pg, behavior);
++------------------+----------------------------------------+----------------------------------------------------+
+|    PostgreSQL    |           Default ClickHouse           |                       Notes                        |
++------------------+----------------------------------------+----------------------------------------------------+
+| boolean          | Bool                                   |                                                    |
+| smallint         | Int16                                  |                                                    |
+| integer          | Int32                                  |                                                    |
+| bigint           | Int64                                  |                                                    |
+| oid              | UInt32                                 |                                                    |
+| xid8             | UInt64                                 |                                                    |
+| oid8             | UInt64                                 |                                                    |
+| real             | Float32                                | BFloat16 drops low mantissa bits                   |
+| double precision | Float64                                |                                                    |
+| numeric          | Decimal256(38)                         | numeric_as_string selects String                   |
+| numeric(12,6)    | Decimal(12,6)                          | Precision selects Decimal width                    |
+| text             | String                                 | low_cardinality selects LowCardinality(String)     |
+| bytea            | String                                 | Writes raw bytes                                   |
+| date             | Date32                                 |                                                    |
+| time             | Time64(6)                              |                                                    |
+| timestamp        | DateTime64(6, 'UTC')                   |                                                    |
+| timestamptz      | DateTime64(6, 'UTC')                   |                                                    |
+| interval         | String                                 | Interval destinations require whole unit counts    |
+| uuid             | UUID                                   |                                                    |
+| json             | String                                 | json_as_json selects JSON                          |
+| jsonb            | String                                 | json_as_json selects JSON                          |
+| inet             | String                                 | Override with IPv4 or IPv6 matching address family |
+| point            | Point                                  |                                                    |
+| lseg             | LineString                             | Two points                                         |
+| path             | LineString                             | Closed paths repeat the first point                |
+| polygon          | Ring                                   |                                                    |
+| box              | Tuple(high Point, low Point)           |                                                    |
+| circle           | Tuple(center Point, radius Float64)    |                                                    |
+| line             | Tuple(a Float64, b Float64, c Float64) |                                                    |
++------------------+----------------------------------------+----------------------------------------------------+
+
+\echo ENCODE-TABLE-END
+ENCODE-TABLE-END
 \pset border 1
 \pset footer on

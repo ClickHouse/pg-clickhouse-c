@@ -612,25 +612,56 @@ typedef struct type_doc {
     const char* column;
     const char* note;
     const char* omit; /* Reason a mapped type is omitted */
+    const char* targets;
 } type_doc;
 
 static const type_doc type_docs[] = {
     { "AggregateFunction", NULL, "sum, Int64" },
     { "Array", "T", "Int32", "T[]", "One PG array type per depth" },
-    { "BFloat16", NULL, NULL, NULL, "Write drops low mantissa bits" },
-    { "DateTime64", "P", "3", "timestamp(P) with time zone", "P over 6 caps at 6" },
+    { "DateTime", NULL, NULL, NULL, NULL, NULL, "time" },
+    { "DateTime64",
+     "P", "3",
+     "timestamp(P) with time zone", "P over 6 caps at 6",
+     NULL, "time" },
     { "Decimal", "P,S", "9,4", "numeric(P,S)" },
     { "Decimal32", "S", "4", "numeric(9,S)" },
     { "Decimal64", "S", "4", "numeric(18,S)" },
     { "Decimal128", "S", "4", "numeric(38,S)" },
     { "Decimal256", "S", "4", "numeric(76,S)" },
-    { "Enum8", NULL, "'a' = 1" },
-    { "Enum16", NULL, "'a' = 1" },
-    { "FixedString", "N", "5", NULL, "N counts CH bytes, PG characters" },
-    { "IntervalNanosecond", NULL, NULL, NULL, "Truncates to microsecond" },
+    { "Enum8",
+     NULL, "'a' = 1",
+     NULL, "Decodes label; PG enums with matching labels qualify",
+     NULL, "bytea; input-compatible types" },
+    { "Enum16",
+     NULL, "'a' = 1",
+     NULL, "Decodes label; PG enums with matching labels qualify",
+     NULL, "bytea; input-compatible types" },
+    { "FixedString",
+     "N", "5",
+     NULL, "Only bytea keeps trailing NULs",
+     NULL, "bytea; input-compatible types" },
+    { "String",
+     NULL, NULL,
+     NULL, "bytea keeps raw bytes",
+     NULL, "bytea; input-compatible types" },
+    { "JSON",
+     NULL, NULL,
+     NULL, "jsonb normalizes document",
+     NULL, "json, text, bytea; input-compatible types" },
+    { "LineString", NULL, NULL, NULL, "lseg requires two points", NULL, "lseg" },
+    { "Ring", NULL, NULL, NULL, "lseg requires two points", NULL, "lseg" },
+    { "IntervalNanosecond",
+     NULL, NULL,
+     NULL, "Integers keep ns; interval truncates to us" },
     { "LowCardinality", "T", "String", "T" },
-    { "Map", "K,V", "String, Int64", NULL, "One record per pair" },
-    { "Nested", "...", "a Int32", NULL, "One record per nested row" },
+    { "Map",
+     "K,V", "String, Int64",
+     NULL, "One record per pair",
+     NULL, "composite[], T[][], text" },
+    { "Nested",
+     "...", "a Int32",
+     NULL, "One record per nested row",
+     NULL, "composite[], T[][], text" },
     { "Nullable", "T", "Int32", "T", "Sets nullable on the column" },
     { "Object",
      NULL, "'json'",
@@ -639,7 +670,10 @@ static const type_doc type_docs[] = {
     { "QBit", NULL, "BFloat16, 16" },
     { "SimpleAggregateFunction", "f,T", "sum, Int64", "T", "Stores values as T" },
     { "Time64", "P", "3", "time(P) without time zone", "P over 6 caps at 6" },
-    { "Tuple", "...", "Int32, String", NULL, "Pseudo type, no column takes it" },
+    { "Tuple",
+     "...", "Int32, String",
+     NULL, "Match field order and types",
+     NULL, "composite, T[], text; box, circle, line" },
     { "Variant", NULL, "Int32, String" },
 };
 
@@ -734,11 +768,25 @@ scan_type(type_scan* s, const char* name) {
     if (doc && doc->column) {
         cell = doc->column;
     }
+    const char* targets = doc && doc->targets ? doc->targets : "";
+    const char* note    = doc && doc->note ? doc->note : "";
+    if (strncmp(name, "Interval", 8) == 0) {
+        targets = "smallint, integer, bigint";
+        if (!*note) {
+            note = "Integers receive unit counts";
+        }
+    } else if (strcmp(cell, "smallint") == 0) {
+        targets = "boolean";
+        note    = "Zero is false; nonzero is true";
+    } else if (strncmp(cell, "numeric", 7) == 0) {
+        targets = "xid8, oid8";
+    }
     s->rows[s->nrows++] = psprintf(
-        "%s\t%s\t%s",
+        "%s\t%s\t%s\t%s",
         params ? psprintf("%s(%s)", name, params) : name,
         cell,
-        doc && doc->note ? doc->note : ""
+        targets,
+        note
     );
 }
 

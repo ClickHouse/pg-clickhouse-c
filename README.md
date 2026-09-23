@@ -1,18 +1,13 @@
 # pg-clickhouse-c
 
-Turn a ClickHouse Native block into PostgreSQL `Datum`s and back.
+Convert ClickHouse Native blocks to PostgreSQL `Datum`s and back.
 
-clickhouse-c is used for Native format over a caller-supplied `chc_io`.
-This library supplies the PostgreSQL half: `palloc` behind `chc_alloc`,
-`chc_err` mapped onto `ereport`, CH types mapped onto PG type OIDs, and
-of course `Datum` construction.
-
-Nothing here opens a socket, runs a query, or knows whether bytes came
-from a ClickHouse server, `clickhouse local`, or an embedded [chDB].
+Built on [clickhouse-c], with PostgreSQL memory allocation, errors, and type
+conversion. Supply your own transport and query execution.
 
 ## Quickstart
 
-Encode PG values into one Native block:
+Encode PostgreSQL values into one Native block:
 
 ```c
 /* Compile both implementations in one translation unit */
@@ -35,19 +30,12 @@ pgch_writer *w = pgch_writer_new(CurrentMemoryContext, &col, 1);
 for (int i = 0; i < nrows; i++)
     pgch_append_datum(w, 0, values[i], INT4ARRAYOID, nulls[i]);
 
-/* Serialize block into memory */
 pgch_buf out = {};
-chc_io io;
-pgch_buf_io(&out, &io);
-
-chc_block_opts opts = {};   /* Use local framing for chDB and clickhouse-local */
-if (chc_block_write(&io, pgch_writer_build(w), &opts, &err) != CHC_OK)
-    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
-
-pgch_writer_reset(w);       /* out now contains serialized block */
+pgch_writer_flush(w, &out, NULL);
+/* Send out.data and out.len to destination */
 ```
 
-Decode Native bytes into rows, driving block supply yourself:
+Supply decoded blocks through a callback:
 
 ```c
 /* Transfer each returned block to reader */
@@ -76,92 +64,22 @@ if (r.error)
 pgch_reader_free(&r);
 ```
 
-`r.values[i]` typed by `r.coltypes[i]`, which is OID `pgch_datum_oid` assigns
-to column's CH type. Array and Tuple columns arrive as intermediate
-representations rather than PG values, String, FixedString, Enum and JSON
-arrive as `bytea`, and Interval arrives as `bigint` count of its unit:
-`pgch_convert` turns those into a real PG array, record, text, document or
-interval once target type known. `text` targets are verified against database
-encoding, with `r.encoding_check` deciding how invalid encoding bytes are
-handled. `text` from `FixedString` drops trailing NULs.
+Convert decoded values to target PostgreSQL types before use. Strings arrive
+as `bytea`; arrays and tuples use intermediate representations.
 
-```c
-/* Build conversion state outside row context */
-void *cs = pgch_reader_convert_init(&r, i, target_oid, target_typmod);
-
-/* Convert each row, NULL state passes Datum through */
-values[i] = pgch_convert(cs, r.values[i]);
-```
-
-A complete working consumer, wired to nothing but memory, lives in
-[test/pgch_test.c](test/pgch_test.c).
+See [reader example](doc/pg-clickhouse-decode.md#complete-reader-example)
+for row conversion and [tests](test/pgch_test.c) for a working consumer.
 
 Use `pgch_pg_type_for` to build PostgreSQL column metadata from a type parsed
 with `chc_type_parse`.
 
-## Wiring to chDB
-
-chDB streams Native bytes in both directions, so the seams are
-`chdb_stream_append` on the way out and a `chc_io` over
-`chdb_stream_fetch_result` on the way in. Declare the table structure with the
-CH types you mean (`Array(Int64)`, not `String`), then parse those same type
-names for the writer.
-
-Out, one block per `pgch_writer_bytes` cut:
-
-```c
-void *stream = chdb_stream_insert(conn, query, "Native");
-
-/* Append one row */
-for (int i = 0; i < natts; i++)
-    pgch_append_datum(w, i, values[i], atttypids[i], nulls[i]);
-
-/* Flush one block */
-pgch_buf buf = {};
-chc_io io;
-pgch_buf_io(&buf, &io);
-if (chc_block_write(&io, pgch_writer_build(w), &opts, &err) != CHC_OK)
-    pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
-if (chdb_stream_append(stream, (char *) buf.data, buf.len) != CHDBSuccess)
-    ereport(ERROR, ...);
-pgch_writer_reset(w);
-pgch_buf_reset(&buf);
-```
-
-In, a `chc_io.read` that pulls chunks and copies out of them, with
-`chc_block_read` handling assembly across chunk boundaries:
-
-```c
-static int
-chdb_read(void *ud, void *buf, size_t len, size_t *out_n, chc_err *err) {
-    my_stream *s = ud;
-
-    /* Fetch next chunk after consuming current chunk */
-    if (s->cursor == s->len) {
-        CHECK_FOR_INTERRUPTS();
-        chdb_result *chunk = chdb_stream_fetch_result(s->conn, s->result);
-        /* Check error, read buffer and length, report zero length as end */
-    }
-    *out_n = Min(len, s->len - s->cursor);
-    memcpy(buf, s->data + s->cursor, *out_n);
-    s->cursor += *out_n;
-    return CHC_OK;
-}
-```
-
-Then `chc_in_init` over that `chc_io`, `chc_block_read` inside the block
-source, and `pgch_reader` on top: rows come out as `Datum`s ready for
-`heap_form_tuple`, so the text-`COPY` parse on the PG side disappears along
-with its escaping.
-
 ## Integration
 
-PG14+. One TU defines `PGCH_IMPLEMENTATION` before including.
+Requires PostgreSQL 14 or later. Define `PGCH_IMPLEMENTATION` in one
+translation unit.
 
-clickhouse-c is vendored here at `clickhouse-c/`, pinned to a commit these
-headers compile against. It has no stable API, so take that pin rather than a
-second checkout: clickhouse-c types are in this library's own signatures, and
-two copies on the include path means whichever lands first wins silently.
+Use vendored `clickhouse-c/`. Its API is unstable, so another version on your
+include path may be incompatible.
 
 ```make
 PGCH_DIR = vendor/pg-clickhouse-c
@@ -171,15 +89,14 @@ CH_C_DIR = $(PGCH_DIR)/clickhouse-c
 PG_CPPFLAGS = -isystem $(CH_C_DIR) -isystem $(PGCH_DIR)
 ```
 
-One submodule, cloned recursively:
+Add as a submodule:
 
 ```sh
 git submodule add https://github.com/ClickHouse/pg-clickhouse-c vendor/pg-clickhouse-c
 git submodule update --init --recursive
 ```
 
-`PGCH_MSG_PREFIX` prefixes every message the library raises. Define it in the
-build, not in a single TU, so every TU expanding `pgch_error` agrees:
+Set `PGCH_MSG_PREFIX` in build flags to prefix library errors consistently:
 
 ```make
 PG_CPPFLAGS += -DPGCH_MSG_PREFIX='"pg_chdb: "'
@@ -189,80 +106,17 @@ PG_CPPFLAGS += -DPGCH_MSG_PREFIX='"pg_chdb: "'
 
 | Header | Consumer API |
 |---|---|
-| [`pg-clickhouse.h`](doc/pg-clickhouse.md) | Errors, allocation, type mappings, query settings, intermediate representations, byte buffers |
-| [`pg-clickhouse-decode.h`](doc/pg-clickhouse-decode.md) | Block and chunk sources, row reader, target-type conversion |
-| [`pg-clickhouse-encode.h`](doc/pg-clickhouse-encode.md) | Writer lifecycle, Datum appends, arrays, block output |
+| [`pg-clickhouse.h`](doc/pg-clickhouse.md) | Setup, errors, memory, schemas, query settings |
+| [`pg-clickhouse-decode.h`](doc/pg-clickhouse-decode.md) | Read blocks or byte chunks and convert rows |
+| [`pg-clickhouse-encode.h`](doc/pg-clickhouse-encode.md) | Convert rows and write blocks |
 
-Decode and encode each depend only on the core header; take one or both.
+Include decoder, encoder, or both. Each includes core header.
 
 ## Type mapping
 
-`pgch_pg_type_for` maps a parsed ClickHouse type onto a PostgreSQL column. Every
-name the parser resolves reaches this table or the omitted list `test/sql/type_table.sql`.
-
-<!-- TYPE-TABLE-BEGIN -->
-|          ClickHouse          |         PostgreSQL          |              Notes               |
-|------------------------------|-----------------------------|----------------------------------|
-| Array(T)                     | T[]                         | One PG array type per depth      |
-| BFloat16                     | real                        | Write drops low mantissa bits    |
-| Bool                         | boolean                     |                                  |
-| Date                         | date                        |                                  |
-| Date32                       | date                        |                                  |
-| DateTime                     | timestamp with time zone    |                                  |
-| DateTime64(P)                | timestamp(P) with time zone | P over 6 caps at 6               |
-| Decimal(P,S)                 | numeric(P,S)                |                                  |
-| Decimal32(S)                 | numeric(9,S)                |                                  |
-| Decimal64(S)                 | numeric(18,S)               |                                  |
-| Decimal128(S)                | numeric(38,S)               |                                  |
-| Decimal256(S)                | numeric(76,S)               |                                  |
-| Enum8                        | text                        |                                  |
-| Enum16                       | text                        |                                  |
-| FixedString(N)               | text                        | N counts CH bytes, PG characters |
-| Float32                      | real                        |                                  |
-| Float64                      | double precision            |                                  |
-| IPv4                         | inet                        |                                  |
-| IPv6                         | inet                        |                                  |
-| Int8                         | smallint                    |                                  |
-| Int16                        | smallint                    |                                  |
-| Int32                        | integer                     |                                  |
-| Int64                        | bigint                      |                                  |
-| Int128                       | numeric(39,0)               |                                  |
-| Int256                       | numeric(77,0)               |                                  |
-| IntervalDay                  | interval                    |                                  |
-| IntervalHour                 | interval                    |                                  |
-| IntervalMicrosecond          | interval                    |                                  |
-| IntervalMillisecond          | interval                    |                                  |
-| IntervalMinute               | interval                    |                                  |
-| IntervalMonth                | interval                    |                                  |
-| IntervalNanosecond           | interval                    | Truncates to microsecond         |
-| IntervalQuarter              | interval                    |                                  |
-| IntervalSecond               | interval                    |                                  |
-| IntervalWeek                 | interval                    |                                  |
-| IntervalYear                 | interval                    |                                  |
-| JSON                         | jsonb                       |                                  |
-| LineString                   | path                        |                                  |
-| LowCardinality(T)            | T                           |                                  |
-| Map(K,V)                     | record[]                    | One record per pair              |
-| MultiLineString              | path[]                      |                                  |
-| MultiPolygon                 | polygon[][]                 |                                  |
-| Nested(...)                  | record[]                    | One record per nested row        |
-| Nullable(T)                  | T                           | Sets nullable on the column      |
-| Point                        | point                       |                                  |
-| Polygon                      | polygon[]                   |                                  |
-| Ring                         | polygon                     |                                  |
-| SimpleAggregateFunction(f,T) | T                           | Stores values as T               |
-| String                       | text                        |                                  |
-| Time                         | time without time zone      |                                  |
-| Time64(P)                    | time(P) without time zone   | P over 6 caps at 6               |
-| Tuple(...)                   | record                      | Pseudo type, no column takes it  |
-| UInt8                        | smallint                    |                                  |
-| UInt16                       | integer                     |                                  |
-| UInt32                       | bigint                      |                                  |
-| UInt64                       | numeric(20,0)               |                                  |
-| UInt128                      | numeric(39,0)               |                                  |
-| UInt256                      | numeric(78,0)               |                                  |
-| UUID                         | uuid                        |                                  |
-<!-- TYPE-TABLE-END -->
+- [Read targets and conversions](doc/pg-clickhouse-decode.md#type-mapping)
+- [Write defaults and conversions](doc/pg-clickhouse-encode.md#type-mapping)
+- [chDB integration](doc/chdb.md)
 
 ## Testing
 
@@ -285,14 +139,12 @@ sudo make -C test install PG_CONFIG="$(which pg_config)"
 make -C test installcheck
 make -C test installcheck REGRESS_OPTS='--no-locale --encoding=SQL_ASCII'
 make -C test installcheck REGRESS_OPTS='--no-locale --encoding=EUC_KR'
+pg_ctl -D /tmp/pgch stop
 make -C test coverage-report
 ```
 
-Counters land beside `test/pgch_test.o` and sum across runs, so report after
-the last one. Backends write them as the server's user, which a packaged
-cluster leaves neither reachable nor readable. Stop test clusters before
-reporting, a killed backend loses its counters
+Run test server as your build user so coverage counters remain writable.
+Counters accumulate across runs. Stop test server normally before reporting;
+killed backends lose their counters.
 
 [clickhouse-c]: https://github.com/ClickHouse/clickhouse-c
-[pg_clickhouse]: https://github.com/ClickHouse/pg_clickhouse
-[chDB]: https://github.com/chdb-io/chdb
