@@ -1,37 +1,104 @@
 # pg-clickhouse-decode.h
 
-Decode ClickHouse Native blocks into PostgreSQL Datums. Include
-[pg-clickhouse.h](pg-clickhouse.md), then this header.
+Decode ClickHouse Native blocks into PostgreSQL Datums. See
+[setup](pg-clickhouse.md) and [header](../pg-clickhouse-decode.h).
 
 Define `PGCH_IMPLEMENTATION` in exactly one translation unit. Define
 `CHC_IMPLEMENTATION` in same translation unit when using chunk source API.
 
-## Decode one value
+## Type mapping
 
-```c
-Datum pgch_read_value(const chc_column *col, const chc_type *type,
-                      uint64_t row, Oid *valtype, bool *is_null);
-```
+Default PostgreSQL types come from `pgch_pg_type_for`. `record` and
+`record[]` describe anonymous composites, which cannot define table columns.
+Consumers choose a concrete fallback, such as `text[]` for `Tuple` and
+`text[][]` for `Map` and `Nested`.
 
-Pass wire column, matching ClickHouse type, and row index. Function returns
-PostgreSQL Datum, writes returned type OID to `*valtype`, and sets
-`*is_null`.
+Additional read targets list conversions beyond PostgreSQL explicit casts.
+An empty cell still allows those casts. Values must fit target types.
+Array elements convert individually; domains also enforce their constraints.
+`Nullable` and `LowCardinality` use inner type conversions.
 
-`String`, `FixedString`, `Enum`, `JSON` and `Object` decode to `bytea`, leaving
-text and document parsing to `pgch_convert`. `Interval` decodes to `int8`
-count of its unit, leaving unit to `pgch_convert`.
+[Write conversions](pg-clickhouse-encode.md#type-mapping) follow separate
+rules. Reading and writing may not preserve original types or values.
 
-Returned variable-length values are allocated with `palloc`. Unsupported types
-raise `ERRCODE_FDW_INVALID_DATA_TYPE`.
+<!-- TYPE-TABLE-BEGIN -->
+|          ClickHouse          |     Default PostgreSQL      |          Additional read targets          |                        Notes                         |
+|------------------------------|-----------------------------|-------------------------------------------|------------------------------------------------------|
+| Array(T)                     | T[]                         |                                           | One PG array type per depth                          |
+| BFloat16                     | real                        |                                           |                                                      |
+| Bool                         | boolean                     |                                           |                                                      |
+| Date                         | date                        |                                           |                                                      |
+| Date32                       | date                        |                                           |                                                      |
+| DateTime                     | timestamp with time zone    | time                                      |                                                      |
+| DateTime64(P)                | timestamp(P) with time zone | time                                      | P over 6 caps at 6                                   |
+| Decimal(P,S)                 | numeric(P,S)                | xid8, oid8                                |                                                      |
+| Decimal32(S)                 | numeric(9,S)                | xid8, oid8                                |                                                      |
+| Decimal64(S)                 | numeric(18,S)               | xid8, oid8                                |                                                      |
+| Decimal128(S)                | numeric(38,S)               | xid8, oid8                                |                                                      |
+| Decimal256(S)                | numeric(76,S)               | xid8, oid8                                |                                                      |
+| Enum8                        | text                        | bytea; input-compatible types             | Decodes label; PG enums with matching labels qualify |
+| Enum16                       | text                        | bytea; input-compatible types             | Decodes label; PG enums with matching labels qualify |
+| FixedString(N)               | text                        | bytea; input-compatible types             | Only bytea keeps trailing NULs                       |
+| Float32                      | real                        |                                           |                                                      |
+| Float64                      | double precision            |                                           |                                                      |
+| IPv4                         | inet                        |                                           |                                                      |
+| IPv6                         | inet                        |                                           |                                                      |
+| Int8                         | smallint                    | boolean                                   | Zero is false; nonzero is true                       |
+| Int16                        | smallint                    | boolean                                   | Zero is false; nonzero is true                       |
+| Int32                        | integer                     |                                           |                                                      |
+| Int64                        | bigint                      |                                           |                                                      |
+| Int128                       | numeric(39,0)               | xid8, oid8                                |                                                      |
+| Int256                       | numeric(77,0)               | xid8, oid8                                |                                                      |
+| IntervalDay                  | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalHour                 | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalMicrosecond          | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalMillisecond          | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalMinute               | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalMonth                | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalNanosecond           | interval                    | smallint, integer, bigint                 | Integers keep ns; interval truncates to us           |
+| IntervalQuarter              | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalSecond               | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalWeek                 | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| IntervalYear                 | interval                    | smallint, integer, bigint                 | Integers receive unit counts                         |
+| JSON                         | jsonb                       | json, text, bytea; input-compatible types | jsonb normalizes document                            |
+| LineString                   | path                        | lseg                                      | lseg requires two points                             |
+| LowCardinality(T)            | T                           |                                           |                                                      |
+| Map(K,V)                     | record[]                    | composite[], T[][], text                  | One record per pair                                  |
+| MultiLineString              | path[]                      |                                           |                                                      |
+| MultiPolygon                 | polygon[][]                 |                                           |                                                      |
+| Nested(...)                  | record[]                    | composite[], T[][], text                  | One record per nested row                            |
+| Nullable(T)                  | T                           |                                           | Sets nullable on the column                          |
+| Point                        | point                       |                                           |                                                      |
+| Polygon                      | polygon[]                   |                                           |                                                      |
+| Ring                         | polygon                     | lseg                                      | lseg requires two points                             |
+| SimpleAggregateFunction(f,T) | T                           |                                           | Stores values as T                                   |
+| String                       | text                        | bytea; input-compatible types             | bytea keeps raw bytes                                |
+| Time                         | time without time zone      |                                           |                                                      |
+| Time64(P)                    | time(P) without time zone   |                                           | P over 6 caps at 6                                   |
+| Tuple(...)                   | record                      | composite, T[], text; box, circle, line   | Match field order and types                          |
+| UInt8                        | smallint                    | boolean                                   | Zero is false; nonzero is true                       |
+| UInt16                       | integer                     |                                           |                                                      |
+| UInt32                       | bigint                      |                                           |                                                      |
+| UInt64                       | numeric(20,0)               | xid8, oid8                                |                                                      |
+| UInt128                      | numeric(39,0)               | xid8, oid8                                |                                                      |
+| UInt256                      | numeric(78,0)               | xid8, oid8                                |                                                      |
+| UUID                         | uuid                        |                                           |                                                      |
+<!-- TYPE-TABLE-END -->
 
-Geo types decode to geometric Datums: `Point` to `point`, `Ring` to `polygon`,
-`LineString` to `path`, closed when its first point repeats, and `Polygon`,
-`MultiLineString` and `MultiPolygon` to `pgch_array` over those. An empty ring
-or line decodes as NULL, PostgreSQL having no pointless polygon or path.
+Input-compatible types parse text through their PostgreSQL input function.
+This includes PostgreSQL enums whose labels match ClickHouse Enum labels.
+`bytea` preserves raw bytes; other targets drop trailing NUL padding.
+Text targets apply configured encoding policy. JSON arrives as a document string.
 
-Function trusts array offsets and LowCardinality keys, so pass columns that
-passed `chc_column_validate`. Most consumers should use `pgch_reader` instead of
-calling `pgch_read_value` directly.
+For composite targets, match field order and types. `T[]` spreads tuple fields
+into array elements when each field converts to `T` and no field is an array.
+`Map` and `Nested` add an outer array dimension. Nested arrays must be
+rectangular. A `text` target renders a PostgreSQL record or array literal.
+Geometric tuple targets require matching coordinate shapes: two points for
+`box`, a point and radius for `circle`, and three coefficients for `line`.
+
+Empty rings and lines decode as NULL because PostgreSQL polygons and paths
+require at least one point.
 
 ## Supply decoded blocks
 
@@ -54,18 +121,8 @@ return message. `error` must be callable before first block, after every
 Reader runs `chc_column_validate` on every column of every block, so source
 need not repeat it. Violation sets `reader.error` and ends stream.
 
-Source still owns transport-specific recovery. Validate in source when invalid
-block must change transport state, for example when it makes connection unsafe
-to reuse:
-
-```c
-for (size_t i = 0; i < chc_block_n_columns(block); i++) {
-    chc_err err = {};
-
-    if (chc_column_validate(chc_block_column(block, i), &err) != CHC_OK)
-        report_invalid_block(&err);
-}
-```
+Handle transport recovery in your source, including discarding connections
+that cannot be reused after invalid data.
 
 ## Supply Native byte chunks
 
@@ -101,29 +158,6 @@ both `PGCH_IMPLEMENTATION` and `CHC_IMPLEMENTATION`.
 
 ## Read rows
 
-```c
-typedef struct pgch_reader {
-    pgch_block_source src;
-
-    Oid    *coltypes;
-    char  **colshapes;
-    Datum  *values;
-    bool   *nulls;
-
-    size_t  ncols;
-    size_t  row;
-    const chc_block *cur;
-    MemoryContext    cxt;
-    char   *error;
-    bool    done;
-} pgch_reader;
-
-void   pgch_reader_init(pgch_reader *r, const pgch_block_source *src);
-bool   pgch_reader_next(pgch_reader *r);
-size_t pgch_reader_columns(const pgch_reader *r);
-void   pgch_reader_free(pgch_reader *r);
-```
-
 Initialize in memory context that should own reader state and error text.
 Reader itself may be stack allocated.
 
@@ -134,17 +168,6 @@ zero columns, unsupported schema, or source failure leaves reader done. Check
 Call `pgch_reader_next` until false. Each successful call fills `values` and
 `nulls`, both `ncols` long. Consume row before next call. Reader advances
 across blocks and presents one continuous row stream.
-
-```c
-while (pgch_reader_next(&reader)) {
-    consume_row(reader.values, reader.nulls, reader.coltypes, reader.ncols);
-}
-
-if (reader.error)
-    ereport(ERROR,
-            errcode(ERRCODE_FDW_ERROR),
-            errmsg("%s", reader.error));
-```
 
 Reader rejects unsupported column types, schema changes that would alter
 returned Datum shape, and columns failing `chc_column_validate`. Those failures
@@ -158,75 +181,29 @@ range, and payload that contradicts declared type.
 pointer first when it must survive that call; storage remains valid until
 initialization memory context is reset or deleted.
 
-## Compare Datum shapes
-
-```c
-char *pgch_type_shape(const chc_type *type);
-```
-
-Returns palloc'd signature for decoded Datum shape. Use equality when caching
-conversion state across independently managed block streams.
-
 ## Convert into target PostgreSQL types
 
-```c
-void *pgch_convert_init_type(const chc_type *in, Oid outtype, int32 outtypmod, pgch_encoding_check encoding_check);
-void *pgch_reader_convert_init(const pgch_reader *r,
-                               size_t col, Oid outtype, int32 outtypmod);
+See [Type mapping](#type-mapping) for supported targets and conversion rules.
 
-Datum pgch_convert(void *state, Datum val);
-void  pgch_convert_free(void *state);
-```
+Pass target `atttypmod`, or `-1` when the target carries none. Array
+type modifiers apply to elements; pass them unchanged. Domains supply their
+own. The modifier applies as PostgreSQL applies it on assignment:
 
-Conversion supports:
+| Target | Effect |
+|--------|--------|
+| `char(n)` | Pads to length |
+| `varchar(n)` | Rejects values beyond length |
+| `numeric(p,s)` | Rounds to scale |
+| `time(n)`, `timestamp(n)` | Truncates to precision |
+| domain | Own modifier over base conversion, then constraints per element; NULL rows skip conversion, caller enforces `NOT NULL` |
 
-- `pgch_array` to PostgreSQL arrays, nested arrays must share dimensions
-  because PostgreSQL arrays are rectangular
-- `pgch_tuple` to PostgreSQL records and named composite types
-- `pgch_tuple` of coordinates to `box`, `circle` and `line`, and a decoded
-  `path` or `polygon` of two points to `lseg`, none of which PostgreSQL casts
-- `Map` as an array of two-field composites, so a target composite array with
-  matching key and value types receives it, `Nested` likewise over its fields
-- ClickHouse strings and JSON documents, which reach `bytea` unchanged and any
-  other target through its input function. The `pgch_encoding_check` parameter
-  or field of `pgch_reader` determines the handling of bytes that PostgreSQL
-  cannot read in database encoding. A `json` or `text` target keeps document
-  text as ClickHouse wrote it, where `jsonb` normalizes it
-- Trailing NUL padding, dropped whenever ClickHouse string converts into
-  non-binary PostgreSQL target
-- Explicit PostgreSQL casts between scalar types
-- `numeric` to `xid8` and `oid8`
-- `Interval` to `interval`, or its unit count unchanged into `smallint`,
-  `integer` and `bigint`, keeping nanoseconds `interval` cannot hold
-- Per-element conversion when source and target array element types differ, or
-  when the target array carries a type modifier
+Use `pgch_reader_convert_init` to prepare each column before reading rows,
+including columns containing only NULLs. Use `pgch_convert_init_type` for a
+standalone ClickHouse type.
 
-Pass target `atttypmod`, or `-1` when the target carries none. Length and
-precision then apply as PostgreSQL applies them on assignment: `char(n)` pads,
-`varchar(n)` rejects overlong values, `numeric(p,s)` rounds and
-`timestamp(n)` truncates. A domain supplies its own typmod. An array column's
-typmod belongs to its elements, so pass it unchanged.
-
-When the target is a domain, conversion first produces the domain's base type,
-then checks the domain constraints. The same applies to elements in an array of
-domains. NULL rows are not converted, so callers must enforce a domain's NOT
-NULL constraint
-
-Prefer `pgch_reader_convert_init` when reader and target tuple descriptor are
-available. It prepares conversion from schema before reading rows, including
-columns whose first or every value is NULL:
-
-```c
-void **states = palloc0(reader.ncols * sizeof(*states));
-
-for (size_t i = 0; i < reader.ncols; i++)
-    states[i] = pgch_reader_convert_init(&reader, i,
-                                         TupleDescAttr(desc, i)->atttypid,
-                                         TupleDescAttr(desc, i)->atttypmod);
-```
-
-`pgch_convert_init_type` provides same behavior for standalone ClickHouse
-type. Decoded `pgch_array` and `pgch_tuple` carry theirs in `type`.
+Set `reader.encoding_check` before preparing conversions to control invalid
+text handling. Default policy raises an error. See `pgch_encoding_check` in
+[header](../pg-clickhouse-decode.h) for alternatives.
 
 All initialization functions allocate state in `CurrentMemoryContext`. Build
 state in context that outlives row loop. They return `NULL` when no conversion
@@ -236,27 +213,14 @@ associated allocations.
 
 ## Fill target row
 
-```c
-void pgch_reader_fill(const pgch_reader *r, void **states,
-                      Datum *values, bool *nulls);
-void pgch_reader_fill_map(const pgch_reader *r, void **states,
-                          const int *dest, Datum *values, bool *nulls);
-```
-
-Convert current reader row into caller arrays. `values`, `nulls`, and optional
+Use `pgch_reader_fill` to convert current row into caller arrays.
+`values`, `nulls`, and optional
 `states` must each hold `r->ncols` entries. Pass `NULL` for `states`, or use
 `NULL` entries for columns requiring no conversion.
 
-```c
-while (pgch_reader_next(&reader)) {
-    pgch_reader_fill(&reader, states, values, nulls);
-    slot = heap_form_tuple(desc, values, nulls);
-}
-```
-
-`pgch_reader_fill_map` writes column `i` to `dest[i]` instead, for a target
-holding attributes no stream column feeds. Positions outside `dest` keep
-whatever the caller left there, so fill them, or preset their `nulls` entry:
+`pgch_reader_fill_map` writes column `i` to `dest[i]`. Allocate output arrays
+for all destination attributes. Unmapped positions stay unchanged; initialize
+them before filling:
 
 ```c
 memset(slot->tts_isnull, true, desc->natts * sizeof(bool));
@@ -264,19 +228,8 @@ pgch_reader_fill_map(&reader, states, attnums,
                      slot->tts_values, slot->tts_isnull);
 ```
 
-## Render values as text
-
-```c
-char *pgch_value_to_cstring(const chc_type *type, Datum value,
-                            pgch_encoding_check encoding_check);
-```
-
-Return palloc'd text representation for value decoded from `type`, rendered as
-PostgreSQL type `pgch_native_oid` names. Function also handles
-`pgch_array` and `pgch_tuple` intermediate representations. It renders every
-ClickHouse string as text, so `encoding_check` decides the handling of bytes
-PostgreSQL cannot read in database encoding. Convert to `bytea` to keep those
-bytes.
+For text output, use `pgch_value_to_cstring`. It handles intermediate arrays
+and tuples and applies your encoding policy. Use `bytea` to preserve raw bytes.
 
 ## Complete reader example
 

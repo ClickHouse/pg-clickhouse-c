@@ -1,7 +1,7 @@
 #!/usr/bin/awk -f
 # Table comes from the expected output of the type_table regression test
 #
-# usage: gen_type_table.awk [markdown-file]
+# usage: gen_type_table.awk [-v section=ENCODE] [markdown-file]
 
 function die(msg) {
     print "gen_type_table: " msg > "/dev/stderr"
@@ -10,12 +10,15 @@ function die(msg) {
 
 BEGIN {
     src = "test/expected/type_table.out"
+    if (section == "") section = "TYPE"
+    begin = section "-TABLE-BEGIN"
+    end = section "-TABLE-END"
 
     # psql echoes table between markers, convert to markdown table
     while ((getline line < src) > 0) {
-        if (line ~ /^TYPE-TABLE-END$/) break
+        if (line == end) break
         if (!inside) {
-            inside = line ~ /^TYPE-TABLE-BEGIN$/
+            inside = line == begin
             continue
         }
         if (line ~ /^\+/ && ++rules == 2) gsub(/\+/, "|", line)
@@ -32,8 +35,8 @@ BEGIN {
     }
 }
 
-/TYPE-TABLE-BEGIN/ { doc = doc $0 "\n" table "\n"; spliced = 1; skip = 1; next }
-/TYPE-TABLE-END/ { skip = 0 }
+index($0, begin) { doc = doc $0 "\n" table "\n"; spliced = 1; skip = 1; next }
+index($0, end) { skip = 0 }
 !skip { doc = doc $0 "\n" }
 
 END {

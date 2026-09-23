@@ -104,11 +104,12 @@ jobs:
           pipx run clang-format==22.1.8 --dry-run --Werror \
             pg-clickhouse*.h test/pgch_test.c
 
-  readme:
+  docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Type table of README is current
+      - name: Type tables are current
         run: |
-          ./gen_type_table.awk README.md
-          git diff --exit-code -- README.md
+          ./gen_type_table.awk doc/pg-clickhouse-decode.md
+          ./gen_type_table.awk -v section=ENCODE doc/pg-clickhouse-encode.md
+          git diff --exit-code -- doc/
