@@ -51,3 +51,10 @@ FROM (VALUES
 
 -- Allow trailing NUL padding in FixedString even when invalid bytes cause errors
 SELECT pgch_decode(pgch_encode('FixedString(5)', '\x6162'::bytea)) AS fail;
+
+-- Validate the encoding_check parser.
+SELECT x, pgch_encoding_check_enum(x::text) AS num
+FROM   (
+     VALUES ('fail'), ('replace'), ('truncate'), ('remove'), ('nonesuch'),
+            ('Fail'), ('TRUNCATE'), ('rePlaCe'), ('removE'), ('noneSuch')
+) x(x);

@@ -70,6 +70,31 @@ typedef enum pgch_encoding_check {
 } pgch_encoding_check;
 
 /*
+ * Parse the name of an encoding check from val into out. Returns false on
+ * failure. Matches "replace", "remove", "truncate", and "fail"
+ * case-insensitively.
+ */
+static bool
+pgch_parse_encoding_check(const char* val, pgch_encoding_check* out);
+
+/* Map an encoding_check option value to pgch_encoding_check. */
+static bool
+pgch_parse_encoding_check(const char* val, pgch_encoding_check* out) {
+    if (pg_strcasecmp(val, "replace") == 0) {
+        *out = CHC_ENC_REPLACE;
+    } else if (pg_strcasecmp(val, "remove") == 0) {
+        *out = CHC_ENC_REMOVE;
+    } else if (pg_strcasecmp(val, "truncate") == 0) {
+        *out = CHC_ENC_TRUNCATE;
+    } else if (pg_strcasecmp(val, "fail") == 0) {
+        *out = CHC_ENC_FAIL;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/*
  * Read rows from block stream
  * Consume values before next pgch_reader_next call
  */

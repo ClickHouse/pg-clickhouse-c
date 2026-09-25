@@ -68,3 +68,23 @@ SELECT pgch_decode(pgch_encode('FixedString(5)', '\x6162'::bytea)) AS fail;
  {ab}
 (1 row)
 
+-- Validate the encoding_check parser.
+SELECT x, pgch_encoding_check_enum(x::text) AS num
+FROM   (
+     VALUES ('fail'), ('replace'), ('truncate'), ('remove'), ('nonesuch'),
+            ('Fail'), ('TRUNCATE'), ('rePlaCe'), ('removE'), ('noneSuch')
+) x(x);
+    x     | num 
+----------+-----
+ fail     |   0
+ replace  |   3
+ truncate |   1
+ remove   |   2
+ nonesuch |    
+ Fail     |   0
+ TRUNCATE |   1
+ rePlaCe  |   3
+ removE   |   2
+ noneSuch |    
+(10 rows)
+
