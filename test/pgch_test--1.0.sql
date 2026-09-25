@@ -114,3 +114,6 @@ CREATE FUNCTION pgch_decode_typed_decl(data bytea, ch_type text,
 
 CREATE FUNCTION pgch_fault_probe(what text) RETURNS text
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
+
+CREATE FUNCTION pgch_encoding_check_enum(text) RETURNS INT
+    AS 'MODULE_PATHNAME' LANGUAGE c STRICT;

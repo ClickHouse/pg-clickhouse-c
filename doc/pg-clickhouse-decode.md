@@ -203,7 +203,9 @@ standalone ClickHouse type.
 
 Set `reader.encoding_check` before preparing conversions to control invalid
 text handling. Default policy raises an error. See `pgch_encoding_check` in
-[header](../pg-clickhouse-decode.h) for alternatives.
+[header](../pg-clickhouse-decode.h) for alternatives. Use
+`pgch_parse_encoding_check` to parse a string into a valid
+`reader.encoding_check` value.
 
 All initialization functions allocate state in `CurrentMemoryContext`. Build
 state in context that outlives row loop. They return `NULL` when no conversion

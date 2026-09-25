@@ -1503,3 +1503,16 @@ pgch_decode_typed_decl(PG_FUNCTION_ARGS) {
 
     PG_RETURN_DATUM(makeArrayResult(out, CurrentMemoryContext));
 }
+
+PG_FUNCTION_INFO_V1(pgch_encoding_check_enum);
+
+Datum
+pgch_encoding_check_enum(PG_FUNCTION_ARGS) {
+    char* decl = text_to_cstring(PG_GETARG_TEXT_PP(0));
+    pgch_encoding_check value;
+    bool ok = pgch_parse_encoding_check(decl, &value);
+    if (ok) {
+        PG_RETURN_INT16(value);
+    }
+    PG_RETURN_NULL();
+}
