@@ -624,7 +624,6 @@ pgch__read_enum(const chc_column* col, const chc_type* type, uint64_t row) {
     return pgch__bytes_datum("", 0);
 }
 
-/* Nullable LowCardinality reserves dictionary entry zero for NULL */
 static Datum
 pgch__read_lc(
     const chc_column* col,
@@ -662,29 +661,9 @@ pgch__read_lc(
         pgch_errorf(ERRCODE_FDW_ERROR, "unexpected LowCardinality key size %d", ks);
     }
 
-    const chc_column* dict  = chc_column_lc_dict(col);
-    const chc_type* inner_t = chc_type_child(type, 0);
-
-    if (chc_type_kind(inner_t) == CHC_NULLABLE &&
-        chc_column_layout(dict) == CHC_COL_NULLABLE) {
-        const uint8_t* dnm = chc_column_null_map(dict);
-
-        if (dnm && dnm[k]) {
-            *valtype = BYTEAOID;
-            *is_null = true;
-            return (Datum)0;
-        }
-        dict = chc_column_nullable_inner(dict);
-    }
-
-    *valtype = BYTEAOID;
-    *is_null = false;
-    if (chc_column_layout(dict) != CHC_COL_STRING) {
-        pgch_error(
-            ERRCODE_FDW_INVALID_DATA_TYPE, "unsupported LowCardinality inner type"
-        );
-    }
-    return pgch__read_string(dict, k);
+    return pgch_read_value(
+        chc_column_lc_dict(col), chc_type_child(type, 0), k, valtype, is_null
+    );
 }
 
 /*
@@ -1175,18 +1154,8 @@ pgch__check_type(const chc_type* type) {
     case CHC_VOID:
     case CHC_NOTHING:
         return NULL;
-    case CHC_LOW_CARDINALITY: {
-        const chc_type* inner = chc_type_child(type, 0);
-
-        /* ClickHouse nests Nullable inside LowCardinality */
-        if (chc_type_kind(inner) == CHC_NULLABLE) {
-            inner = chc_type_child(inner, 0);
-        }
-        if (chc_type_kind(inner) != CHC_STRING) {
-            return "unsupported LowCardinality inner type";
-        }
-        return NULL;
-    }
+    case CHC_LOW_CARDINALITY:
+        return pgch__check_type(chc_type_child(type, 0));
     case CHC_ARRAY: {
         const chc_type* leaf;
         int ndim;

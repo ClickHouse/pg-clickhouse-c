@@ -204,6 +204,23 @@ SELECT pgch_roundtrip_rows('Nullable(Int32)', ARRAY[1, NULL, 3]::int4[]),
        pgch_roundtrip_rows('LowCardinality(Nullable(String))',
                            ARRAY['a', NULL, 'a', 'b']::text[]);
 
+-- Round-trip LowCardinality over non-String inner types
+SELECT pgch_roundtrip_rows('LowCardinality(FixedString(2))',
+                           ARRAY['ab', 'cd', 'ab']::text[]),
+       pgch_roundtrip_rows('LowCardinality(Nullable(FixedString(2)))',
+                           ARRAY['ab', NULL, 'ab']::text[]),
+       pgch_roundtrip_rows('LowCardinality(Int32)', ARRAY[1, 2, 1]::int4[]),
+       pgch_roundtrip_rows('LowCardinality(Nullable(Float64))',
+                           ARRAY[1.5, NULL, 1.5]::float8[]);
+
+SELECT pgch_roundtrip_rows('LowCardinality(Date)',
+                           ARRAY['2024-01-15', '2024-01-15']::date[]),
+       pgch_roundtrip_rows('LowCardinality(Nullable(UUID))',
+                           ARRAY[NULL, '11111111-2222-3333-4444-555555555555']::uuid[]),
+       pgch_roundtrip_rows('LowCardinality(IPv4)', ARRAY['10.0.0.1', '10.0.0.1']::inet[]),
+       pgch_roundtrip_rows('LowCardinality(UInt64)',
+                           ARRAY[18446744073709551615, 0]::numeric[]);
+
 -- Round-trip arrays and nested arrays
 SELECT pgch_roundtrip('Array(Int32)', ARRAY[1, 2, 3]::int4[]),
        pgch_roundtrip('Array(Int32)', ARRAY[]::int4[]),

@@ -90,8 +90,6 @@ SELECT pgch_reader_probe('read_empty_tuple');
 ERROR:  pgch: returned tuple is empty
 SELECT pgch_reader_probe('read_lc_key_size');
 ERROR:  pgch: unexpected LowCardinality key size 3
-SELECT pgch_reader_probe('read_lc_inner');
-ERROR:  pgch: unsupported LowCardinality inner type
 SELECT pgch_reader_probe('read_decimal_width');
 ERROR:  pgch: decimal too wide
 SELECT pgch_reader_probe('read_wide_width');

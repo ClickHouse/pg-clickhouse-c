@@ -222,6 +222,7 @@ struct pgch__node {
     Oid target;
     pgch__cast* cast;
     pgch__arrmeta* arrmeta;
+    chc_column col;
     union {
         struct {
             pgch_buf data;
@@ -251,9 +252,9 @@ struct pgch__node {
         } tuple;
 
         struct {
-            pgch_buf data;
-            pgch_buf offs;
             pgch_buf null_map;
+            pgch__node* values;
+            chc_column dict;
             bool inner_nullable;
         } lc;
     };
@@ -387,15 +388,18 @@ pgch__node_new(const chc_type* t) {
         bool inner_nullable   = chc_type_kind(inner) == CHC_NULLABLE;
         const chc_type* base  = inner_nullable ? chc_type_child(inner, 0) : inner;
 
-        if (chc_type_kind(base) != CHC_STRING) {
+        n->layout            = CHC_COL_LOW_CARDINALITY;
+        n->lc.inner_nullable = inner_nullable;
+        n->lc.values         = pgch__node_new(base);
+        /* Dictionary deduplicates flat values */
+        if (n->lc.values->layout != CHC_COL_FIXED &&
+            n->lc.values->layout != CHC_COL_STRING) {
             pgch_errorf(
                 ERRCODE_FDW_INVALID_DATA_TYPE,
                 "unsupported LowCardinality variant: %s",
                 chc_type_name(base, NULL)
             );
         }
-        n->layout            = CHC_COL_LOW_CARDINALITY;
-        n->lc.inner_nullable = inner_nullable;
         return n;
     }
     case CHC_STRING:
@@ -529,6 +533,8 @@ pgch__node_count(const pgch__node* n) {
     switch (n->layout) {
     case CHC_COL_NULLABLE:
         return count + pgch__node_count(n->nullable.inner);
+    case CHC_COL_LOW_CARDINALITY:
+        return count + pgch__node_count(n->lc.values);
     case CHC_COL_ARRAY:
         return count + pgch__node_count(n->array.values);
     case CHC_COL_TUPLE:
@@ -538,7 +544,6 @@ pgch__node_count(const pgch__node* n) {
         return count;
     case CHC_COL_FIXED:
     case CHC_COL_STRING:
-    case CHC_COL_LOW_CARDINALITY:
         return count;
     case CHC_COL_NOTHING:
         pg_unreachable();
@@ -577,9 +582,8 @@ pgch__checkpoint_node(
         }
         return;
     case CHC_COL_LOW_CARDINALITY:
-        checkpoint->data    = n->lc.data.len;
-        checkpoint->offsets = n->lc.offs.len;
-        checkpoint->nulls   = n->lc.null_map.len;
+        checkpoint->nulls = n->lc.null_map.len;
+        pgch__checkpoint_node(n->lc.values, entries, pos);
         return;
     case CHC_COL_NOTHING:
         pg_unreachable();
@@ -613,9 +617,8 @@ pgch__rollback_node(pgch__node* n, const pgch__node_checkpoint* entries, size_t*
         }
         return;
     case CHC_COL_LOW_CARDINALITY:
-        n->lc.data.len     = checkpoint->data;
-        n->lc.offs.len     = checkpoint->offsets;
         n->lc.null_map.len = checkpoint->nulls;
+        pgch__rollback_node(n->lc.values, entries, pos);
         return;
     case CHC_COL_NOTHING:
         pg_unreachable();
@@ -753,9 +756,12 @@ pgch__resolve_leaf(pgch_writer* w, size_t col, bool isnull) {
         nullable = true;
         node     = node->nullable.inner;
     }
-    if (node->layout == CHC_COL_LOW_CARDINALITY && node->lc.inner_nullable) {
-        pgch_buf_append(&node->lc.null_map, &b, 1);
-        nullable = true;
+    if (node->layout == CHC_COL_LOW_CARDINALITY) {
+        if (node->lc.inner_nullable) {
+            pgch_buf_append(&node->lc.null_map, &b, 1);
+            nullable = true;
+        }
+        node = node->lc.values;
     }
     if (isnull && !nullable) {
         pgch__null_violation(w, col);
@@ -1042,11 +1048,6 @@ pgch__append_bytes(pgch_writer* w, size_t col, const void* p, size_t n, bool isn
     pgch__node* node  = pgch__resolve_leaf(w, col, isnull);
 
     switch (node->layout) {
-    case CHC_COL_LOW_CARDINALITY:
-        pgch__append_row_offs(
-            &node->lc.data, &node->lc.offs, isnull ? NULL : p, isnull ? 0 : n
-        );
-        break;
     case CHC_COL_STRING:
         if (isnull && node->str.is_json) {
             /* ClickHouse validates JSON values even when null map marks NULL */
@@ -1096,7 +1097,7 @@ pgch__node_rows(const pgch__node* n) {
     case CHC_COL_TUPLE:
         return pgch__node_rows(n->tuple.children[0]);
     case CHC_COL_LOW_CARDINALITY:
-        return pgch__offs_len(&n->lc.offs);
+        return pgch__node_rows(n->lc.values);
     case CHC_COL_NOTHING:
         pg_unreachable();
     }
@@ -1210,8 +1211,10 @@ pgch_column_kind(const pgch_writer* w, size_t col) {
     if (node->layout == CHC_COL_NULLABLE) {
         node = node->nullable.inner;
     }
-    /* LowCardinality(String) takes the values a String column takes */
-    return node->layout == CHC_COL_LOW_CARDINALITY ? CHC_STRING : node->kind;
+    if (node->layout == CHC_COL_LOW_CARDINALITY) {
+        node = node->lc.values;
+    }
+    return node->kind;
 }
 
 uint32_t
@@ -2078,25 +2081,30 @@ typedef struct pgch_lcd_entry {
 #define SH_DEFINE
 #include "lib/simplehash.h"
 
-static void
-pgch__build_lc_dict(
-    const pgch__node* node,
-    uint64_t** out_dict_offs,
-    uint8_t** out_dict_data,
-    size_t* out_dict_n,
-    void** out_keys,
-    int* out_key_size,
-    size_t* out_n_rows
-) {
-    bool nullable            = node->lc.inner_nullable;
-    const uint64_t* row_offs = pgch__offs_data(&node->lc.offs);
-    size_t n_rows            = pgch__offs_len(&node->lc.offs);
-    uint64_t* dict_offs      = NULL;
-    uint8_t* dict_data       = NULL;
-    uint32_t* keys           = n_rows ? palloc(n_rows * sizeof(uint32_t)) : NULL;
-    size_t dict_n            = 0;
-    size_t dict_cap          = 0;
-    size_t data_len          = 0;
+static pgch_lcd_key
+pgch__lc_row(const pgch__node* v, size_t row) {
+    if (v->layout == CHC_COL_FIXED) {
+        size_t es = v->fixed.elem_size;
+
+        return (pgch_lcd_key){ v->fixed.data.data + row * es, es };
+    }
+
+    const uint64_t* offs = pgch__offs_data(&v->str.offs);
+    uint64_t start       = row == 0 ? 0 : offs[row - 1];
+
+    return (pgch_lcd_key){ v->str.data.data + start, (size_t)(offs[row] - start) };
+}
+
+static chc_column
+pgch__finalize_lc(pgch__node* node) {
+    const pgch__node* v = node->lc.values;
+    bool nullable       = node->lc.inner_nullable;
+    bool fixed          = v->layout == CHC_COL_FIXED;
+    size_t n_rows       = pgch__node_rows(v);
+    uint32_t* keys      = n_rows ? palloc(n_rows * sizeof(uint32_t)) : NULL;
+    uint32_t dict_n     = 0;
+    pgch_buf data       = {};
+    pgch_buf offs       = {};
     pgch_lcd_hash* ht =
         n_rows
             ? pgch_lcd_create(
@@ -2106,123 +2114,84 @@ pgch__build_lc_dict(
 
     if (nullable) {
         /* ClickHouse reserves dictionary entry zero for NULL */
-        dict_cap     = 8;
-        dict_offs    = palloc(dict_cap * sizeof(uint64_t));
-        dict_offs[0] = 0;
-        dict_n       = 1;
+        if (fixed) {
+            pgch_buf_append_zero(&data, v->fixed.elem_size);
+        } else {
+            pgch__offs_push(&offs, 0);
+        }
+        dict_n = 1;
     }
 
     for (size_t i = 0; i < n_rows; i++) {
-        uint64_t start       = i == 0 ? 0 : row_offs[i - 1];
-        uint64_t end         = row_offs[i];
-        size_t len           = (size_t)(end - start);
-        const uint8_t* bytes = node->lc.data.data + start;
-        pgch_lcd_key k       = { bytes, len };
-
         if (nullable && node->lc.null_map.data[i]) {
             keys[i] = 0;
             continue;
         }
 
         bool found;
+        pgch_lcd_key k        = pgch__lc_row(v, i);
         pgch_lcd_entry* entry = pgch_lcd_insert(ht, k, &found);
-        if (found) {
-            keys[i] = entry->idx;
-            continue;
+        if (!found) {
+            entry->idx = dict_n++;
+            if (fixed) {
+                pgch_buf_append(&data, k.bytes, k.len);
+            } else {
+                pgch__append_row_offs(&data, &offs, k.bytes, k.len);
+            }
         }
-
-        if (dict_n == dict_cap) {
-            dict_cap  = dict_cap ? dict_cap * 2 : 64;
-            dict_offs = dict_offs ? repalloc(dict_offs, dict_cap * sizeof(uint64_t))
-                                  : palloc(dict_cap * sizeof(uint64_t));
-        }
-        data_len += len;
-        dict_offs[dict_n] = data_len;
-        entry->idx        = (uint32)dict_n;
-        keys[i]           = (uint32)dict_n;
-        dict_n++;
-    }
-
-    if (data_len) {
-        pgch_lcd_iterator it;
-        pgch_lcd_entry* e;
-
-        dict_data = MemoryContextAllocHuge(CurrentMemoryContext, data_len);
-        pgch_lcd_start_iterate(ht, &it);
-        while ((e = pgch_lcd_iterate(ht, &it)) != NULL) {
-            uint64_t s = e->idx == 0 ? 0 : dict_offs[e->idx - 1];
-
-            memcpy(dict_data + s, e->key.bytes, e->key.len);
-        }
+        keys[i] = entry->idx;
     }
     if (ht) {
         pgch_lcd_destroy(ht);
     }
-    *out_dict_offs = dict_offs;
-    *out_dict_data = dict_data;
-    *out_dict_n    = dict_n;
-    *out_keys      = keys;
-    *out_key_size  = 4;
-    *out_n_rows    = n_rows;
-}
 
-static inline chc_column*
-pgch__col_node(chc_column v) {
-    chc_column* n = palloc(sizeof(*n));
-
-    *n = v;
-    return n;
+    node->lc.dict = fixed ? chc_build_fixed(data.data, v->fixed.elem_size, dict_n)
+                          : chc_build_string(pgch__offs_data(&offs), data.data, dict_n);
+    return chc_build_lc(4, keys, n_rows, &node->lc.dict);
 }
 
 static chc_column*
 pgch__finalize_node(pgch__node* n) {
     switch (n->layout) {
     case CHC_COL_FIXED:
-        return pgch__col_node(
-            chc_build_fixed(n->fixed.data.data, n->fixed.elem_size, pgch__node_rows(n))
-        );
+        n->col =
+            chc_build_fixed(n->fixed.data.data, n->fixed.elem_size, pgch__node_rows(n));
+        break;
     case CHC_COL_STRING:
-        return pgch__col_node(chc_build_string(
+        n->col = chc_build_string(
             pgch__offs_data(&n->str.offs),
             n->str.data.data,
             pgch__offs_len(&n->str.offs)
-        ));
+        );
+        break;
     case CHC_COL_NULLABLE:
-        return pgch__col_node(chc_build_nullable(
+        n->col = chc_build_nullable(
             n->nullable.null_map.data, pgch__finalize_node(n->nullable.inner)
-        ));
+        );
+        break;
     case CHC_COL_ARRAY:
-        return pgch__col_node(chc_build_array(
+        n->col = chc_build_array(
             pgch__offs_data(&n->array.offs),
             pgch__offs_len(&n->array.offs),
             pgch__finalize_node(n->array.values)
-        ));
+        );
+        break;
     case CHC_COL_TUPLE: {
         chc_column** children = palloc(n->tuple.arity * sizeof(*children));
 
         for (size_t i = 0; i < n->tuple.arity; i++) {
             children[i] = pgch__finalize_node(n->tuple.children[i]);
         }
-        return pgch__col_node(chc_build_tuple(children, n->tuple.arity));
+        n->col = chc_build_tuple(children, n->tuple.arity);
+        break;
     }
-    case CHC_COL_LOW_CARDINALITY: {
-        size_t dict_n, n_rows;
-        int key_size;
-        uint64_t* lc_offs;
-        uint8_t* lc_data;
-        void* lc_keys;
-
-        pgch__build_lc_dict(
-            n, &lc_offs, &lc_data, &dict_n, &lc_keys, &key_size, &n_rows
-        );
-        chc_column* dict = pgch__col_node(chc_build_string(lc_offs, lc_data, dict_n));
-
-        return pgch__col_node(chc_build_lc(key_size, lc_keys, n_rows, dict));
-    }
+    case CHC_COL_LOW_CARDINALITY:
+        n->col = pgch__finalize_lc(n);
+        break;
     case CHC_COL_NOTHING:
         pg_unreachable();
     }
-    pg_unreachable();
+    return &n->col;
 }
 
 static size_t
@@ -2245,7 +2214,7 @@ pgch__node_bytes(const pgch__node* n) {
         return total;
     }
     case CHC_COL_LOW_CARDINALITY:
-        return n->lc.data.len + n->lc.offs.len + n->lc.null_map.len;
+        return n->lc.null_map.len + pgch__node_bytes(n->lc.values);
     case CHC_COL_NOTHING:
         pg_unreachable();
     }
@@ -2276,9 +2245,8 @@ pgch__reset_node(pgch__node* n) {
         }
         return;
     case CHC_COL_LOW_CARDINALITY:
-        pgch_buf_reset(&n->lc.data);
-        pgch_buf_reset(&n->lc.offs);
         pgch_buf_reset(&n->lc.null_map);
+        pgch__reset_node(n->lc.values);
         return;
     case CHC_COL_NOTHING:
         pg_unreachable();

@@ -23,7 +23,7 @@ SELECT pgch_roundtrip('Decimal(18,0)', 99999999999999999999::numeric);
 
 -- Reject unsupported encoder types
 SELECT pgch_encode('Tuple(Int32)', ROW(1)::record);
-SELECT pgch_encode('LowCardinality(Int32)', 1::int4);
+SELECT pgch_encode('LowCardinality(Array(Int32))', ARRAY[1]::int4[]);
 SELECT pgch_encode('Array(Dynamic)', ARRAY[1]::int4[]);
 
 -- Reject Tuple targets with incompatible shape
@@ -70,7 +70,7 @@ SELECT pgch_decode(pgch_block('Nested(a Dynamic)', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('SimpleAggregateFunction(anyLast, Dynamic)', 0,
                               ''::bytea));
 SELECT pgch_decode(pgch_block('Array(Nothing)', 0, ''::bytea));
-SELECT pgch_decode(pgch_block('LowCardinality(Int32)', 0, ''::bytea));
+SELECT pgch_decode(pgch_block('LowCardinality(Dynamic)', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('Array(Dynamic)', 0, ''::bytea));
 SELECT pgch_decode(pgch_block('Tuple(Int32, Map(String, Dynamic))', 0, ''::bytea));
 -- Identify unnamed columns by position
@@ -194,9 +194,6 @@ SELECT pgch_roundtrip('Point', '{1,2,3}'::line);
 
 -- Reject timestamps outside the scaled DateTime64 range
 SELECT pgch_roundtrip('DateTime64(9)', '9999-01-01'::timestamptz);
-
--- Reject LowCardinality dictionaries that hold anything but String
-SELECT pgch_decode(pgch_block('LowCardinality(FixedString(2))', 0, ''::bytea));
 
 -- Reject targets with no conversion from the column type
 SELECT pgch_decode_as(pgch_encode('Int32', 1::int4), NULL::point);

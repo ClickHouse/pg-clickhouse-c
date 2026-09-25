@@ -54,7 +54,6 @@ SELECT pgch_decode_chunks(pgch_encode_rows('Int32', ARRAY[1, 2]::int4[]), 4,
 -- Reject columns whose shape the wire cannot spell
 SELECT pgch_reader_probe('read_empty_tuple');
 SELECT pgch_reader_probe('read_lc_key_size');
-SELECT pgch_reader_probe('read_lc_inner');
 SELECT pgch_reader_probe('read_decimal_width');
 SELECT pgch_reader_probe('read_wide_width');
 SELECT pgch_reader_probe('read_decimal_scale');

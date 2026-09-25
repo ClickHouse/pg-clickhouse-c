@@ -31,8 +31,8 @@ ERROR:  pgch: value "99999999999999999999" out of range for ClickHouse Decimal(1
 -- Reject unsupported encoder types
 SELECT pgch_encode('Tuple(Int32)', ROW(1)::record);
 ERROR:  pgch: cannot encode record into ClickHouse Tuple(Int32) (column "c")
-SELECT pgch_encode('LowCardinality(Int32)', 1::int4);
-ERROR:  pgch: unsupported LowCardinality variant: Int32
+SELECT pgch_encode('LowCardinality(Array(Int32))', ARRAY[1]::int4[]);
+ERROR:  pgch: unsupported LowCardinality variant: Array(Int32)
 SELECT pgch_encode('Array(Dynamic)', ARRAY[1]::int4[]);
 ERROR:  pgch: unsupported column type: Dynamic
 -- Reject Tuple targets with incompatible shape
@@ -97,8 +97,8 @@ SELECT pgch_decode(pgch_block('SimpleAggregateFunction(anyLast, Dynamic)', 0,
 ERROR:  decode: unsupported column type "Dynamic" (column "c")
 SELECT pgch_decode(pgch_block('Array(Nothing)', 0, ''::bytea));
 ERROR:  decode: no PG array type for column type "Nothing" (column "c")
-SELECT pgch_decode(pgch_block('LowCardinality(Int32)', 0, ''::bytea));
-ERROR:  decode: unsupported LowCardinality inner type (column "c")
+SELECT pgch_decode(pgch_block('LowCardinality(Dynamic)', 0, ''::bytea));
+ERROR:  decode: unsupported column type "Dynamic" (column "c")
 SELECT pgch_decode(pgch_block('Array(Dynamic)', 0, ''::bytea));
 ERROR:  decode: unsupported column type "Dynamic" (column "c")
 SELECT pgch_decode(pgch_block('Tuple(Int32, Map(String, Dynamic))', 0, ''::bytea));
@@ -271,9 +271,6 @@ ERROR:  pgch: cannot encode line into ClickHouse Point (column "c")
 -- Reject timestamps outside the scaled DateTime64 range
 SELECT pgch_roundtrip('DateTime64(9)', '9999-01-01'::timestamptz);
 ERROR:  pgch: timestamp out of range for DateTime64(9)
--- Reject LowCardinality dictionaries that hold anything but String
-SELECT pgch_decode(pgch_block('LowCardinality(FixedString(2))', 0, ''::bytea));
-ERROR:  decode: unsupported LowCardinality inner type (column "c")
 -- Reject targets with no conversion from the column type
 SELECT pgch_decode_as(pgch_encode('Int32', 1::int4), NULL::point);
 ERROR:  pgch: could not cast value from integer to point

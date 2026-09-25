@@ -1447,17 +1447,6 @@ pgch_reader_probe(PG_FUNCTION_ARGS) {
             &valtype,
             &isnull
         );
-    } else if (strcmp(what, "read_lc_inner") == 0) {
-        chc_column dict = chc_build_fixed(raw, 2, 1);
-        chc_column col  = chc_build_lc(4, raw, 1, &dict);
-
-        pgch_read_value(
-            &col,
-            parse_ch_type_cstr("LowCardinality(FixedString(2))", NULL),
-            0,
-            &valtype,
-            &isnull
-        );
     } else if (strcmp(what, "read_decimal_width") == 0) {
         /* Columns off the wire carry a width the digit formatter can take */
         chc_column col = chc_build_fixed(raw, 5, 1);
