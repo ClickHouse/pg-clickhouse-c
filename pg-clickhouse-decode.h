@@ -1913,7 +1913,10 @@ pgch__checked_text(pgch_encoding_check check, Datum val) {
 
     int oklen = pg_encoding_verifymbstr(encoding, p, (int)len);
     if ((int)len == oklen) {
-        return len == width ? val : pgch__bytes_datum(p, len);
+        if (len < width) {
+            SET_VARSIZE(b, VARHDRSZ + len);
+        }
+        return val;
     }
 
     switch (check) {
@@ -1951,6 +1954,14 @@ pgch__checked_text(pgch_encoding_check check, Datum val) {
 static Datum
 pgch__convert_text(pgch_convert_state* state, Datum val) {
     return pgch__checked_text(state->encoding_check, val);
+}
+
+/* varchar and bpchar share text's layout, leaving only length to enforce */
+static Datum
+pgch__convert_text_typmod(pgch_convert_state* state, Datum val) {
+    return pgch__cast_call(
+        &state->tmflinfo, pgch__convert_text(state, val), state->typmod, false
+    );
 }
 
 static Datum
@@ -2289,6 +2300,10 @@ pgch__convert_init(
 
             if (baseTypeId == TEXTOID) {
                 state->func = pgch__convert_text;
+            } else if (baseTypeId == VARCHAROID || baseTypeId == BPCHAROID) {
+                state->func = pgch__init_typmod_coerce(state)
+                                  ? pgch__convert_text_typmod
+                                  : pgch__convert_text;
             } else {
                 Oid typinput;
 
