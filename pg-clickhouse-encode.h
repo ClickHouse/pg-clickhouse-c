@@ -70,7 +70,7 @@ pgch_checkpoint_free(pgch_checkpoint* checkpoint);
  * Append PostgreSQL value to column
  * Pass value OID in valtype, or ANYARRAYOID for pgch_array
  * Append exactly one value to every column in each row
- * Map uses an array of key-value pairs, Tuple uses an array of fields
+ * Map uses an array of key-value pairs, Tuple uses a composite or array of fields
  */
 extern void
 pgch_append_datum(pgch_writer* w, size_t col, Datum val, Oid valtype, bool isnull);
@@ -153,6 +153,7 @@ pgch_writer_flush(pgch_writer* w, pgch_buf* out, const chc_block_opts* opts);
 #include <string.h>
 #include <sys/socket.h> /* PostgreSQL inet macros require AF_INET */
 
+#include "access/htup_details.h"
 #include "catalog/pg_type_d.h"
 #include "common/hashfn.h"
 #include "common/int.h"
@@ -170,6 +171,7 @@ pgch_writer_flush(pgch_writer* w, pgch_buf* out, const chc_block_opts* opts);
 #include "utils/memutils.h"
 #include "utils/numeric.h"
 #include "utils/timestamp.h"
+#include "utils/typcache.h"
 #include "utils/uuid.h"
 #if PG_VERSION_NUM >= 190000
 #include "varatt.h"
@@ -211,6 +213,7 @@ typedef struct pgch__cast {
 /* Cache element metadata of last PostgreSQL array type appended to a column */
 typedef struct pgch__arrmeta {
     Oid valtype;
+    bool rowtype;
     ArrayMetaState meta;
 } pgch__arrmeta;
 
@@ -1543,6 +1546,8 @@ pgch__append_one(
                 get_typlenbyvalalign(
                     ms->element_type, &ms->typlen, &ms->typbyval, &ms->typalign
                 );
+            } else {
+                am->rowtype = type_is_rowtype(valtype);
             }
         }
         if (OidIsValid(ms->element_type)) {
@@ -1550,6 +1555,33 @@ pgch__append_one(
                 val, ms->element_type, ms->typlen, ms->typbyval, ms->typalign
             );
             valtype = ANYARRAYOID;
+        } else if (kind == CHC_TUPLE && am->rowtype) {
+            /* Read Tuple fields from composite attributes */
+            HeapTupleHeader rec = DatumGetHeapTupleHeader(val);
+            TupleDesc desc      = lookup_rowtype_tupdesc(
+                HeapTupleHeaderGetTypeId(rec), HeapTupleHeaderGetTypMod(rec)
+            );
+            HeapTupleData tup = { .t_len  = HeapTupleHeaderGetDatumLength(rec),
+                                  .t_data = rec };
+            Datum* values     = palloc(desc->natts * sizeof(Datum));
+            bool* nulls       = palloc(desc->natts * sizeof(bool));
+
+            heap_deform_tuple(&tup, desc, values, nulls);
+            pgch_tuple_begin(w, col);
+            for (int i = 0; i < desc->natts; i++) {
+                Form_pg_attribute att = TupleDescAttr(desc, i);
+
+                if (!att->attisdropped) {
+                    pgch__append_one(
+                        w, 0, pgch_column_kind(w, 0), values[i], att->atttypid, nulls[i]
+                    );
+                }
+            }
+            pgch_tuple_end(w);
+            ReleaseTupleDesc(desc);
+            pfree(values);
+            pfree(nulls);
+            return;
         }
     }
 

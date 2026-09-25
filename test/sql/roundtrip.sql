@@ -397,15 +397,14 @@ FROM pgch_block('Array(Tuple(Int16, Decimal(10, 4)))', 1,
 
 -- Map writes and reads as Array(Tuple(K, V)), so both spellings agree
 CREATE TYPE pairformat AS (k text, v bigint);
-SELECT pgch_decode(pgch_encode_pairs('Map(String, Int64)',
-                                     ARRAY['a', 'b'], ARRAY[1, 2]::bigint[])) AS map,
-       pgch_decode(pgch_encode_pairs('Array(Tuple(String, Int64))',
-                                     ARRAY['a', 'b'], ARRAY[1, 2]::bigint[])) AS array_tuple;
-SELECT pgch_decode_as(pgch_encode_pairs('Map(String, Nullable(Int64))',
-                                        ARRAY['a', 'b'], ARRAY[1, NULL]::bigint[]),
+SELECT pgch_decode(pgch_encode('Map(String, Int64)',
+                               ARRAY[('a', 1), ('b', 2)]::pairformat[])) AS map,
+       pgch_decode(pgch_encode('Array(Tuple(String, Int64))',
+                               ARRAY[('a', 1), ('b', 2)]::pairformat[])) AS array_tuple;
+SELECT pgch_decode_as(pgch_encode('Map(String, Nullable(Int64))',
+                                  ARRAY[('a', 1), ('b', NULL)]::pairformat[]),
                       NULL::pairformat[]);
-SELECT pgch_decode(pgch_encode_pairs('Map(String, Int64)',
-                                     ARRAY[]::text[], ARRAY[]::bigint[]));
+SELECT pgch_decode(pgch_encode('Map(String, Int64)', ARRAY[]::pairformat[]));
 SELECT pgch_pgtype('Map(String, Int64)');
 -- An Array field is an unbuilt intermediate, not an array item, so its Tuple
 -- stays a record
@@ -429,30 +428,42 @@ SELECT pgch_decode_as(pgch_encode('Map(String, Int64)',
 SELECT pgch_decode_as(pgch_encode('Tuple(String, Int64)', ARRAY['a', '1']::text[]),
                       NULL::pairformat) AS tuple;
 -- Nest tuples through the cursor, Nullable wrapping the inner one
-SELECT pgch_decode(pgch_encode_pairs('Map(String, Tuple(Int64))',
-                                     ARRAY['a', 'b'], ARRAY[1, 2]::bigint[],
-                                     2, true)) AS nested,
-       pgch_decode(pgch_encode_pairs('Array(Tuple(String, Nullable(Tuple(Int64))))',
-                                     ARRAY['a', 'b'], ARRAY[1, 2]::bigint[],
-                                     2, true)) AS nullable_nested;
+SELECT pgch_decode(pgch_encode('Map(String, Tuple(Int64))',
+                               ARRAY[ROW('a', ROW(1)), ROW('b', ROW(2))])) AS nested,
+       pgch_decode(pgch_encode('Array(Tuple(String, Nullable(Tuple(Int64))))',
+                               ARRAY[ROW('a', ROW(1)), ROW('b', ROW(2))])) AS nullable_nested;
 
 -- Expand untyped Tuple fields into a text array dimension
-SELECT (pgch_decode(pgch_encode_pairs('Nested(k String, v Int64)',
-                                      ARRAY['a', 'b'], ARRAY[1, 2]::bigint[])))[1] AS nested,
-       (pgch_decode(pgch_encode_pairs('Array(Tuple(k String, v Int64))',
-                                      ARRAY['a', 'b'], ARRAY[1, 2]::bigint[])))[1] AS array_tuple;
+SELECT (pgch_decode(pgch_encode('Nested(k String, v Int64)',
+                                ARRAY[('a', 1), ('b', 2)]::pairformat[])))[1] AS nested,
+       (pgch_decode(pgch_encode('Array(Tuple(k String, v Int64))',
+                                ARRAY[('a', 1), ('b', 2)]::pairformat[])))[1] AS array_tuple;
 -- Convert both declarations into pairformat[] before rendering
-SELECT (pgch_decode_as(pgch_encode_pairs('Nested(k String, v Int64)',
-                                         ARRAY['a', 'b'], ARRAY[1, 2]::bigint[]),
+SELECT (pgch_decode_as(pgch_encode('Nested(k String, v Int64)',
+                                   ARRAY[('a', 1), ('b', 2)]::pairformat[]),
                        NULL::pairformat[]))[1] AS nested,
-       (pgch_decode_as(pgch_encode_pairs('Array(Tuple(k String, v Int64))',
-                                         ARRAY['a', 'b'], ARRAY[1, 2]::bigint[]),
+       (pgch_decode_as(pgch_encode('Array(Tuple(k String, v Int64))',
+                                   ARRAY[('a', 1), ('b', 2)]::pairformat[]),
                        NULL::pairformat[]))[1] AS array_tuple;
 -- Preserve NULL fields in composite array elements
-SELECT (pgch_decode_as(pgch_encode_pairs('Nested(k String, v Nullable(Int64))',
-                                         ARRAY['a', 'b'], ARRAY[1, NULL]::bigint[]),
+SELECT (pgch_decode_as(pgch_encode('Nested(k String, v Nullable(Int64))',
+                                   ARRAY[('a', 1), ('b', NULL)]::pairformat[]),
                        NULL::pairformat[]))[1] AS null_value;
 SELECT pgch_pgtype('Nested(k String, v Int64)');
+
+-- Read Tuple fields from composite values, skipping dropped attributes
+CREATE TYPE goal_type AS (serial int, dropped int, order_id text);
+ALTER TYPE goal_type DROP ATTRIBUTE dropped;
+SELECT pgch_roundtrip('Tuple(Int32, String)', ROW(1, 'a')) AS anonymous,
+       pgch_roundtrip('Tuple(UInt32, Nullable(String))', ROW(1, NULL)::goal_type) AS typed,
+       pgch_roundtrip('Tuple(Tuple(Int32, String), Array(Int32))',
+                      ROW(ROW(1, 'a')::goal_type, ARRAY[2, 3])) AS nested;
+SELECT pgch_roundtrip('Nested(serial UInt32, order_id String)',
+                      ARRAY[ROW(5, 'jj'), ROW(6, 'zz')]::goal_type[]) AS nested,
+       pgch_roundtrip('Map(UInt32, String)',
+                      ARRAY[ROW(5, 'jj')]::goal_type[]) AS map,
+       pgch_roundtrip_as('Nested(k String, v Int64)',
+                         ARRAY[ROW('a', 1)]::pairformat[]) AS typed;
 
 -- SimpleAggregateFunction stores values as its argument type
 SELECT pgch_roundtrip('SimpleAggregateFunction(sum, Int64)', 7::bigint) AS sum,
@@ -567,8 +578,8 @@ SELECT pgch_decode_as(pgch_block('Tuple(Tuple(Float64, Float64), Float64)', 1,
 
 -- Read a Tuple into a domain over a composite type
 CREATE DOMAIN pairdom AS pairformat;
-SELECT pgch_decode_typed(pgch_encode_pairs('Map(String, Int64)', ARRAY['a'],
-                                           ARRAY[1]::bigint[]),
+SELECT pgch_decode_typed(pgch_encode('Map(String, Int64)',
+                                     ARRAY[('a', 1)]::pairformat[]),
                          NULL::pairdom[]) AS pairs;
 
 -- Convert array rows that hold no values, at the outer and the inner dimension

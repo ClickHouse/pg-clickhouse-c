@@ -9,6 +9,7 @@ SELECT pgch_writer_probe('array_range');
 SELECT pgch_writer_probe('nesting');
 SELECT pgch_writer_probe('append_range');
 SELECT pgch_writer_probe('unnamed');
+SELECT pgch_writer_probe('array_into_tuple');
 SELECT pgch_writer_probe('tuple_null');
 
 -- Save and restore row position across column layouts

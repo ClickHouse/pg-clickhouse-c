@@ -21,8 +21,10 @@ SELECT pgch_roundtrip('Enum8('' a'' = 1)', 'z'::text);
 SELECT pgch_roundtrip('Decimal(9,2)', 1000000000::numeric);
 SELECT pgch_roundtrip('Decimal(18,0)', 99999999999999999999::numeric);
 
+-- Reject composite values whose field count differs from Tuple
+SELECT pgch_encode('Tuple(Int32)', ROW(1, 2));
+SELECT pgch_encode('Tuple(Int32, Int32)', ROW(1));
 -- Reject unsupported encoder types
-SELECT pgch_encode('Tuple(Int32)', ROW(1)::record);
 SELECT pgch_encode('LowCardinality(Array(Int32))', ARRAY[1]::int4[]);
 SELECT pgch_encode('Array(Dynamic)', ARRAY[1]::int4[]);
 
@@ -43,13 +45,10 @@ SELECT pgch_decode_as(pgch_block('Tuple(Int32, String)', 1,
                       NULL::bigint[]);
 
 -- Reject Tuple field counts other than the column's arity
-SELECT pgch_encode_pairs('Map(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[], 1);
-SELECT pgch_encode_pairs('Map(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[], 3);
-SELECT pgch_encode_pairs('Tuple(String, Int64)', ARRAY['a'], ARRAY[1]::bigint[]);
-SELECT pgch_encode_pairs('Map(String)', ARRAY['a'], ARRAY[1]::bigint[]);
--- Write only k with fields = 1, leave v missing
-SELECT pgch_encode_pairs('Nested(k String, v Int64)', ARRAY['a'],
-                         ARRAY[1]::bigint[], 1);
+SELECT pgch_encode('Map(String, Int64)', ARRAY[ROW('a')]);
+SELECT pgch_encode('Map(String, Int64)', ARRAY[ROW('a', 1, 2)]);
+SELECT pgch_encode('Map(String)', ARRAY[ROW('a', 1)]);
+SELECT pgch_encode('Nested(k String, v Int64)', ARRAY[ROW('a')]);
 SELECT pgch_encode('Nested', ARRAY['a']::text[]);
 
 -- Reject invalid Map arrays

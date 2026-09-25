@@ -99,9 +99,11 @@ conversion.
 For PostgreSQL arrays, pass actual array OID. To pass `pgch_array`, use
 `ANYARRAYOID`. Missing conversion raises `ERRCODE_DATATYPE_MISMATCH`.
 
-Pass a `Tuple` as an array of fields. Pass a `Map` as a two-dimensional array
-of key/value pairs, or `Nested` as an array of rows. Text elements are parsed
-as destination field types.
+Pass a `Tuple` as a composite or an array of fields. Pass a `Map` as an array
+of composites or a two-dimensional array of key/value pairs, and `Nested` the
+same way with one element per row. Composite attributes fill `Tuple` fields in
+order, skipping dropped attributes. Text elements are parsed as destination
+field types.
 
 `bytea` values map to ClickHouse `String` and `FixedString` without text
 conversion. `json` and `jsonb` map to `JSON`, `Object`, or `String`.

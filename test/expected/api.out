@@ -17,6 +17,8 @@ SELECT pgch_writer_probe('append_range');
 ERROR:  pgch: column 9 out of range
 SELECT pgch_writer_probe('unnamed');
 ERROR:  pgch: cannot append NULL to NOT NULL Int32 column 0
+SELECT pgch_writer_probe('array_into_tuple');
+ERROR:  pgch: Array value into column "c"
 SELECT pgch_writer_probe('tuple_null');
 ERROR:  pgch: cannot append NULL to NOT NULL Tuple(Int32, String) column "c"
 -- Save and restore row position across column layouts
