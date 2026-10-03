@@ -93,6 +93,10 @@ Apply `PGCH_NATIVE_SETTINGS` to queries returning Native data. It requests
 textual type names and JSON documents as strings. JSON output requires
 ClickHouse 24.10 or later. Add settings for experimental types separately.
 
+Set `session_timezone` to `pgch_session_timezone()`, so ClickHouse reads and
+prints `timestamp` columns, mapped to `DateTime64` without time zone, in
+PostgreSQL TimeZone. Fixed offsets come back as `Fixed/UTC±HH:MM:SS`.
+
 Use `pgch_block_opts_local` with chDB and `clickhouse-local`. For TCP server
 traffic, set `has_block_info` and `has_custom_serialization` according to
 negotiated server revision.

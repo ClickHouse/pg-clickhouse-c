@@ -32,7 +32,7 @@ elements; the array itself cannot be nullable. Nullable scalar columns use
 | bytea            | String                                 | Writes raw bytes                                   |
 | date             | Date32                                 |                                                    |
 | time             | Time64(6)                              |                                                    |
-| timestamp        | DateTime64(6, 'UTC')                   |                                                    |
+| timestamp        | DateTime64(6)                          |                                                    |
 | timestamptz      | DateTime64(6, 'UTC')                   |                                                    |
 | interval         | String                                 | Interval destinations require whole unit counts    |
 | uuid             | UUID                                   |                                                    |
