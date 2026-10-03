@@ -48,6 +48,9 @@ CREATE FUNCTION pgch_rows(lines text[]) RETURNS SETOF text[]
 CREATE FUNCTION pgch_native_settings() RETURNS text
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 
+CREATE FUNCTION pgch_session_tz() RETURNS text
+    AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
+
 -- Decode bytes delivered in fixed-size chunks
 CREATE FUNCTION pgch_decode_chunks(data bytea, chunk int, fail_at int DEFAULT 0,
                                    cancel_at int DEFAULT 0) RETURNS text[]
@@ -57,6 +60,9 @@ CREATE FUNCTION pgch_chtype(decl text, notnull bool DEFAULT false,
                             json_as_json bool DEFAULT false,
                             low_cardinality bool DEFAULT false,
                             numeric_as_string bool DEFAULT false) RETURNS text
+    AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
+
+CREATE FUNCTION pgch_literal(val anyelement) RETURNS text
     AS 'MODULE_PATHNAME' LANGUAGE c STRICT;
 
 CREATE FUNCTION pgch_structure(rel regclass,

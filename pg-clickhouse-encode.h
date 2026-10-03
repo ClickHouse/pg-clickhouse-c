@@ -11,6 +11,7 @@
 #include "pg-clickhouse.h"
 
 #include "executor/tuptable.h"
+#include "lib/stringinfo.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -120,6 +121,23 @@ pgch_column_kind(const pgch_writer* w, size_t col);
 extern uint32_t
 pgch_column_datetime64_scale(const pgch_writer* w, size_t col);
 
+/* ---- SQL literals --------------------------------------------------- */
+
+/*
+ * Append shortest decimal text that reads back as original float value
+ * Ignore extra_float_digits; use forms ClickHouse accepts as Float64
+ */
+extern void
+pgch_append_float_literal(StringInfo buf, double v);
+
+/*
+ * Append geometric value as SQL literal or query parameter value
+ * Match ClickHouse type returned by pgch_ch_type_for
+ * Return false for non-geometric types
+ */
+extern bool
+pgch_append_geo_literal(StringInfo buf, Datum val, Oid typid);
+
 /* ---- block assembly ------------------------------------------------- */
 
 /* Return buffered row count */
@@ -150,6 +168,7 @@ pgch_writer_flush(pgch_writer* w, pgch_buf* out, const chc_block_opts* opts);
 
 #ifdef PGCH_IMPLEMENTATION
 
+#include <math.h>
 #include <string.h>
 #include <sys/socket.h> /* PostgreSQL inet macros require AF_INET */
 
@@ -157,6 +176,7 @@ pgch_writer_flush(pgch_writer* w, pgch_buf* out, const chc_block_opts* opts);
 #include "catalog/pg_type_d.h"
 #include "common/hashfn.h"
 #include "common/int.h"
+#include "common/shortest_dec.h"
 #include "fmgr.h"
 #include "parser/parse_coerce.h"
 #include "port/pg_bswap.h"
@@ -2355,6 +2375,111 @@ pgch_writer_flush(pgch_writer* w, pgch_buf* out, const chc_block_opts* opts) {
         pgch_raise(&err, ERRCODE_FDW_ERROR, "block write: ", NULL);
     }
     pgch_writer_reset(w);
+}
+
+/* ---- SQL literals --------------------------------------------------- */
+
+void
+pgch_append_float_literal(StringInfo buf, double v) {
+    char num[DOUBLE_SHORTEST_DECIMAL_LEN];
+
+    if (isnan(v)) {
+        appendStringInfoString(buf, "nan");
+    } else if (isinf(v)) {
+        appendStringInfoString(buf, v < 0 ? "-inf" : "inf");
+    } else if (v == 0 && signbit(v)) {
+        appendStringInfoString(buf, "-0.");
+    } else {
+        double_to_shortest_decimal_buf(v, num);
+        appendStringInfoString(buf, num);
+    }
+}
+
+static void
+pgch__append_floats_literal(StringInfo buf, const double* vals, int n) {
+    appendStringInfoChar(buf, '(');
+    for (int i = 0; i < n; i++) {
+        if (i > 0) {
+            appendStringInfoChar(buf, ',');
+        }
+        pgch_append_float_literal(buf, vals[i]);
+    }
+    appendStringInfoChar(buf, ')');
+}
+
+static void
+pgch__append_point_literal(StringInfo buf, const Point* p) {
+    double xy[2] = { p->x, p->y };
+
+    pgch__append_floats_literal(buf, xy, lengthof(xy));
+}
+
+/* Repeat first point to close paths in ClickHouse */
+static void
+pgch__append_points_literal(StringInfo buf, const Point* pts, int npts, bool close) {
+    int n = close && npts ? npts + 1 : npts;
+
+    appendStringInfoChar(buf, '[');
+    for (int i = 0; i < n; i++) {
+        if (i > 0) {
+            appendStringInfoChar(buf, ',');
+        }
+        pgch__append_point_literal(buf, &pts[i == npts ? 0 : i]);
+    }
+    appendStringInfoChar(buf, ']');
+}
+
+bool
+pgch_append_geo_literal(StringInfo buf, Datum val, Oid typid) {
+    switch (typid) {
+    case POINTOID:
+        pgch__append_point_literal(buf, DatumGetPointP(val));
+        return true;
+    case LSEGOID:
+        pgch__append_points_literal(buf, DatumGetLsegP(val)->p, 2, false);
+        return true;
+    case PATHOID: {
+        PATH* path = DatumGetPathP(val);
+
+        pgch__append_points_literal(buf, path->p, path->npts, path->closed);
+        return true;
+    }
+    case POLYGONOID: {
+        POLYGON* poly = DatumGetPolygonP(val);
+
+        pgch__append_points_literal(buf, poly->p, poly->npts, false);
+        return true;
+    }
+    case BOXOID: {
+        BOX* box = DatumGetBoxP(val);
+
+        appendStringInfoChar(buf, '(');
+        pgch__append_point_literal(buf, &box->high);
+        appendStringInfoChar(buf, ',');
+        pgch__append_point_literal(buf, &box->low);
+        appendStringInfoChar(buf, ')');
+        return true;
+    }
+    case CIRCLEOID: {
+        CIRCLE* circle = DatumGetCircleP(val);
+
+        appendStringInfoChar(buf, '(');
+        pgch__append_point_literal(buf, &circle->center);
+        appendStringInfoChar(buf, ',');
+        pgch_append_float_literal(buf, circle->radius);
+        appendStringInfoChar(buf, ')');
+        return true;
+    }
+    case LINEOID: {
+        LINE* line    = DatumGetLineP(val);
+        double abc[3] = { line->A, line->B, line->C };
+
+        pgch__append_floats_literal(buf, abc, lengthof(abc));
+        return true;
+    }
+    default:
+        return false;
+    }
 }
 
 #endif /* PGCH_IMPLEMENTATION */

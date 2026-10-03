@@ -243,3 +243,10 @@ SELECT pgch_decode_as(pgch_encode('Tuple(Point, Point)', ARRAY['(0,0)', '(1,1)']
 
 -- Reject coordinates the Tuple has too few fields to hold
 SELECT pgch_encode('Tuple(Float64, Float64)', '((0,0),(1,1))'::box);
+
+-- Reject fixed offsets ClickHouse cannot spell
+SET TIME ZONE INTERVAL '+00:07' HOUR TO MINUTE;
+SELECT pgch_session_tz();
+SET TIME ZONE INTERVAL '+15:00' HOUR TO MINUTE;
+SELECT pgch_session_tz();
+RESET TimeZone;
