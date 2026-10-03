@@ -114,9 +114,9 @@ FROM (VALUES
     ('text', 'low_cardinality selects LowCardinality(String)'),
     ('bytea', 'Writes raw bytes'),
     ('date', ''),
-    ('time', ''),
-    ('timestamp', ''),
-    ('timestamptz', ''),
+    ('time', 'Preserves fractional second precision'),
+    ('timestamp', 'Preserves fractional second precision'),
+    ('timestamptz', 'Preserves fractional second precision'),
     ('interval', 'Interval destinations require whole unit counts'),
     ('uuid', ''),
     ('json', 'json_as_json selects JSON'),
@@ -147,9 +147,9 @@ FROM (VALUES
 | text             | String                                 | low_cardinality selects LowCardinality(String)     |
 | bytea            | String                                 | Writes raw bytes                                   |
 | date             | Date32                                 |                                                    |
-| time             | Time64(6)                              |                                                    |
-| timestamp        | DateTime64(6, 'UTC')                   |                                                    |
-| timestamptz      | DateTime64(6, 'UTC')                   |                                                    |
+| time             | Time64(6)                              | Preserves fractional second precision              |
+| timestamp        | DateTime64(6)                          | Preserves fractional second precision              |
+| timestamptz      | DateTime64(6, 'UTC')                   | Preserves fractional second precision              |
 | interval         | String                                 | Interval destinations require whole unit counts    |
 | uuid             | UUID                                   |                                                    |
 | json             | String                                 | json_as_json selects JSON                          |

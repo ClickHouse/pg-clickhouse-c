@@ -1516,3 +1516,23 @@ pgch_encoding_check_enum(PG_FUNCTION_ARGS) {
     }
     PG_RETURN_NULL();
 }
+
+PG_FUNCTION_INFO_V1(pgch_literal);
+
+/* Return ClickHouse literal for float or geometric value, NULL otherwise */
+Datum
+pgch_literal(PG_FUNCTION_ARGS) {
+    Oid typid = get_fn_expr_argtype(fcinfo->flinfo, 0);
+    Datum val = PG_GETARG_DATUM(0);
+    StringInfoData buf;
+
+    initStringInfo(&buf);
+    if (typid == FLOAT4OID || typid == FLOAT8OID) {
+        pgch_append_float_literal(
+            &buf, typid == FLOAT4OID ? DatumGetFloat4(val) : DatumGetFloat8(val)
+        );
+    } else if (!pgch_append_geo_literal(&buf, val, typid)) {
+        PG_RETURN_NULL();
+    }
+    PG_RETURN_TEXT_P(cstring_to_text(buf.data));
+}

@@ -697,11 +697,13 @@ pgch__ch_scalar(Oid typid, int32 typmod, const pgch_type_opts* opts) {
     case DATEOID:
         /* ClickHouse Date cannot represent dates before 1970 */
         return "Date32";
+    /* Default PostgreSQL time and timestamp precision is six decimal places */
     case TIMEOID:
-        return "Time64(6)";
+        return psprintf("Time64(%d)", typmod >= 0 ? typmod : 6);
     case TIMESTAMPOID:
+        return psprintf("DateTime64(%d)", typmod >= 0 ? typmod : 6);
     case TIMESTAMPTZOID:
-        return "DateTime64(6, 'UTC')";
+        return psprintf("DateTime64(%d, 'UTC')", typmod >= 0 ? typmod : 6);
     case JSONOID:
     case JSONBOID:
         return opts->json_as_json ? "JSON" : NULL;

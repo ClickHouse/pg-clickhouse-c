@@ -31,9 +31,9 @@ elements; the array itself cannot be nullable. Nullable scalar columns use
 | text             | String                                 | low_cardinality selects LowCardinality(String)     |
 | bytea            | String                                 | Writes raw bytes                                   |
 | date             | Date32                                 |                                                    |
-| time             | Time64(6)                              |                                                    |
-| timestamp        | DateTime64(6, 'UTC')                   |                                                    |
-| timestamptz      | DateTime64(6, 'UTC')                   |                                                    |
+| time             | Time64(6)                              | Preserves fractional second precision              |
+| timestamp        | DateTime64(6)                          | Preserves fractional second precision              |
+| timestamptz      | DateTime64(6, 'UTC')                   | Preserves fractional second precision              |
 | interval         | String                                 | Interval destinations require whole unit counts    |
 | uuid             | UUID                                   |                                                    |
 | json             | String                                 | json_as_json selects JSON                          |
@@ -190,3 +190,11 @@ pgch_buf_reset(&out);
 For another output destination, pass `pgch_writer_build` to `chc_block_write`.
 Built block borrows writer buffers; finish writing before calling
 `pgch_writer_reset`. Reset empties buffers and keeps storage for reuse.
+
+## Write SQL literals
+
+Use `pgch_append_geo_literal` to append geometric values as ClickHouse
+literals. Output matches type returned by `pgch_ch_type_for`.
+
+Use `pgch_append_float_literal` to append floats as shortest decimal text
+that reads back as original value. Handles NaN, infinities, and negative zero.

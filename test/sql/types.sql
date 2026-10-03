@@ -29,6 +29,25 @@ SELECT pgch_chtype('jsonb', json_as_json => true) AS json_null,
        pgch_chtype('text', true, low_cardinality => true) AS lc_notnull,
        pgch_chtype('numeric', numeric_as_string => true) AS num_string;
 
+-- Preserve fractional seconds when mapping time and timestamp types
+SELECT d AS pg_type, pgch_chtype(d, true) AS ch_type
+FROM unnest(ARRAY['time(0)', 'time(3)', 'timestamp(0)', 'timestamp(3)',
+                  'timestamptz(3)', 'timestamptz(3)[]']) AS d;
+
+-- Write floats and geometric values as ClickHouse literals
+SELECT pgch_literal(v) FROM unnest(ARRAY[
+    '0.1', '-0', 'nan', 'inf', '-inf', '1e300', '5e-324']::float8[]) AS v;
+SELECT pgch_literal(0.1::float4) AS f4,
+       pgch_literal('(1.5,-2)'::point) AS point,
+       pgch_literal('[(0,0),(1,1)]'::lseg) AS lseg,
+       pgch_literal('[(0,0),(1,1),(2,0)]'::path) AS open_path,
+       pgch_literal('((0,0),(1,1),(2,0))'::path) AS closed_path,
+       pgch_literal('((0,0),(1,1),(2,0))'::polygon) AS polygon,
+       pgch_literal('(0,0),(2,3)'::box) AS box,
+       pgch_literal('<(1,2),3>'::circle) AS circle,
+       pgch_literal('{1,-1,0}'::line) AS line,
+       pgch_literal(1) AS other;
+
 -- Map domains through base type and typmod
 CREATE DOMAIN dcount AS int4;
 CREATE DOMAIN dvc AS varchar(8);
