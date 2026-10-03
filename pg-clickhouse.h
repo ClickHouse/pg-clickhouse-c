@@ -179,6 +179,14 @@ pgch_structure_from_tupdesc(TupleDesc desc, const pgch_type_opts* opts);
 /* Use for chDB and clickhouse-local Native framing */
 extern const chc_block_opts pgch_block_opts_local;
 
+/*
+ * Return palloc'd ClickHouse session_timezone matching PostgreSQL TimeZone
+ * DateTime64 without time zone, which timestamp maps to, reads and prints text
+ * in this zone
+ */
+extern char*
+pgch_session_timezone(void);
+
 /* ---- Intermediate Array / Tuple representations --------------------- */
 
 /*
@@ -232,6 +240,7 @@ pgch_buf_io(pgch_buf* b, chc_io* out_io);
 #include "catalog/pg_type_d.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "pgtime.h"
 #include "port/pg_bswap.h"
 #include "utils/date.h"
 #include "utils/lsyscache.h"
@@ -624,6 +633,36 @@ pgch_pg_type_is_column(pgch_pg_type type) {
 /* ---- PG type -> CH type name ---------------------------------------- */
 
 const chc_block_opts pgch_block_opts_local = {};
+
+char*
+pgch_session_timezone(void) {
+    long gmtoff;
+
+    if (!pg_get_timezone_offset(session_timezone, &gmtoff)) {
+        return pstrdup(pg_get_timezone_name(session_timezone));
+    }
+    /*
+     * ClickHouse rejects POSIX names PostgreSQL gives offsets, like <-07>+07,
+     * and takes fixed offsets of whole quarter hours within 14 hours
+     */
+    if (gmtoff == 0) {
+        return pstrdup("UTC");
+    }
+    long abs = labs(gmtoff);
+    if (abs % (15 * SECS_PER_MINUTE) != 0 || abs > 14 * SECS_PER_HOUR) {
+        pgch_errorf(
+            ERRCODE_INVALID_PARAMETER_VALUE,
+            "time zone \"%s\" has no ClickHouse equivalent",
+            pg_get_timezone_name(session_timezone)
+        );
+    }
+    return psprintf(
+        "Fixed/UTC%c%02ld:%02ld:00",
+        gmtoff < 0 ? '-' : '+',
+        abs / SECS_PER_HOUR,
+        abs % SECS_PER_HOUR / SECS_PER_MINUTE
+    );
+}
 
 static bool
 pgch__numeric_typmod(int32 typmod, int* precision, int* scale) {
