@@ -805,6 +805,14 @@ pgch_native_settings(PG_FUNCTION_ARGS pg_attribute_unused()) {
     PG_RETURN_TEXT_P(cstring_to_text(PGCH_NATIVE_SETTINGS));
 }
 
+PG_FUNCTION_INFO_V1(pgch_session_tz);
+
+/* Return ClickHouse session_timezone for PostgreSQL TimeZone */
+Datum
+pgch_session_tz(PG_FUNCTION_ARGS pg_attribute_unused()) {
+    PG_RETURN_TEXT_P(cstring_to_text(pgch_session_timezone()));
+}
+
 static pgch_type_opts
 type_opts(FunctionCallInfo fcinfo, int first) {
     pgch_type_opts opts = {};

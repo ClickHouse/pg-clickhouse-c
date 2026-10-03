@@ -39,7 +39,7 @@ FROM unnest(ARRAY[
  bytea           | String                                        | Nullable(String)
  date            | Date32                                        | Nullable(Date32)
  time            | Time64(6)                                     | Nullable(Time64(6))
- timestamp       | DateTime64(6, 'UTC')                          | Nullable(DateTime64(6, 'UTC'))
+ timestamp       | DateTime64(6)                                 | Nullable(DateTime64(6))
  timestamptz     | DateTime64(6, 'UTC')                          | Nullable(DateTime64(6, 'UTC'))
  timetz          | String                                        | Nullable(String)
  interval        | String                                        | Nullable(String)
@@ -88,6 +88,20 @@ SELECT pgch_chtype('jsonb', json_as_json => true) AS json_null,
 -----------+--------------+----------------------------------+------------------------+------------------
  JSON      | JSON         | LowCardinality(Nullable(String)) | LowCardinality(String) | Nullable(String)
 (1 row)
+
+-- Preserve fractional seconds when mapping time and timestamp types
+SELECT d AS pg_type, pgch_chtype(d, true) AS ch_type
+FROM unnest(ARRAY['time(0)', 'time(3)', 'timestamp(0)', 'timestamp(3)',
+                  'timestamptz(3)', 'timestamptz(3)[]']) AS d;
+     pg_type      |                ch_type                
+------------------+---------------------------------------
+ time(0)          | Time64(0)
+ time(3)          | Time64(3)
+ timestamp(0)     | DateTime64(0)
+ timestamp(3)     | DateTime64(3)
+ timestamptz(3)   | DateTime64(3, 'UTC')
+ timestamptz(3)[] | Array(Nullable(DateTime64(3, 'UTC')))
+(6 rows)
 
 -- Map domains through base type and typmod
 CREATE DOMAIN dcount AS int4;
@@ -387,6 +401,36 @@ SELECT pgch_native_settings();
  output_format_native_encode_types_in_binary_format=0,output_format_native_write_json_as_string=1
 (1 row)
 
+-- Map TimeZone to session_timezone, spelling fixed offsets as ClickHouse does
+SET TimeZone = 'america/new_york';
+SELECT pgch_session_tz() AS named;
+      named       
+------------------
+ America/New_York
+(1 row)
+
+SET TIME ZONE -7;
+SELECT pgch_session_tz() AS west;
+        west        
+--------------------
+ Fixed/UTC-07:00:00
+(1 row)
+
+SET TIME ZONE INTERVAL '+05:45' HOUR TO MINUTE;
+SELECT pgch_session_tz() AS east;
+        east        
+--------------------
+ Fixed/UTC+05:45:00
+(1 row)
+
+SET TimeZone = 'Etc/UTC';
+SELECT pgch_session_tz() AS utc;
+ utc 
+-----
+ UTC
+(1 row)
+
+SET TimeZone = 'UTC';
 -- Quote column names ClickHouse cannot take bare, escaping quote and backslash
 CREATE TABLE oddnames ("a1" int, "a b" int, "q""x" int, "back\slash" int);
 SELECT pgch_structure('oddnames');

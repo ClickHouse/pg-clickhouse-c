@@ -29,6 +29,11 @@ SELECT pgch_chtype('jsonb', json_as_json => true) AS json_null,
        pgch_chtype('text', true, low_cardinality => true) AS lc_notnull,
        pgch_chtype('numeric', numeric_as_string => true) AS num_string;
 
+-- Preserve fractional seconds when mapping time and timestamp types
+SELECT d AS pg_type, pgch_chtype(d, true) AS ch_type
+FROM unnest(ARRAY['time(0)', 'time(3)', 'timestamp(0)', 'timestamp(3)',
+                  'timestamptz(3)', 'timestamptz(3)[]']) AS d;
+
 -- Map domains through base type and typmod
 CREATE DOMAIN dcount AS int4;
 CREATE DOMAIN dvc AS varchar(8);
@@ -192,6 +197,17 @@ SELECT pgch_roundtrip('BFloat16', 'NaN'::float4) AS bfloat_keeps_nan;
 
 -- Return required Native query settings
 SELECT pgch_native_settings();
+
+-- Map TimeZone to session_timezone, spelling fixed offsets as ClickHouse does
+SET TimeZone = 'america/new_york';
+SELECT pgch_session_tz() AS named;
+SET TIME ZONE -7;
+SELECT pgch_session_tz() AS west;
+SET TIME ZONE INTERVAL '+05:45' HOUR TO MINUTE;
+SELECT pgch_session_tz() AS east;
+SET TimeZone = 'Etc/UTC';
+SELECT pgch_session_tz() AS utc;
+SET TimeZone = 'UTC';
 
 -- Quote column names ClickHouse cannot take bare, escaping quote and backslash
 CREATE TABLE oddnames ("a1" int, "a b" int, "q""x" int, "back\slash" int);
