@@ -452,6 +452,7 @@ pgch__datum_oid(const chc_type* type, const char* what) {
     /* Map and Nested map to PostgreSQL arrays of records */
     case CHC_MAP:
     case CHC_NESTED:
+    case CHC_QBIT:
         return ANYARRAYOID;
     case CHC_TUPLE:
         return RECORDOID;
@@ -508,6 +509,8 @@ pgch_native_oid_for(const chc_type* type, const char* what) {
     case CHC_MAP:
     case CHC_NESTED:
         return RECORDARRAYOID;
+    case CHC_QBIT:
+        return chc_type_qbit_element_size(type) == 64 ? FLOAT8ARRAYOID : FLOAT4ARRAYOID;
     case CHC_ARRAY: {
         /* PostgreSQL uses one array type for every nesting depth */
         const chc_type* leaf = type;
@@ -620,11 +623,12 @@ pgch_pg_type_for(const chc_type* type, const char* what) {
     case CHC_INTERVAL:
         out.truncated = chc_type_interval_unit(leaf) == CHC_INTERVAL_NANOSECOND;
         break;
-    /* Map, Nested and multi-geometry types add a PostgreSQL array dimension */
+    /* Map, Nested, QBit and multi-geometry types add a PostgreSQL array dimension */
     case CHC_MAP:
     case CHC_NESTED:
     case CHC_POLYGON:
     case CHC_MULTI_LINE_STRING:
+    case CHC_QBIT:
         out.ndims++;
         break;
     /* MultiPolygon holds rings one layer deeper, both reaching polygon */

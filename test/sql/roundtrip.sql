@@ -609,3 +609,35 @@ END $$;
 SELECT decode_as_type(pgch_encode('UInt64', 42::numeric),
                       coalesce(to_regtype('oid8'), 'xid8'::regtype)::text) AS unsigned64;
 DROP FUNCTION decode_as_type;
+
+-- QBit transposes floats into one bit plane per element bit and back, at each
+-- element width, over more than one byte of elements
+SELECT pgch_roundtrip('QBit(Float32, 9)', '{1.5,-2,3,0,0,0,0,0,0.1}'::real[]),
+       pgch_roundtrip('QBit(Float64, 3)', '{0.1,2.5,-3}'::float8[]),
+       pgch_roundtrip('QBit(BFloat16, 3)', '{0.5,1.25,-2}'::real[]);
+SELECT pgch_roundtrip('QBit(Float32, 2)', '{1,2,3}'::real[]);
+SELECT pgch_roundtrip('QBit(Float32, 2)', '{1,NULL}'::real[]);
+
+SELECT pgch_roundtrip('Array(QBit(Float32, 2))', '{{1,2},{3,4}}'::real[]),
+       pgch_roundtrip('Tuple(QBit(Float64, 2))', ROW(ARRAY[1,2]::real[]));
+SELECT pgch_roundtrip('QBit(Float32, 2)', '{1,2}'::integer[]),
+       pgch_roundtrip('QBit(Float64, 2)', '{1.25,-2.5}'::numeric[]),
+       pgch_roundtrip('QBit(BFloat16, 2)', '{1.1,-2.2}'::float8[]);
+SELECT pgch_roundtrip('Nullable(QBit(Float32, 2))', NULL::real[]),
+       pgch_roundtrip('Array(QBit(Float32, 2))', ARRAY[]::real[]);
+SELECT pgch_roundtrip('QBit(Float32, 2)', '{Infinity,NaN}'::float8[]);
+SELECT pgch_roundtrip('QBit(Float32, 2)', '{1e300,-1e300}'::float8[]);
+SELECT pgch_roundtrip('QBit(BFloat16, 2)', '{1e300,-1e300}'::float8[]);
+SELECT pgch_roundtrip('QBit(Float32, 4)', '{{1,2},{3,4}}'::real[]);
+SELECT pgch_roundtrip('QBit(Float32, 2)', '{true,false}'::boolean[]);
+
+-- ClickHouse 26.8 Native payload spans two bytes per plane
+WITH fixture AS (
+    SELECT 'QBit(Float32, 9)' AS t,
+           '\x00020006010101010101010100010101010101050000000001000100000000000100010000000000010001000000000001000100000000000100010000000100'::bytea AS payload,
+           '{1.5,-2,3,0,0,0,0,0,0.1}'::real[] AS v
+)
+SELECT pgch_decode(pgch_block(t, 1, payload)) AS decoded,
+       substring(pgch_encode(t, v) FROM octet_length(pgch_encode(t, v))
+                 - octet_length(payload) + 1) = payload AS encoded
+  FROM fixture;

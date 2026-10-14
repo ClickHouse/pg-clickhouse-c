@@ -16,7 +16,6 @@ SELECT r[1] AS "Omitted", r[2] AS "Reason" FROM pgch_rows(pgch_type_omitted()) t
 | Dynamic                       | pgch: unsupported column type "Dynamic"                       |
 | Nothing                       | pgch: no PostgreSQL type                                      |
 | Object('json')                | serializes as a materialized Tuple, unlike JSON               |
-| QBit(BFloat16, 16)            | pgch: unsupported column type "QBit(BFloat16, 16)"            |
 | Variant(Int32, String)        | pgch: unsupported column type "Variant(Int32, String)"        |
 | Void                          | pgch: no PostgreSQL type                                      |
 +-------------------------------+---------------------------------------------------------------+
@@ -75,6 +74,7 @@ SELECT r[1] AS "ClickHouse", r[2] AS "Default PostgreSQL",
 | Nullable(T)                  | T                           |                                           | Sets nullable on the column                          |
 | Point                        | point                       |                                           |                                                      |
 | Polygon                      | polygon[]                   |                                           |                                                      |
+| QBit(T,N)                    | T[]                         |                                           | Transposes N elements to and from bit planes         |
 | Ring                         | polygon                     | lseg                                      | lseg requires two points                             |
 | SimpleAggregateFunction(f,T) | T                           |                                           | Stores values as T                                   |
 | String                       | text                        | bytea; input-compatible types             | bytea keeps raw bytes                                |

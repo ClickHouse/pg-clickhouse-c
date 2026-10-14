@@ -381,7 +381,9 @@ pgch__node_new(const chc_type* t) {
         n->layout         = CHC_COL_NULLABLE;
         n->nullable.inner = pgch__node_new(chc_type_child(t, 0));
         return n;
+    /* QBit buffers elements as an Array, transposed into bit planes on build */
     case CHC_ARRAY:
+    case CHC_QBIT:
         n->layout       = CHC_COL_ARRAY;
         n->array.values = pgch__node_new(chc_type_child(t, 0));
         return n;
@@ -1174,8 +1176,26 @@ pgch_array_end(pgch_writer* w) {
     if (!f) {
         return;
     }
+    pgch__node* node = f->node;
+    uint64_t end     = pgch__node_rows(node->array.values);
+
+    if (node->kind == CHC_QBIT) {
+        size_t nrows = pgch__offs_len(&node->array.offs);
+        size_t len  = end - (nrows ? pgch__offs_data(&node->array.offs)[nrows - 1] : 0);
+        size_t dims = chc_type_qbit_dimension(node->type);
+
+        if (len != dims) {
+            pgch_errorf(
+                ERRCODE_DATA_EXCEPTION,
+                "expected %zu dimensions, not %zu, for %s",
+                dims,
+                len,
+                pgch__col_desc(w, w->cursor_col)
+            );
+        }
+    }
     MemoryContext old = MemoryContextSwitchTo(w->cxt);
-    pgch__offs_push(&f->node->array.offs, pgch__node_rows(f->node->array.values));
+    pgch__offs_push(&node->array.offs, end);
     MemoryContextSwitchTo(old);
 }
 
@@ -1513,7 +1533,7 @@ static inline bool
 pgch__kind_takes_array(chc_kind kind) {
     return kind == CHC_ARRAY || kind == CHC_MAP || kind == CHC_NESTED ||
            kind == CHC_POLYGON || kind == CHC_MULTI_POLYGON ||
-           kind == CHC_MULTI_LINE_STRING;
+           kind == CHC_MULTI_LINE_STRING || kind == CHC_QBIT;
 }
 
 /* Layout of a pgvector vector, matching struct Vector in pgvector's vector.h */
@@ -1556,7 +1576,8 @@ pgch__append_one(
         return;
     }
     /* pgvector casts only to real[], so convert for Float64 and BFloat16 too */
-    if (kind == CHC_ARRAY && !isnull && pgch_is_pgvector_type(valtype)) {
+    if ((kind == CHC_ARRAY || kind == CHC_QBIT) && !isnull &&
+        pgch_is_pgvector_type(valtype)) {
         val     = pgch__pgvector_to_float4_array(val);
         valtype = FLOAT4ARRAYOID;
     }
@@ -2213,6 +2234,44 @@ pgch__finalize_lc(pgch__node* node) {
     return chc_build_lc(4, keys, n_rows, &node->lc.dict);
 }
 
+/*
+ * QBit sends bit p of each element, most significant first, as plane p. Element
+ * j of a plane is bit j % 8 of its byte nbytes - 1 - j / 8. NULL rows hold no
+ * elements and send zeros
+ */
+static chc_column
+pgch__finalize_qbit(const pgch__node* n) {
+    const uint8_t* src   = n->array.values->fixed.data.data;
+    const uint64_t* offs = pgch__offs_data(&n->array.offs);
+    size_t rows          = pgch__offs_len(&n->array.offs);
+    size_t width         = n->array.values->fixed.elem_size;
+    size_t bits          = width * 8;
+    size_t nbytes        = (chc_type_qbit_dimension(n->type) + 7) / 8;
+    size_t plane_size    = rows * nbytes;
+    uint8_t* data =
+        palloc_extended(bits * plane_size, MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
+    chc_column* planes    = palloc(bits * sizeof(*planes));
+    chc_column** children = palloc(bits * sizeof(*children));
+
+    for (size_t r = 0, start = 0; r < rows; start = offs[r++]) {
+        for (size_t j = 0; start + j < offs[r]; j++) {
+            const uint8_t* elem = src + (start + j) * width;
+            uint8_t* byte       = data + r * nbytes + nbytes - 1 - j / 8;
+
+            for (size_t p = 0; p < bits; p++) {
+                size_t bit = bits - 1 - p;
+
+                byte[p * plane_size] |= ((elem[bit / 8] >> (bit % 8)) & 1) << (j % 8);
+            }
+        }
+    }
+    for (size_t p = 0; p < bits; p++) {
+        planes[p]   = chc_build_fixed(data + p * plane_size, nbytes, rows);
+        children[p] = &planes[p];
+    }
+    return chc_build_tuple(children, bits);
+}
+
 static chc_column*
 pgch__finalize_node(pgch__node* n) {
     switch (n->layout) {
@@ -2233,6 +2292,10 @@ pgch__finalize_node(pgch__node* n) {
         );
         break;
     case CHC_COL_ARRAY:
+        if (n->kind == CHC_QBIT) {
+            n->col = pgch__finalize_qbit(n);
+            break;
+        }
         n->col = chc_build_array(
             pgch__offs_data(&n->array.offs),
             pgch__offs_len(&n->array.offs),

@@ -723,6 +723,10 @@ pgch__array_item(const chc_type* type, const chc_type** leaf, int* ndim) {
         case CHC_MULTI_LINE_STRING:
             *ndim = dims + 1;
             return pgch_kind_oids[CHC_LINE_STRING];
+        /* QBit holds an array of its element type */
+        case CHC_QBIT:
+            *ndim = dims + 1;
+            return pgch_kind_oids[chc_type_kind(chc_type_child(type, 0))];
         default:
             *ndim = dims;
             return pgch_datum_oid(type);
@@ -775,6 +779,63 @@ pgch__read_array(
         slot->datums = NULL;
         slot->nulls  = NULL;
     }
+
+    *valtype = ANYARRAYOID;
+    *is_null = false;
+    return PointerGetDatum(slot);
+}
+
+/*
+ * QBit stores one bit plane per element bit, most significant first. Element
+ * j of a plane is bit j % 8 of its byte nbytes - 1 - j / 8.
+ */
+static Datum
+pgch__read_qbit(
+    const chc_column* col,
+    const chc_type* type,
+    uint64_t row,
+    Oid* valtype,
+    bool* is_null
+) {
+    size_t dims      = chc_type_qbit_dimension(type);
+    size_t bits      = chc_type_qbit_element_size(type);
+    size_t nbytes    = (dims + 7) / 8;
+    uint64_t* raw    = (uint64_t*)palloc0(sizeof(uint64_t) * dims);
+    pgch_array* slot = (pgch_array*)palloc(sizeof(pgch_array));
+
+    for (size_t p = 0; p < bits; p++) {
+        const uint8_t* plane = (const uint8_t*)chc_column_fixed_data(
+                                   chc_column_tuple_child(col, p), NULL
+                               ) +
+                               row * nbytes;
+
+        for (size_t j = 0; j < dims; j++) {
+            raw[j] = raw[j] << 1 | ((plane[nbytes - 1 - j / 8] >> (j % 8)) & 1);
+        }
+    }
+
+    slot->len       = dims;
+    slot->ndim      = 1;
+    slot->type      = type;
+    slot->item_type = bits == 64 ? FLOAT8OID : FLOAT4OID;
+    slot->datums    = (Datum*)palloc(sizeof(Datum) * dims);
+    slot->nulls     = (bool*)palloc0(sizeof(bool) * dims);
+    for (size_t j = 0; j < dims; j++) {
+        if (bits == 64) {
+            double v;
+
+            memcpy(&v, &raw[j], sizeof v);
+            slot->datums[j] = Float8GetDatum(v);
+        } else {
+            /* BFloat16 is the leading 16 bits of a Float32 */
+            uint32_t u = (uint32_t)(bits == 16 ? raw[j] << 16 : raw[j]);
+            float v;
+
+            memcpy(&v, &u, sizeof v);
+            slot->datums[j] = Float4GetDatum(v);
+        }
+    }
+    pfree(raw);
 
     *valtype = ANYARRAYOID;
     *is_null = false;
@@ -1097,6 +1158,8 @@ pgch_read_value(
         return pgch__read_lc(col, type, row, valtype, is_null);
     case CHC_ARRAY:
         return pgch__read_array(col, type, row, valtype, is_null);
+    case CHC_QBIT:
+        return pgch__read_qbit(col, type, row, valtype, is_null);
     case CHC_TUPLE:
         return pgch__read_tuple(col, type, row, valtype, is_null);
     case CHC_MAP:
@@ -1150,6 +1213,10 @@ pgch__append_shape(StringInfo buf, const chc_type* type) {
     case CHC_MULTI_POLYGON:
     case CHC_MULTI_LINE_STRING:
         appendStringInfo(buf, "g%d;", (int)kind);
+        return;
+    case CHC_QBIT:
+        appendStringInfoChar(buf, 'q');
+        pgch__append_shape(buf, chc_type_child(type, 0));
         return;
     /* Conversion applies the unit to the count read */
     case CHC_INTERVAL:
@@ -1219,7 +1286,9 @@ pgch__check_type(const chc_type* type) {
         }
         return NULL;
     }
-    /* Nodeless geo arrays over Ring or LineString, both of which PostgreSQL has */
+    /* QBit holds floats, and geo arrays Rings or LineStrings, all of which PostgreSQL
+     * has */
+    case CHC_QBIT:
     case CHC_POLYGON:
     case CHC_MULTI_POLYGON:
     case CHC_MULTI_LINE_STRING:
