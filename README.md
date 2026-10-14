@@ -126,6 +126,9 @@ make -C test install         # needs write access to the PG install
 make -C test installcheck    # needs superuser
 ```
 
+The `type_table` and `pgvector` tests require [pgvector] in the PostgreSQL
+install.
+
 ## Coverage
 
 GCC, matching `gcov`, and the regression suite report line coverage of
@@ -148,3 +151,4 @@ Counters accumulate across runs. Stop test server normally before reporting;
 killed backends lose their counters.
 
 [clickhouse-c]: https://github.com/ClickHouse/clickhouse-c
+[pgvector]: https://github.com/pgvector/pgvector

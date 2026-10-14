@@ -1516,6 +1516,32 @@ pgch__kind_takes_array(chc_kind kind) {
            kind == CHC_MULTI_LINE_STRING;
 }
 
+/* Layout of a pgvector vector, matching struct Vector in pgvector's vector.h */
+typedef struct pgch__pgvector {
+    int32 vl_len_;
+    int16 dim;
+    int16 unused;
+    float x[FLEXIBLE_ARRAY_MEMBER];
+} pgch__pgvector;
+
+/* Copy a pgvector vector into real[], whose elements convert to any float */
+static Datum
+pgch__pgvector_to_float4_array(Datum val) {
+    pgch__pgvector* vec = (pgch__pgvector*)PG_DETOAST_DATUM(val);
+    Datum* elems        = palloc(sizeof(Datum) * vec->dim);
+
+    Assert(VARSIZE(vec) == offsetof(pgch__pgvector, x) + sizeof(float) * vec->dim);
+    for (int i = 0; i < vec->dim; i++) {
+        elems[i] = Float4GetDatum(vec->x[i]);
+    }
+
+    ArrayType* arr =
+        construct_array(elems, vec->dim, FLOAT4OID, sizeof(float4), true, TYPALIGN_INT);
+
+    pfree(elems);
+    return PointerGetDatum(arr);
+}
+
 static void
 pgch__append_one(
     pgch_writer* w,
@@ -1528,6 +1554,11 @@ pgch__append_one(
     if (pgch__kind_takes_array(kind) && isnull) {
         pgch__append_null_array(w, col);
         return;
+    }
+    /* pgvector casts only to real[], so convert for Float64 and BFloat16 too */
+    if (kind == CHC_ARRAY && !isnull && pgch_is_pgvector_type(valtype)) {
+        val     = pgch__pgvector_to_float4_array(val);
+        valtype = FLOAT4ARRAYOID;
     }
     /* Read Tuple fields from array items, including key-value pairs in Maps */
     if ((pgch__kind_takes_array(kind) || kind == CHC_TUPLE) && !isnull &&

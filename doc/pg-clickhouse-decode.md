@@ -100,6 +100,10 @@ Geometric tuple targets require matching coordinate shapes: two points for
 Empty rings and lines decode as NULL because PostgreSQL polygons and paths
 require at least one point.
 
+With [pgvector](https://github.com/pgvector/pgvector) installed, `vector`
+targets read `Array(Float32)`, `Array(Float64)`, and `Array(BFloat16)` columns
+through pgvector's array casts.
+
 ## Supply decoded blocks
 
 ```c

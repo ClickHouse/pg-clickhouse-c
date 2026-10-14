@@ -150,6 +150,13 @@ typedef struct pgch_type_opts {
 extern char*
 pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* opts);
 
+/*
+ * Return true when typid is the pgvector extension's vector type, matched by
+ * type and extension name so pgvector need not be installed
+ */
+extern bool
+pgch_is_pgvector_type(Oid typid);
+
 /* Return palloc'd ClickHouse identifier, quoted when needed */
 extern char*
 pgch_quote_ch_ident(const char* name);
@@ -237,13 +244,18 @@ pgch_buf_io(pgch_buf* b, chc_io* out_io);
 
 #include <string.h>
 
-#include "catalog/pg_type_d.h"
+#include "access/htup_details.h"
+#include "access/transam.h"
+#include "catalog/dependency.h"
+#include "catalog/pg_type.h"
+#include "commands/extension.h"
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "pgtime.h"
 #include "port/pg_bswap.h"
 #include "utils/date.h"
 #include "utils/lsyscache.h"
+#include "utils/syscache.h"
 
 /* ClickHouse uses Unix epoch, PostgreSQL uses 2000-01-01 */
 #define PGCH__DATE_OFFSET (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE)
@@ -756,6 +768,34 @@ pgch__ch_scalar(Oid typid, int32 typmod, const pgch_type_opts* opts) {
     }
 }
 
+bool
+pgch_is_pgvector_type(Oid typid) {
+    /* Callers ask about one column type at a time, so remember the last */
+    static Oid last_typid;
+    static bool last_result;
+
+    if (typid < FirstNormalObjectId) {
+        return false;
+    }
+    if (typid != last_typid) {
+        HeapTuple tuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(typid));
+
+        last_result = false;
+        if (HeapTupleIsValid(tuple)) {
+            if (strcmp(NameStr(((Form_pg_type)GETSTRUCT(tuple))->typname), "vector") ==
+                0) {
+                char* ext =
+                    get_extension_name(getExtensionOfObject(TypeRelationId, typid));
+
+                last_result = ext && strcmp(ext, "vector") == 0;
+            }
+            ReleaseSysCache(tuple);
+        }
+        last_typid = typid;
+    }
+    return last_result;
+}
+
 char*
 pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* opts) {
     static const pgch_type_opts defaults = {};
@@ -764,6 +804,11 @@ pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* op
         opts = &defaults;
     }
     typid = getBaseTypeAndTypmod(typid, &typmod);
+
+    /* pgvector values hold float4 elements; like arrays, never Nullable */
+    if (pgch_is_pgvector_type(typid)) {
+        return pstrdup("Array(Float32)");
+    }
 
     /*
      * Elements stay Nullable: PostgreSQL constrains the array, never its

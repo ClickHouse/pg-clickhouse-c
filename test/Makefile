@@ -2,7 +2,7 @@ EXTENSION    = pgch_test
 DATA         = pgch_test--1.0.sql
 MODULE_big   = pgch_test
 OBJS         = pgch_test.o
-REGRESS      = roundtrip types pgtype errors type_table encoding api
+REGRESS      = roundtrip types pgtype errors type_table encoding api pgvector
 PG_CONFIG   ?= pg_config
 
 # Append to user-provided options (used for testing alternate encodeings).
