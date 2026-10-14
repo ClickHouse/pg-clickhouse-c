@@ -39,6 +39,28 @@ SELECT pgch_roundtrip_as('Array(Float32)', '[0.1,0.2,0.3]'::vector),
  [0.1,0.2,0.3]     | [0.1,0.2,0.3]     | [0.5,1.25,-2]
 (1 row)
 
+-- Vectors fill QBit columns, reading back as vector
+SELECT pgch_roundtrip_as('QBit(Float32, 3)', '[0.1,0.2,0.3]'::vector),
+       pgch_roundtrip_as('QBit(BFloat16, 3)', '[0.5,1.25,-2]'::vector),
+       pgch_roundtrip_as('QBit(Float64, 3)', '[0.1,0.2,0.3]'::vector);
+ pgch_roundtrip_as | pgch_roundtrip_as | pgch_roundtrip_as 
+-------------------+-------------------+-------------------
+ [0.1,0.2,0.3]     | [0.5,1.25,-2]     | [0.1,0.2,0.3]
+(1 row)
+
+SELECT pgch_roundtrip('Array(QBit(Float32, 2))', ARRAY['[1,2]', '[3,4]']::vector[]);
+ pgch_roundtrip 
+----------------
+ {{1,2},{3,4}}
+(1 row)
+
+SELECT pgch_roundtrip_rows('Nullable(QBit(Float64, 2))',
+                          ARRAY['[1,2]', NULL, '[3,4]']::vector[]);
+  pgch_roundtrip_rows   
+------------------------
+ {"{1,2}",NULL,"{3,4}"}
+(1 row)
+
 -- Arrays of vectors fill nested arrays, one vector per inner array
 SELECT pgch_roundtrip('Array(Array(Float32))', ARRAY['[1,2]', '[3,4]']::vector[]);
  pgch_roundtrip 

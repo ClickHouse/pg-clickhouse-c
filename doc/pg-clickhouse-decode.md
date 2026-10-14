@@ -70,6 +70,7 @@ rules. Reading and writing may not preserve original types or values.
 | Nullable(T)                  | T                           |                                           | Sets nullable on the column                          |
 | Point                        | point                       |                                           |                                                      |
 | Polygon                      | polygon[]                   |                                           |                                                      |
+| QBit(T,N)                    | T[]                         |                                           | Transposes N elements to and from bit planes         |
 | Ring                         | polygon                     | lseg                                      | lseg requires two points                             |
 | SimpleAggregateFunction(f,T) | T                           |                                           | Stores values as T                                   |
 | String                       | text                        | bytea; input-compatible types             | bytea keeps raw bytes                                |

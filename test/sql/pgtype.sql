@@ -89,10 +89,16 @@ SELECT t AS ch_type, c.type, c.ndims
     'Array(FixedString(3))', 'Array(Array(FixedString(3)))'
 ]) AS t, pgch_pgcolumn(t) AS c;
 
+-- QBit adds one array dimension
+SELECT t AS ch_type, c.type, c.ndims, c.nullable
+  FROM unnest(ARRAY[
+    'QBit(Float32, 2)', 'QBit(Float64, 2)', 'QBit(BFloat16, 2)',
+    'Nullable(QBit(Float32, 2))', 'Array(QBit(Float32, 2))'
+]) AS t, pgch_pgcolumn(t) AS c;
+
 -- Types PostgreSQL cannot represent report the ClickHouse declaration
 SELECT pgch_pgcolumn('Dynamic');
 SELECT pgch_pgcolumn('Variant(Int32, String)');
-SELECT pgch_pgcolumn('QBit(Float32, 16)');
 SELECT pgch_pgcolumn('Array(Dynamic)');
 SELECT pgch_pgcolumn('AggregateFunction(sum, Int64)');
 

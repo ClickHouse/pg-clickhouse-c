@@ -87,8 +87,8 @@ freeing writer or deleting parent releases writer state.
 
 `pgch_writer_new` raises `ERRCODE_FDW_INVALID_DATA_TYPE` when any ClickHouse
 type cannot be encoded. Supported composite output is `Array`, `Tuple`, `Map`,
-`Nested`, and the geometric types built over them; `Dynamic`, `Variant`, and
-unsupported `LowCardinality` forms are rejected.
+`Nested`, `QBit`, and the geometric types built over them; `Dynamic`, `Variant`,
+and unsupported `LowCardinality` forms are rejected.
 `SimpleAggregateFunction(f, T)` writes as `T`.
 
 ## Append PostgreSQL Datums
@@ -99,6 +99,10 @@ conversion.
 
 For PostgreSQL arrays, pass actual array OID. To pass `pgch_array`, use
 `ANYARRAYOID`. Missing conversion raises `ERRCODE_DATATYPE_MISMATCH`.
+
+`QBit(T, N)` takes a one-dimensional array of N non-NULL elements, converting
+each to T. `vector` values also fill QBit columns. BFloat16 truncates Float32
+to its leading 16 bits.
 
 Pass a `Tuple` as a composite or an array of fields. Pass a `Map` as an array
 of composites or a two-dimensional array of key/value pairs, and `Nested` the
