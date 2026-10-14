@@ -1,10 +1,13 @@
 name: Start Postgres
-description: Install PostgreSQL from apt.postgresql.org and start a cluster
+description: Install PostgreSQL from apt.postgresql.org, start a cluster, and install pgvector
 
 inputs:
   version:
     description: Major PostgreSQL version to install
     required: true
+  pgvector:
+    description: pgvector release to build for the pgvector tests
+    default: v0.8.7
   port:
     description: Port for cluster
     default: '55432'
@@ -38,3 +41,14 @@ runs:
           echo 'PGUSER=postgres'
           echo "PG_CONFIG=$bin/pg_config"
         } >> "$GITHUB_ENV"
+
+    - name: Install pgvector ${{ inputs.pgvector }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        src=$RUNNER_TEMP/pgvector
+        git clone --quiet --depth 1 --branch ${{ inputs.pgvector }} \
+          https://github.com/pgvector/pgvector.git "$src"
+        make -C "$src" PG_CONFIG="$PG_CONFIG"
+        # sudo drops PG_CONFIG from env
+        sudo make -C "$src" install PG_CONFIG="$PG_CONFIG"

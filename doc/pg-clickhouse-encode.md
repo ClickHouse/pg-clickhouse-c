@@ -46,6 +46,7 @@ elements; the array itself cannot be nullable. Nullable scalar columns use
 | box              | Tuple(high Point, low Point)           |                                                    |
 | circle           | Tuple(center Point, radius Float64)    |                                                    |
 | line             | Tuple(a Float64, b Float64, c Float64) |                                                    |
+| vector           | Array(Float32)                         | pgvector; also writes Float64 and BFloat16 arrays  |
 <!-- ENCODE-TABLE-END -->
 
 [Read conversions](pg-clickhouse-decode.md#type-mapping) follow separate

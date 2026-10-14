@@ -17,6 +17,9 @@ SELECT r[1] AS "ClickHouse", r[2] AS "Default PostgreSQL",
     FROM pgch_rows(pgch_type_table()) t(r);
 \echo TYPE-TABLE-END
 
+-- The encode table lists pgvector's vector
+CREATE EXTENSION IF NOT EXISTS vector;
+
 \echo ENCODE-TABLE-BEGIN
 SELECT pg AS "PostgreSQL",
        pgch_chtype(CASE WHEN pg = 'oid8'
@@ -52,7 +55,8 @@ FROM (VALUES
     ('polygon', ''),
     ('box', ''),
     ('circle', ''),
-    ('line', '')
+    ('line', ''),
+    ('vector', 'pgvector; also writes Float64 and BFloat16 arrays')
 ) AS types(pg, behavior);
 \echo ENCODE-TABLE-END
 

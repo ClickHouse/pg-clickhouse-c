@@ -92,6 +92,8 @@ SELECT r[1] AS "ClickHouse", r[2] AS "Default PostgreSQL",
 
 \echo TYPE-TABLE-END
 TYPE-TABLE-END
+-- The encode table lists pgvector's vector
+CREATE EXTENSION IF NOT EXISTS vector;
 \echo ENCODE-TABLE-BEGIN
 ENCODE-TABLE-BEGIN
 SELECT pg AS "PostgreSQL",
@@ -128,7 +130,8 @@ FROM (VALUES
     ('polygon', ''),
     ('box', ''),
     ('circle', ''),
-    ('line', '')
+    ('line', ''),
+    ('vector', 'pgvector; also writes Float64 and BFloat16 arrays')
 ) AS types(pg, behavior);
 +------------------+----------------------------------------+----------------------------------------------------+
 |    PostgreSQL    |           Default ClickHouse           |                       Notes                        |
@@ -162,6 +165,7 @@ FROM (VALUES
 | box              | Tuple(high Point, low Point)           |                                                    |
 | circle           | Tuple(center Point, radius Float64)    |                                                    |
 | line             | Tuple(a Float64, b Float64, c Float64) |                                                    |
+| vector           | Array(Float32)                         | pgvector; also writes Float64 and BFloat16 arrays  |
 +------------------+----------------------------------------+----------------------------------------------------+
 
 \echo ENCODE-TABLE-END

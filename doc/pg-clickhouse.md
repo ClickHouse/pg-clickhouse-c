@@ -76,6 +76,10 @@ NULL paths and polygons become empty `LineString` and `Ring` values.
 Nullable `point`, `box`, `circle`, and `line` columns require
 `allow_experimental_nullable_tuple_type` in query settings.
 
+`pgch_is_pgvector_type` recognizes [pgvector](https://github.com/pgvector/pgvector)'s
+`vector` by type and extension name, so pgvector need not be installed.
+`vector` maps to `Array(Float32)` and writes into any float array column.
+
 Use `pgch_structure_from_tupdesc` for comma-separated `name type` declarations:
 
 ```c
