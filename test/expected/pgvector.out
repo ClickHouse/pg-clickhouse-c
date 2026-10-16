@@ -68,6 +68,16 @@ SELECT pgch_roundtrip('Array(Array(Float32))', ARRAY['[1,2]', '[3,4]']::vector[]
  {{1,2},{3,4}}
 (1 row)
 
+-- Stored vectors arrive as a copy the encoder frees after writing
+CREATE TABLE stored_vector (v vector);
+INSERT INTO stored_vector VALUES ('[1,2,3]');
+SELECT pgch_roundtrip('Array(Float32)', v) FROM stored_vector;
+ pgch_roundtrip 
+----------------
+ {1,2,3}
+(1 row)
+
+DROP TABLE stored_vector;
 -- Several rows reuse the column's conversion
 SELECT pgch_roundtrip_rows('Array(Float64)', ARRAY['[1,2]', '[3,4]']::vector[]);
  pgch_roundtrip_rows 

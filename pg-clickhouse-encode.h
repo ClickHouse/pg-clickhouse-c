@@ -1451,6 +1451,22 @@ pgch_array_from_pg(
     return PointerGetDatum(out);
 }
 
+static void
+pgch__array_free(pgch_array* arr) {
+    if (arr->ndim > 1) {
+        for (size_t i = 0; i < arr->len; i++) {
+            pgch__array_free((pgch_array*)DatumGetPointer(arr->datums[i]));
+        }
+    }
+    if (arr->datums) {
+        pfree(arr->datums);
+    }
+    if (arr->nulls) {
+        pfree(arr->nulls);
+    }
+    pfree(arr);
+}
+
 /* Return true while appending a Tuple field */
 static inline bool
 pgch__in_tuple(const pgch_writer* w) {
@@ -1559,6 +1575,9 @@ pgch__pgvector_to_float4_array(Datum val) {
         construct_array(elems, vec->dim, FLOAT4OID, sizeof(float4), true, TYPALIGN_INT);
 
     pfree(elems);
+    if ((Pointer)vec != DatumGetPointer(val)) {
+        pfree(vec);
+    }
     return PointerGetDatum(arr);
 }
 
@@ -1578,8 +1597,11 @@ pgch__append_one(
     /* pgvector casts only to real[], so convert for Float64 and BFloat16 too */
     if ((kind == CHC_ARRAY || kind == CHC_QBIT) && !isnull &&
         pgch_is_pgvector_type(valtype)) {
-        val     = pgch__pgvector_to_float4_array(val);
-        valtype = FLOAT4ARRAYOID;
+        Datum arr = pgch__pgvector_to_float4_array(val);
+
+        pgch__append_one(w, col, kind, arr, FLOAT4ARRAYOID, false);
+        pfree(DatumGetPointer(arr));
+        return;
     }
     /* Read Tuple fields from array items, including key-value pairs in Maps */
     if ((pgch__kind_takes_array(kind) || kind == CHC_TUPLE) && !isnull &&
@@ -1603,10 +1625,21 @@ pgch__append_one(
             }
         }
         if (OidIsValid(ms->element_type)) {
-            val = pgch_array_from_pg(
-                val, ms->element_type, ms->typlen, ms->typbyval, ms->typalign
-            );
-            valtype = ANYARRAYOID;
+            /* Detoast here to free the copy once by-reference items are written */
+            Datum raw = val;
+            if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(val))) {
+                raw = PointerGetDatum(PG_DETOAST_DATUM(val));
+            }
+            pgch_array* arr = (pgch_array*)DatumGetPointer(pgch_array_from_pg(
+                raw, ms->element_type, ms->typlen, ms->typbyval, ms->typalign
+            ));
+
+            pgch__append_one(w, col, kind, PointerGetDatum(arr), ANYARRAYOID, false);
+            pgch__array_free(arr);
+            if (DatumGetPointer(raw) != DatumGetPointer(val)) {
+                pfree(DatumGetPointer(raw));
+            }
+            return;
         } else if (kind == CHC_TUPLE && am->rowtype) {
             /* Read Tuple fields from composite attributes */
             HeapTupleHeader rec = DatumGetHeapTupleHeader(val);
@@ -1633,6 +1666,9 @@ pgch__append_one(
             ReleaseTupleDesc(desc);
             pfree(values);
             pfree(nulls);
+            if ((Pointer)rec != DatumGetPointer(val)) {
+                pfree(rec);
+            }
             return;
         }
     }
