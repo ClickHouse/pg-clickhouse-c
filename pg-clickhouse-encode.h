@@ -1850,7 +1850,7 @@ pgch__append_one(
             pgch__append_i32(w, col, seconds, isnull);
         } break;
         case CHC_DATETIME64: {
-            int64_t raw = 0;
+            int64 raw = 0;
 
             if (!isnull) {
                 uint32_t scale = pgch_column_datetime64_scale(w, col);
