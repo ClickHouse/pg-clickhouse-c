@@ -34,6 +34,12 @@ SELECT pgch_roundtrip_rows('Nullable(QBit(Float64, 2))',
 -- Arrays of vectors fill nested arrays, one vector per inner array
 SELECT pgch_roundtrip('Array(Array(Float32))', ARRAY['[1,2]', '[3,4]']::vector[]);
 
+-- Stored vectors arrive as a copy the encoder frees after writing
+CREATE TABLE stored_vector (v vector);
+INSERT INTO stored_vector VALUES ('[1,2,3]');
+SELECT pgch_roundtrip('Array(Float32)', v) FROM stored_vector;
+DROP TABLE stored_vector;
+
 -- Several rows reuse the column's conversion
 SELECT pgch_roundtrip_rows('Array(Float64)', ARRAY['[1,2]', '[3,4]']::vector[]);
 
