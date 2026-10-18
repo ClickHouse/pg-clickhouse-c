@@ -20,9 +20,30 @@ jobs:
         with:
           submodules: true
 
-      - uses: ./.github/actions/setup-pg
+      - uses: pgxn/postgres-action@v0
         with:
           version: ${{ matrix.pg }}
+          start: false
+
+      - name: Start PostgreSQL
+        run: |
+          set -euo pipefail
+          data=$RUNNER_TEMP/pgdata
+          # Run as checkout owner so backends can write coverage counters
+          initdb -D "$data" -A trust -U postgres
+          pg_ctl -D "$data" -l "$data/server.log" \
+            -o "-p $PGPORT -k $data -c listen_addresses=''" start
+          echo "PGHOST=$data" >> "$GITHUB_ENV"
+
+      - name: Install pgvector
+        run: |
+          set -euo pipefail
+          src=$RUNNER_TEMP/pgvector
+          git clone --quiet --depth 1 --branch v0.8.7 \
+            https://github.com/pgvector/pgvector.git "$src"
+          make -C "$src" PG_CONFIG="$PG_CONFIG"
+          # sudo drops PG_CONFIG from env
+          sudo make -C "$src" install PG_CONFIG="$PG_CONFIG"
 
       - name: Build and run regression tests
         run: |
