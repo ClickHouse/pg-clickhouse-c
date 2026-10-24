@@ -155,7 +155,11 @@ pgch_writer_flush(pgch_writer* w, pgch_buf* out, const chc_block_opts* opts);
 
 #include "access/htup_details.h"
 #include "catalog/pg_type_d.h"
+#if PG_VERSION_NUM >= 170000
+#include "common/hashfn_unstable.h"
+#else
 #include "common/hashfn.h"
+#endif
 #include "common/int.h"
 #include "fmgr.h"
 #include "parser/parse_coerce.h"
@@ -2193,7 +2197,11 @@ typedef struct pgch_lcd_entry {
 #define SH_ELEMENT_TYPE pgch_lcd_entry
 #define SH_KEY_TYPE pgch_lcd_key
 #define SH_KEY key
+#if PG_VERSION_NUM >= 170000
+#define SH_HASH_KEY(tb, key) fasthash32((const char*)(key).bytes, (key).len, 0)
+#else
 #define SH_HASH_KEY(tb, key) hash_bytes((key).bytes, (int)(key).len)
+#endif
 #define SH_EQUAL(tb, a, b)                                                             \
     ((a).len == (b).len && memcmp((a).bytes, (b).bytes, (a).len) == 0)
 #define SH_SCOPE static inline
