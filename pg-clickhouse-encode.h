@@ -2188,9 +2188,9 @@ typedef struct pgch_lcd_key {
 } pgch_lcd_key;
 
 typedef struct pgch_lcd_entry {
-    uint32 status;
     pgch_lcd_key key;
     uint32 idx;
+    char status;
 } pgch_lcd_entry;
 
 #define SH_PREFIX pgch_lcd
@@ -2233,12 +2233,7 @@ pgch__finalize_lc(pgch__node* node) {
     uint32_t dict_n     = 0;
     pgch_buf data       = {};
     pgch_buf offs       = {};
-    pgch_lcd_hash* ht =
-        n_rows
-            ? pgch_lcd_create(
-                  CurrentMemoryContext, (uint32)Min(n_rows, (size_t)PG_UINT32_MAX), NULL
-              )
-            : NULL;
+    pgch_lcd_hash* ht   = pgch_lcd_create(CurrentMemoryContext, Min(n_rows, 256), NULL);
 
     if (nullable) {
         /* ClickHouse reserves dictionary entry zero for NULL */
@@ -2269,9 +2264,7 @@ pgch__finalize_lc(pgch__node* node) {
         }
         keys[i] = entry->idx;
     }
-    if (ht) {
-        pgch_lcd_destroy(ht);
-    }
+    pgch_lcd_destroy(ht);
 
     node->lc.dict = fixed ? chc_build_fixed(data.data, v->fixed.elem_size, dict_n)
                           : chc_build_string(pgch__offs_data(&offs), data.data, dict_n);
