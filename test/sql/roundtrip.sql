@@ -97,6 +97,18 @@ SELECT pgch_roundtrip('Decimal(9,2)', 123.45::numeric),
        pgch_roundtrip('Decimal(38,10)', 12345678901234567890.0123456789::numeric),
        pgch_roundtrip('Decimal(76,20)', (-0.00000000000000000001)::numeric);
 
+-- https://github.com/ClickHouse/pg_clickhouse/issues/406
+SELECT pgch_decode_as(pgch_encode('Decimal(76,38)', 1.50::numeric), NULL::numeric),
+       pgch_decode_as(pgch_encode('Decimal(76,38)', 0::numeric), NULL::numeric),
+       pgch_decode_as(pgch_encode('Decimal(76,38)', (-123.45)::numeric), NULL::numeric);
+
+SELECT pgch_decode_as(pgch_encode('Decimal(76,38)', 1.50::numeric), NULL::numeric(40,38));
+
+SELECT pgch_decode_as(pgch_encode('Decimal128(8)', 1024.003::numeric), NULL::numeric),
+       pgch_decode_as(pgch_encode('Decimal32(4)', 98.6::numeric), NULL::numeric),
+       pgch_decode_as(pgch_encode('Decimal(76,37)', 1.50::numeric), NULL::numeric),
+       pgch_decode_as(pgch_encode('Decimal(75,38)', 1.50::numeric), NULL::numeric);
+
 SELECT pgch_roundtrip('String', 'hello'::text),
        pgch_roundtrip('String', ''::text),
        pgch_roundtrip('String', E'tab\there'::text),

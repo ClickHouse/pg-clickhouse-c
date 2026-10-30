@@ -1638,6 +1638,11 @@ pgch__convert_generic(pgch_convert_state* state, Datum val) {
 }
 
 static Datum
+pgch__convert_numeric_trim(CHC_MAYBE_UNUSED pgch_convert_state* state, Datum val) {
+    return DirectFunctionCall1(numeric_trim_scale, val);
+}
+
+static Datum
 pgch__convert_record(pgch_convert_state* state, Datum val) {
     pgch_tuple* slot = (pgch_tuple*)DatumGetPointer(val);
 
@@ -2429,6 +2434,12 @@ pgch__convert_init(
             }
             pgch__init_typmod_coerce(state);
         }
+    } else if (
+        !state->func && intype == NUMERICOID && state->typmod < 0 && ct &&
+        chc_type_decimal_precision(ct) == 76 && chc_type_decimal_scale(ct) == 38
+    ) {
+        /* pg_clickhouse uses Decimal(76, 38) for numeric without precision or scale */
+        state->func = pgch__convert_numeric_trim;
     } else if (!state->func) {
         /* Matching types may still need lower precision */
         if (!pgch__init_typmod_coerce(state)) {
