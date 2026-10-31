@@ -23,17 +23,6 @@ jobs:
       - uses: pgxn/postgres-action@v0
         with:
           version: ${{ matrix.pg }}
-          start: false
-
-      - name: Start PostgreSQL
-        run: |
-          set -euo pipefail
-          data=$RUNNER_TEMP/pgdata
-          # Run as checkout owner so backends can write coverage counters
-          initdb -D "$data" -A trust -U postgres
-          pg_ctl -D "$data" -l "$data/server.log" \
-            -o "-p $PGPORT -k $data -c listen_addresses=''" start
-          echo "PGHOST=$data" >> "$GITHUB_ENV"
 
       - name: Install pgvector
         run: |
