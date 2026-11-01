@@ -210,5 +210,17 @@ SELECT pgch_session_tz() AS utc;
 SET TimeZone = 'UTC';
 
 -- Quote column names ClickHouse cannot take bare, escaping quote and backslash
-CREATE TABLE oddnames ("a1" int, "a b" int, "q""x" int, "back\slash" int);
+CREATE TABLE oddnames ("a1" int, "a b" int, "q""x" int, "back\slash" int, "NULL" int, "inf" int, "Select" int);
 SELECT pgch_structure('oddnames');
+
+-- Quote every word ClickHouse reads as literal or keyword
+CREATE TABLE reservednames ("all" int, "Case" int, "Columns" int, "Constraint" int,
+    "Cube" int, "distinct" int, "Else" int, "End" int, "false" int, "from" int,
+    "Index" int, "inf" int, "infinity" int, "nan" int, "NoT" int, "null" int,
+    "Projection" int, "recursive" int, "rollup" int, "select" int, "some" int,
+    "table" int, "Then" int, "top" int, "true" int, "VALUES" int, "When" int);
+SELECT pgch_structure('reservednames') !~ '(^|, )[a-zA-Z]+ ' AS all_quoted;
+
+-- Keep keyword prefixes and extensions bare
+CREATE TABLE unreservednames (sel int, selectx int, infi int, null_ int, to0 int);
+SELECT pgch_structure('unreservednames');

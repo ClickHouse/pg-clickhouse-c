@@ -844,6 +844,41 @@ pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* op
     return psprintf("Nullable(%s)", base);
 }
 
+static bool
+pgch__is_reserved(const char* name) {
+    /* Breadth first trie, edge i enters state i + 1 */
+    /* BEGIN RESERVED TRIE, regenerate via tools/regen_reserved_trie.sh */
+    static const uint8_t first[] =
+        "\000\015\016\021\022\024\026\027\032\033\035\037\043\044\045\046\047\051\052"
+        "\053\054\055\056\057\061\062\063\064\065\066\067\070\071\072\073\074\075\076"
+        "\077\077\100\101\102\103\104\105\105\106\107\110\111\111\111\112\113\114\115"
+        "\116\117\120\121\121\122\123\124\124\125\126\126\127\127\130\130\131\132\132"
+        "\133\134\135\136\136\137\137\137\140\140\141\142\143\143\143\144\145\146\147"
+        "\150\150\151\152\153\154\155\156\157\157\157\157\157\160\161\162\163\164\165"
+        "\165\165\166\167\170\171\171\171\171";
+    static const uint8_t labels[] =
+        "acdefinprstvwlaouilnarnaoureoeoahorahlslnbssdlodfntlocllmbepuleeusetesmeiljul"
+        "eelneunmtiexneruceenrnicsptssacttiityivnoetn";
+    static const uint64_t terminal[] = {
+        UINT64_C(0x100e204000000000),
+        UINT64_C(0x03860780831684a9),
+    };
+    /* END RESERVED TRIE */
+    unsigned state = 0;
+
+    for (const unsigned char* p = (const unsigned char*)name; *p; p++) {
+        unsigned c = *p | 32U, edge = first[state];
+        while (edge < first[state + 1] && labels[edge] != c) {
+            edge++;
+        }
+        if (edge == first[state + 1]) {
+            return false;
+        }
+        state = edge + 1;
+    }
+    return terminal[state >> 6] >> (state & 63) & 1;
+}
+
 char*
 pgch_quote_ch_ident(const char* name) {
     bool bare = name[0] != '\0';
@@ -853,7 +888,7 @@ pgch_quote_ch_ident(const char* name) {
         bare = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_' ||
                (p != name && *p >= '0' && *p <= '9');
     }
-    if (bare) {
+    if (bare && !pgch__is_reserved(name)) {
         return pstrdup(name);
     }
 
