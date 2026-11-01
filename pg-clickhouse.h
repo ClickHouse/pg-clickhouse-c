@@ -844,6 +844,41 @@ pgch_ch_type_for(Oid typid, int32 typmod, bool notnull, const pgch_type_opts* op
     return psprintf("Nullable(%s)", base);
 }
 
+static bool
+pgch__is_reserved(const char* name) {
+    /* First letter c enters state c - 'a' */
+    /* Then breadth first, edge i enters state i + 26, uppercase edge ends word */
+    /* BEGIN RESERVED TRIE, regenerate via tools/regen_reserved_trie.sh */
+    static const uint8_t first[] =
+        "\000\001\001\004\005\007\011\011\011\012\012\012\012\012\015\015\016\016\020"
+        "\022\026\026\027\030\030\030\030\031\032\034\035\036\037\040\041\042\044\045"
+        "\046\047\050\051\052\053\054\055\056\057\060\061\062\062\063\064\065\066\067"
+        "\070\070\071\072\073\074\074\074\075\076\077\100\101\102\103\104\104\105\106"
+        "\107\107\110\111\111\112\112\113\113\114\115\115\116\117\120\121\121\122\122"
+        "\122\123\123\124\125\126\126\126\127\130\131\132\133\133\134\135\136\137\140"
+        "\141\142\142\142\142\142\143\144\145\146\147\150\150\150\151\152\153\154\154"
+        "\154\154";
+    static const uint8_t labels[] =
+        "laouilnarnaoureoeoahorahLslnbssDlodFNTlocllmbePuleEusEtEsMeiLjuleElNEuNmtiEXn"
+        "erucEenrnicsPTSSacttiiTYivnoETN";
+    /* END RESERVED TRIE */
+    unsigned state = ((unsigned char)name[0] | 32U) - 'a';
+
+    if (state >= 26) {
+        return false;
+    }
+    for (const unsigned char* p = (const unsigned char*)name + 1; *p; p++) {
+        unsigned c = *p | 32U, edge = first[state];
+        do {
+            if (edge == first[state + 1]) {
+                return false;
+            }
+        } while ((labels[edge++] | 32U) != c);
+        state = edge + 25;
+    }
+    return state >= 26 && !(labels[state - 26] & 32U);
+}
+
 char*
 pgch_quote_ch_ident(const char* name) {
     bool bare = name[0] != '\0';
@@ -853,7 +888,7 @@ pgch_quote_ch_ident(const char* name) {
         bare = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_' ||
                (p != name && *p >= '0' && *p <= '9');
     }
-    if (bare) {
+    if (bare && !pgch__is_reserved(name)) {
         return pstrdup(name);
     }
 
