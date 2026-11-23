@@ -23,6 +23,7 @@ SELECT pgch_writer_probe('checkpoint_stale');
 -- Reject ClickHouse types the parser cannot spell
 SELECT pgch_writer_probe('interval_unit');
 SELECT pgch_writer_probe('datetime64_scale');
+SELECT pgch_writer_probe('flush_mismatch');
 SELECT pgch_reader_probe('read_datetime64_scale');
 SELECT pgch_reader_probe('read_time64_scale');
 SELECT pgch_reader_probe('read_unsupported');
@@ -63,9 +64,6 @@ SELECT pgch_reader_probe('read_many_points');
 -- Keep callbacks terminal after EOF and source failure
 SELECT pgch_reader_probe('chunk_eof');
 SELECT pgch_reader_probe('chunk_error');
-
--- Reject valid types exceeding Native writer's formatting buffer
-SELECT pgch_writer_probe('flush_long_type');
 
 -- Fail each allocation in turn, recover and compare complete results
 SELECT pgch_fault_probe('append');

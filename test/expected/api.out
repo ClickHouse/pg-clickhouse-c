@@ -40,6 +40,8 @@ SELECT pgch_writer_probe('interval_unit');
 ERROR:  pgch: unsupported Interval unit "IntervalDay"
 SELECT pgch_writer_probe('datetime64_scale');
 ERROR:  pgch: DateTime64(3) scale 10 out of range
+SELECT pgch_writer_probe('flush_mismatch');
+ERROR:  pgch: block write: column layout does not match type Int32
 SELECT pgch_reader_probe('read_datetime64_scale');
 ERROR:  pgch: DateTime64 scale 10 out of range
 SELECT pgch_reader_probe('read_time64_scale');
@@ -113,9 +115,6 @@ SELECT pgch_reader_probe('chunk_error');
  ok
 (1 row)
 
--- Reject valid types exceeding Native writer's formatting buffer
-SELECT pgch_writer_probe('flush_long_type');
-ERROR:  pgch: block write: type name too long for inline buffer
 -- Fail each allocation in turn, recover and compare complete results
 SELECT pgch_fault_probe('append');
  pgch_fault_probe 
