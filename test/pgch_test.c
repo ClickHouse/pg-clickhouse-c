@@ -1276,14 +1276,6 @@ pgch_writer_probe(PG_FUNCTION_ARGS) {
         pgch_tuple_end(w);
         pgch_append_datum(w, 5, CStringGetTextDatum("l"), TEXTOID, false);
         PG_RETURN_TEXT_P(cstring_to_text(psprintf("bytes %zu", pgch_writer_bytes(w))));
-    } else if (strcmp(what, "flush_long_type") == 0) {
-        char label[301];
-        pgch_buf out = {};
-
-        memset(label, 'x', sizeof(label) - 1);
-        label[sizeof(label) - 1] = '\0';
-        w = writer_for_decl(psprintf("Enum8('%s'=1)", label), "c");
-        pgch_writer_flush(w, &out, NULL);
     } else if (strcmp(what, "interval_unit") == 0) {
         chc_type* t  = parse_ch_type_cstr("IntervalDay", NULL);
         pgch_col col = { .name = "c", .name_len = 1, .type = t };
@@ -1293,6 +1285,16 @@ pgch_writer_probe(PG_FUNCTION_ARGS) {
         t->interval = CHC_INTERVAL_NONE;
         w           = pgch_writer_new(CurrentMemoryContext, &col, 1);
         pgch_append_datum(w, 0, IntervalPGetDatum(iv), INTERVALOID, false);
+    } else if (strcmp(what, "flush_mismatch") == 0) {
+        chc_type* t  = parse_ch_type_cstr("Int32", NULL);
+        pgch_col col = { .name = "c", .name_len = 1, .type = t };
+        pgch_buf out = {};
+
+        w = pgch_writer_new(CurrentMemoryContext, &col, 1);
+        append_int(w, 0, 1);
+        /* Writer built fixed width column, retyping leaves Native writer a mismatch */
+        t->kind = CHC_STRING;
+        pgch_writer_flush(w, &out, NULL);
     } else if (strcmp(what, "datetime64_scale") == 0) {
         chc_type* t  = parse_ch_type_cstr("DateTime64(3)", NULL);
         pgch_col col = { .name = "c", .name_len = 1, .type = t };

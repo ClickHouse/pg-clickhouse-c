@@ -1266,10 +1266,6 @@ pgch__check_type(const chc_type* type) {
     case CHC_SIMPLE_AGGREGATE_FUNCTION:
         return pgch__check_type(chc_type_child(type, 0));
     case CHC_MAP:
-        if (chc_type_n_children(type) != 2) {
-            return "returned map wants key and value";
-        }
-        CHC_FALLTHROUGH;
     case CHC_NESTED:
     case CHC_TUPLE: {
         size_t n = chc_type_n_children(type);

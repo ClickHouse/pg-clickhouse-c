@@ -435,21 +435,13 @@ pgch__node_new(const chc_type* t) {
         pgch__tuple_fill(n, t, arity);
         return n;
     }
-    case CHC_MAP:
-        if (chc_type_n_children(t) != 2) {
-            pgch_error(ERRCODE_FDW_INVALID_DATA_TYPE, "Map wants key and value");
-        }
-        CHC_FALLTHROUGH;
     /* clickhouse-c encodes Map and Nested without an intermediate Tuple node */
+    case CHC_MAP:
     case CHC_NESTED: {
-        size_t arity        = chc_type_n_children(t);
         pgch__node* entries = palloc0(sizeof(pgch__node));
 
-        if (arity == 0) {
-            pgch_error(ERRCODE_FDW_INVALID_DATA_TYPE, "Nested column has no fields");
-        }
         entries->kind = CHC_TUPLE;
-        pgch__tuple_fill(entries, t, arity);
+        pgch__tuple_fill(entries, t, chc_type_n_children(t));
         n->layout       = CHC_COL_ARRAY;
         n->array.values = entries;
         return n;

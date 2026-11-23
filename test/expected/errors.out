@@ -63,11 +63,11 @@ ERROR:  pgch: Tuple requires 2 values, got 1
 SELECT pgch_encode('Map(String, Int64)', ARRAY[ROW('a', 1, 2)]);
 ERROR:  pgch: Tuple takes 2 values
 SELECT pgch_encode('Map(String)', ARRAY[ROW('a', 1)]);
-ERROR:  pgch: Map wants key and value
+ERROR:  pgch: Map: wrong number of argument types (column c)
 SELECT pgch_encode('Nested(k String, v Int64)', ARRAY[ROW('a')]);
 ERROR:  pgch: Tuple requires 2 values, got 1
 SELECT pgch_encode('Nested', ARRAY['a']::text[]);
-ERROR:  pgch: Nested column has no fields
+ERROR:  pgch: Nested: wrong number of argument types (column c)
 -- Reject invalid Map arrays
 SELECT pgch_encode('Map(String, Int64)', ARRAY['a', '1']::text[]);
 ERROR:  pgch: cannot encode text into ClickHouse Map(String, Int64) (column "c")
@@ -86,9 +86,9 @@ ERROR:  pgch: unknown type: Nonsense
 SELECT pgch_decode(pgch_block('Tuple()', 0, ''::bytea));
 ERROR:  decode: returned tuple is empty (column "c")
 SELECT pgch_decode(pgch_block('Map(String)', 0, ''::bytea));
-ERROR:  decode: returned map wants key and value (column "c")
+ERROR:  decode: Map: wrong number of argument types
 SELECT pgch_decode(pgch_block('Nested', 0, ''::bytea));
-ERROR:  decode: returned tuple is empty (column "c")
+ERROR:  decode: Nested: wrong number of argument types
 SELECT pgch_decode(pgch_block('Nested(a Dynamic)', 0, ''::bytea));
 ERROR:  decode: unsupported column type "Dynamic" (column "c")
 SELECT pgch_decode(pgch_block('SimpleAggregateFunction(anyLast, Dynamic)', 0,

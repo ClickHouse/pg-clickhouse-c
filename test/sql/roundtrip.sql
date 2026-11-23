@@ -496,7 +496,8 @@ SELECT pgch_roundtrip('Int32', true) AS bool,
 SELECT pgch_roundtrip('DateTime', '2020-01-02 03:04:05'::timestamp) AS datetime,
        pgch_roundtrip('DateTime64(3)', '2020-01-02 03:04:05.5'::timestamp) AS scaled,
        pgch_roundtrip('DateTime64(3)',
-                      '1900-01-01 00:00:00.5'::timestamptz) AS before_epoch;
+                      '1900-01-01 00:00:00.5'::timestamptz) AS before_epoch,
+       pgch_roundtrip('Nullable(DateTime)', NULL::timestamp) IS NULL AS is_null;
 
 -- Take the midpoint of a two-point list as a Point
 SELECT pgch_roundtrip('Point', '[(0,0),(1,1)]'::lseg) AS lseg,
